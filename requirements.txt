@@ -1,0 +1,7 @@
+numpy>=1.24.0
+h5py>=3.8.0
+pco>=0.1.7; sys_platform == 'win32' or sys_platform == 'linux'
+PyQt6>=6.4.0
+matplotlib>=3.7.0
+pytest>=7.0.0
+

@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hhg-control"
+version = "0.1.0"
+description = "HHG Lab Instrumentation Control Package"
+authors = [{ name = "HHG Lab" }]
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24.0",
+    "h5py>=3.8.0",
+    "PyQt6>=6.4.0",
+    "matplotlib>=3.7.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
