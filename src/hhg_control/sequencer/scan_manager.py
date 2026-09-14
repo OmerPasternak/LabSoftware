@@ -3,6 +3,7 @@ Experiment Sequencer & Data Storage.
 Handles step acquisitions and records multi-frame HDF5 datasets compatible with MATLAB.
 """
 
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 import h5py
@@ -91,4 +92,37 @@ class CameraScanManager:
             h5f.attrs["sensor_pixel_height"] = int(sensor_info.get("height", images.shape[1]))
 
         return filepath, images[-1]
+
+    def execute_scan(
+        self,
+        experiment_name: str,
+        param_name: str,
+        start_value: float,
+        step_size: float,
+        num_steps: int,
+        num_frames: int,
+    ) -> Iterator[tuple[int, float, Path, np.ndarray]]:
+        """
+        Execute a multi-step scan sequence from step 0 to num_steps - 1.
+
+        Yields:
+            tuple[int, float, Path, np.ndarray]:
+                (step_index, param_setpoint_value, h5_filepath, latest_frame)
+                at each completed step.
+        """
+        if not self.camera.is_connected:
+            raise RuntimeError("Cannot execute scan: Camera is disconnected.")
+        if num_steps < 1:
+            raise ValueError(f"Number of steps must be at least 1, got {num_steps}.")
+
+        for step in range(num_steps):
+            val = start_value + step * step_size
+            filepath, latest_frame = self.acquire_and_save_step(
+                experiment_name=experiment_name,
+                step_index=step,
+                param_name=param_name,
+                param_value=val,
+                num_frames=num_frames
+            )
+            yield step, val, filepath, latest_frame
 

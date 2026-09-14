@@ -29,64 +29,88 @@ from ..drivers.mock_camera import MockPcoCamera
 from ..sequencer.scan_manager import CameraScanManager
 
 
-class AcquisitionTask(QThread):
+class PreviewTask(QThread):
     """
-    Dedicated background worker thread for camera frame acquisition and HDF5 file I/O.
-    Eliminates UI freeze during exposures or multi-frame measurements.
+    Background worker thread for capturing a single live preview frame without writing to disk.
+    Keeps the GUI responsive during exposure.
     """
-    frame_ready = pyqtSignal(np.ndarray, str, bool)  # (frame_data, log_message, is_saved_step)
+    frame_ready = pyqtSignal(np.ndarray)
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self, camera: BaseCamera) -> None:
+        super().__init__()
+        self.camera = camera
+
+    def run(self) -> None:
+        try:
+            images, _ = self.camera.acquire_frames(num_frames=1)
+            self.frame_ready.emit(images[0])
+        except Exception as exc:
+            self.error_occurred.emit(str(exc))
+
+
+class ScanSequenceTask(QThread):
+    """
+    Dedicated background worker thread for executing a full multi-step scan sequence.
+    Iterates from step 0 to num_steps - 1, recording and saving HDF5 datasets at each step.
+    Supports graceful abort requests without corrupting files or hardware state.
+    """
+    step_completed = pyqtSignal(int, int, float, str, np.ndarray, Path)
+    scan_finished = pyqtSignal(int)
+    scan_aborted = pyqtSignal(int)
     error_occurred = pyqtSignal(str)
 
     def __init__(
         self,
         scan_mgr: CameraScanManager,
         exp_name: str,
-        step_idx: int,
         param_name: str,
-        param_val: float,
+        start_val: float,
+        step_size: float,
+        num_steps: int,
         num_frames: int,
-        save_to_disk: bool
     ) -> None:
         super().__init__()
         self.scan_mgr = scan_mgr
         self.exp_name = exp_name
-        self.step_idx = step_idx
         self.param_name = param_name
-        self.param_val = param_val
+        self.start_val = start_val
+        self.step_size = step_size
+        self.num_steps = num_steps
         self.num_frames = num_frames
-        self.save_to_disk = save_to_disk
+        self._abort_requested = False
+
+    def request_abort(self) -> None:
+        """Signal the scan loop to stop gracefully after completing the current step."""
+        self._abort_requested = True
+
+    @property
+    def is_abort_requested(self) -> bool:
+        return self._abort_requested
 
     def run(self) -> None:
         try:
-            if self.save_to_disk:
-                # -----------------------------------------------------------------
-                # DATA ACQUISITION & HDF5 PERSISTENCE:
-                # When connected to the simulated camera, MockPcoCamera generates:
-                #   - 16-bit uint16 image stack of shape (num_frames, 2160, 2560)
-                #   - Synthetic 2D Gaussian beam spot + Poisson shot noise + Dark counts
-                # This array is directly written into the HDF5 dataset '/images'
-                # alongside experiment parameters and saved to the target directory.
-                # -----------------------------------------------------------------
-                h5_path, latest_frame = self.scan_mgr.acquire_and_save_step(
-                    experiment_name=self.exp_name,
-                    step_index=self.step_idx,
-                    param_name=self.param_name,
-                    param_value=self.param_val,
-                    num_frames=self.num_frames
+            steps_done = 0
+            for step, val, filepath, latest_frame in self.scan_mgr.execute_scan(
+                experiment_name=self.exp_name,
+                param_name=self.param_name,
+                start_value=self.start_val,
+                step_size=self.step_size,
+                num_steps=self.num_steps,
+                num_frames=self.num_frames,
+            ):
+                steps_done += 1
+                self.step_completed.emit(
+                    step, self.num_steps, val, self.param_name, latest_frame, filepath
                 )
-                file_size_mb = h5_path.stat().st_size / (1024 * 1024)
-                msg = (
-                    f"[FILE SAVED] Step {self.step_idx} written to: {h5_path.resolve()}\n"
-                    f"             Size: {file_size_mb:.2f} MB | {self.num_frames} frames | "
-                    f"{self.param_name} = {self.param_val:.4f}"
-                )
-                self.frame_ready.emit(latest_frame, msg, True)
-            else:
-                images, _ = self.scan_mgr.camera.acquire_frames(num_frames=1)
-                msg = "[PREVIEW] Single frame captured and displayed (not written to disk)."
-                self.frame_ready.emit(images[0], msg, False)
+                if self._abort_requested:
+                    self.scan_aborted.emit(steps_done)
+                    return
+
+            self.scan_finished.emit(self.num_steps)
         except Exception as exc:
             self.error_occurred.emit(str(exc))
+
 
 
 class CameraMainWindow(QMainWindow):
@@ -104,10 +128,10 @@ class CameraMainWindow(QMainWindow):
         self.scan_manager = CameraScanManager(camera=self.camera, storage_dir=default_storage)
 
         # Thread management
-        self.active_task: Optional[AcquisitionTask] = None
+        self.active_scan_task: Optional[ScanSequenceTask] = None
+        self.active_preview_task: Optional[PreviewTask] = None
 
-        # Scan state
-        self._current_step: int = 0
+        # State tracking
         self._is_updating_range: bool = False
 
         # Matplotlib display artist cache
@@ -189,7 +213,7 @@ class CameraMainWindow(QMainWindow):
         self.btn_preview.setEnabled(False)
         self.btn_preview.setStyleSheet("padding: 5px;")
         self.btn_preview.setToolTip("Acquire a single frame and refresh the live monitor without saving to disk.")
-        self.btn_preview.clicked.connect(lambda: self._start_acquisition(save_to_disk=False))
+        self.btn_preview.clicked.connect(self._capture_preview)
         lay_acq.addWidget(self.btn_preview)
         left_panel.addWidget(grp_acq)
 
@@ -293,7 +317,7 @@ class CameraMainWindow(QMainWindow):
         lay_exp.addLayout(grid_exp)
 
         # Scan Progress Line (Styled identically to the status indicators)
-        self.lbl_scan_progress = QLabel("Scan Progress: Step 0 of 10 | Current Setpoint: 0.0000")
+        self.lbl_scan_progress = QLabel("Scan Progress: Ready (0 of 10 steps) | Delay Stage (mm): 0.0000")
         self.lbl_scan_progress.setStyleSheet("font-weight: bold; font-size: 12px; color: #0d6efd; padding: 2px 0px;")
         lay_exp.addWidget(self.lbl_scan_progress)
 
@@ -304,15 +328,9 @@ class CameraMainWindow(QMainWindow):
             "font-weight: bold; font-size: 13px; background-color: #0d6efd; color: white; padding: 8px;"
         )
         self.btn_take_measurement.setEnabled(False)
-        self.btn_take_measurement.setToolTip("Acquire measurements for this step, save HDF5, and advance to next step.")
-        self.btn_take_measurement.clicked.connect(lambda: self._start_acquisition(save_to_disk=True))
-        lay_buttons.addWidget(self.btn_take_measurement, stretch=2)
-
-        self.btn_reset_scan = QPushButton("Reset to Step 0")
-        self.btn_reset_scan.setStyleSheet("padding: 8px;")
-        self.btn_reset_scan.setToolTip("Reset the step index counter back to 0.")
-        self.btn_reset_scan.clicked.connect(self._reset_scan)
-        lay_buttons.addWidget(self.btn_reset_scan, stretch=1)
+        self.btn_take_measurement.setToolTip("Start automated experiment scan through all steps until the end.")
+        self.btn_take_measurement.clicked.connect(self._toggle_measurement_scan)
+        lay_buttons.addWidget(self.btn_take_measurement)
         lay_exp.addLayout(lay_buttons)
 
         left_panel.addWidget(grp_exp)
@@ -428,27 +446,15 @@ class CameraMainWindow(QMainWindow):
             self._is_updating_range = False
 
     def _update_progress_display(self) -> None:
-        """Update the scan progress text line (Current Step Index & Parameter Setpoint)."""
+        """Update the scan progress text line when configuration parameters change."""
+        if self.active_scan_task is not None and self.active_scan_task.isRunning():
+            return
         start = self.spn_start_val.value()
-        step_size = self.spn_step_size.value()
         total_steps = self.spn_num_steps.value()
-        curr_step = min(self._current_step, total_steps)
-        curr_val = start + (curr_step * step_size)
         param_name = self.txt_scan_param.text().strip() or "Setpoint"
         self.lbl_scan_progress.setText(
-            f"Scan Progress: Step {curr_step} of {total_steps} | {param_name}: {curr_val:.4f}"
+            f"Scan Progress: Ready (0 of {total_steps} steps) | {param_name}: {start:.4f}"
         )
-
-    def _get_current_param_value(self) -> float:
-        start = self.spn_start_val.value()
-        step_size = self.spn_step_size.value()
-        return start + (self._current_step * step_size)
-
-    def _reset_scan(self) -> None:
-        """Reset step counter back to 0."""
-        self._current_step = 0
-        self._update_progress_display()
-        self._append_log("[RESET] Scan sequence reset to Step 0.")
 
     # =========================================================================
     # Storage Directory Handlers
@@ -552,77 +558,205 @@ class CameraMainWindow(QMainWindow):
     # =========================================================================
     # Acquisition Worker Thread Management
     # =========================================================================
-    def _start_acquisition(self, save_to_disk: bool) -> None:
-        """Launch background acquisition task with robust thread management."""
+    # =========================================================================
+    # Live Preview and Automated Scan Execution
+    # =========================================================================
+    def _capture_preview(self) -> None:
+        """Capture a single preview frame for the live monitor without saving to disk."""
+        if not self.camera.is_connected:
+            return
+        if self.active_preview_task is not None and self.active_preview_task.isRunning():
+            return
+        if self.active_scan_task is not None and self.active_scan_task.isRunning():
+            return
+
+        self.btn_preview.setEnabled(False)
+        self.btn_take_measurement.setEnabled(False)
+        self.lbl_task_status.setText("System Status: Capturing Live Preview...")
+        self.lbl_task_status.setStyleSheet("font-weight: bold; font-size: 12px; color: #0d6efd;")
+
+        self.active_preview_task = PreviewTask(camera=self.camera)
+        self.active_preview_task.frame_ready.connect(self._on_preview_frame_ready)
+        self.active_preview_task.error_occurred.connect(self._on_scan_error)
+        self.active_preview_task.finished.connect(self._on_preview_task_finished)
+        self.active_preview_task.start()
+
+    def _on_preview_frame_ready(self, frame: np.ndarray) -> None:
+        self._update_display(frame)
+        self._append_log("[PREVIEW] Single preview frame captured and displayed (not saved to disk).")
+
+    def _on_preview_task_finished(self) -> None:
+        if self.active_preview_task is not None:
+            self.active_preview_task.deleteLater()
+            self.active_preview_task = None
+        if self.camera.is_connected and (self.active_scan_task is None or not self.active_scan_task.isRunning()):
+            self.btn_preview.setEnabled(True)
+            self.btn_take_measurement.setEnabled(True)
+            self.lbl_task_status.setText("System Status: Idle / Ready")
+            self.lbl_task_status.setStyleSheet("font-weight: bold; font-size: 12px; color: #198754;")
+
+    def _toggle_measurement_scan(self) -> None:
+        """
+        Start full multi-step scan sequence until its end,
+        or stop an in-progress scan gracefully.
+        """
         if not self.camera.is_connected:
             return
 
-        if self.active_task is not None and self.active_task.isRunning():
-            self._append_log("[WARNING] Acquisition already in progress. Ignoring duplicate click.")
+        # If scan is already running, this button functions as "Stop Measurement"
+        if self.active_scan_task is not None and self.active_scan_task.isRunning():
+            self.btn_take_measurement.setEnabled(False)
+            self.btn_take_measurement.setText("Stopping...")
+            self.lbl_task_status.setText("System Status: Abort requested. Finalizing current step...")
+            self._append_log("[ABORT] User requested scan stop. Finalizing current step before stopping...")
+            self.active_scan_task.request_abort()
             return
 
+        # Prepare storage directory
         target_dir = Path(self.txt_storage_dir.text().strip()).expanduser().resolve()
         target_dir.mkdir(parents=True, exist_ok=True)
         self.scan_manager.set_storage_dir(target_dir)
 
-        self.btn_preview.setEnabled(False)
-        self.btn_take_measurement.setEnabled(False)
-        self.btn_connect.setEnabled(False)
-        self.spn_exposure.setEnabled(False)
-        self.spn_frames.setEnabled(False)
+        # Set UI to running scan state
+        self._set_ui_scanning_state(is_scanning=True)
 
-        action_desc = "Recording & Saving HDF5 Dataset" if save_to_disk else "Capturing Live Preview"
-        self.lbl_task_status.setText(f"System Status: In Progress [{action_desc}]...")
-        self.lbl_task_status.setStyleSheet("font-weight: bold; font-size: 12px; color: #0d6efd;")
+        exp_name = self.txt_file_header.text().strip() or "HHG_Scan"
+        param_name = self.txt_scan_param.text().strip() or "Setpoint"
+        start_val = self.spn_start_val.value()
+        step_size = self.spn_step_size.value()
+        num_steps = self.spn_num_steps.value()
+        num_frames = self.spn_frames.value()
+        end_val = self.spn_end_val.value()
 
-        current_val = self._get_current_param_value()
-
-        self.active_task = AcquisitionTask(
-            scan_mgr=self.scan_manager,
-            exp_name=self.txt_file_header.text(),
-            step_idx=self._current_step,
-            param_name=self.txt_scan_param.text(),
-            param_val=current_val,
-            num_frames=self.spn_frames.value(),
-            save_to_disk=save_to_disk
+        self._append_log(
+            f"[SCAN START] Initiating automated scan: {num_steps} steps from {start_val:.4f} "
+            f"to {end_val:.4f} (Step Size: {step_size:.4f})\n"
+            f"             Scanning parameter: '{param_name}' | Measurements per step: {num_frames}"
         )
 
-        self.active_task.frame_ready.connect(self._on_acquisition_frame_ready)
-        self.active_task.error_occurred.connect(self._on_acquisition_error)
-        self.active_task.finished.connect(self._on_acquisition_task_finished)
-        self.active_task.start()
+        self.active_scan_task = ScanSequenceTask(
+            scan_mgr=self.scan_manager,
+            exp_name=exp_name,
+            param_name=param_name,
+            start_val=start_val,
+            step_size=step_size,
+            num_steps=num_steps,
+            num_frames=num_frames,
+        )
+        self.active_scan_task.step_completed.connect(self._on_scan_step_completed)
+        self.active_scan_task.scan_finished.connect(self._on_scan_finished)
+        self.active_scan_task.scan_aborted.connect(self._on_scan_aborted)
+        self.active_scan_task.error_occurred.connect(self._on_scan_error)
+        self.active_scan_task.finished.connect(self._on_scan_task_finished)
+        self.active_scan_task.start()
 
-    def _on_acquisition_frame_ready(self, frame_2d: np.ndarray, log_msg: str, is_saved_step: bool) -> None:
-        """Receive frame and confirmation from background thread."""
-        self._append_log(log_msg)
-        self._update_display(frame_2d)
-
-        if is_saved_step:
-            self._current_step += 1
-            total_steps = self.spn_num_steps.value()
-            self._update_progress_display()
-            if self._current_step >= total_steps:
-                self._append_log(f"[SCAN COMPLETE] All {total_steps} planned steps have been measured.")
-
-    def _on_acquisition_error(self, err_message: str) -> None:
-        """Handle acquisition failure reported from background thread."""
-        self._append_log(f"[ERROR] Acquisition task failed: {err_message}")
-        QMessageBox.warning(self, "Acquisition Error", f"Acquisition failed:\n\n{err_message}")
-
-    def _on_acquisition_task_finished(self) -> None:
-        """Cleanup worker thread and re-enable UI interaction."""
-        if self.active_task is not None:
-            self.active_task.deleteLater()
-            self.active_task = None
-
-        if self.camera.is_connected:
-            self.btn_preview.setEnabled(True)
+    def _set_ui_scanning_state(self, is_scanning: bool) -> None:
+        """Update button styles and lock/unlock configuration widgets during scans."""
+        if is_scanning:
+            self.btn_take_measurement.setText("Stop Measurement")
+            self.btn_take_measurement.setStyleSheet(
+                "font-weight: bold; font-size: 13px; background-color: #dc3545; color: white; padding: 8px;"
+            )
+            self.btn_take_measurement.setToolTip("Safely abort the experiment scan after the current step.")
             self.btn_take_measurement.setEnabled(True)
+
+            self.btn_preview.setEnabled(False)
+            self.btn_connect.setEnabled(False)
+            self.spn_exposure.setEnabled(False)
+            self.spn_frames.setEnabled(False)
+            self.spn_start_val.setEnabled(False)
+            self.spn_end_val.setEnabled(False)
+            self.spn_step_size.setEnabled(False)
+            self.spn_num_steps.setEnabled(False)
+            self.txt_storage_dir.setEnabled(False)
+            self.txt_file_header.setEnabled(False)
+            self.txt_scan_param.setEnabled(False)
+            self.btn_browse.setEnabled(False)
+
+            self.lbl_task_status.setText("System Status: Scan in Progress...")
+            self.lbl_task_status.setStyleSheet("font-weight: bold; font-size: 12px; color: #0d6efd;")
+        else:
+            self.btn_take_measurement.setText("Take Measurement")
+            self.btn_take_measurement.setStyleSheet(
+                "font-weight: bold; font-size: 13px; background-color: #0d6efd; color: white; padding: 8px;"
+            )
+            self.btn_take_measurement.setToolTip("Start automated experiment scan through all steps until the end.")
+            self.btn_take_measurement.setEnabled(self.camera.is_connected)
+
+            self.btn_preview.setEnabled(self.camera.is_connected)
             self.btn_connect.setEnabled(True)
             self.spn_exposure.setEnabled(True)
             self.spn_frames.setEnabled(True)
-            self.lbl_task_status.setText("System Status: Idle / Ready")
-            self.lbl_task_status.setStyleSheet("font-weight: bold; font-size: 12px; color: #198754;")
+            self.spn_start_val.setEnabled(True)
+            self.spn_end_val.setEnabled(True)
+            self.spn_step_size.setEnabled(True)
+            self.spn_num_steps.setEnabled(True)
+            self.txt_storage_dir.setEnabled(True)
+            self.txt_file_header.setEnabled(True)
+            self.txt_scan_param.setEnabled(True)
+            self.btn_browse.setEnabled(True)
+
+    def _on_scan_step_completed(
+        self,
+        step_idx: int,
+        total_steps: int,
+        param_val: float,
+        param_name: str,
+        latest_frame: np.ndarray,
+        h5_path: Path
+    ) -> None:
+        """Handle completion of an individual scan step."""
+        file_size_mb = h5_path.stat().st_size / (1024 * 1024)
+        self._append_log(
+            f"[FILE SAVED] Step {step_idx}/{total_steps - 1} written to: {h5_path.resolve()}\n"
+            f"             Size: {file_size_mb:.2f} MB | {self.spn_frames.value()} frames | "
+            f"{param_name} = {param_val:.4f}"
+        )
+        self._update_display(latest_frame)
+
+        self.lbl_scan_progress.setText(
+            f"Scan Progress: Step {step_idx + 1} of {total_steps} | {param_name}: {param_val:.4f}"
+        )
+
+        if step_idx + 1 < total_steps:
+            self.lbl_task_status.setText(
+                f"System Status: In Progress [Measuring Step {step_idx + 2} of {total_steps}]..."
+            )
+
+    def _on_scan_finished(self, total_steps: int) -> None:
+        """Called when all steps in the scan sequence finish."""
+        end_val = self.spn_end_val.value()
+        param_name = self.txt_scan_param.text().strip() or "Setpoint"
+        self.lbl_scan_progress.setText(
+            f"Scan Progress: Completed all {total_steps} steps | {param_name}: {end_val:.4f}"
+        )
+        self.lbl_task_status.setText(f"System Status: Scan Completed Successfully ({total_steps} steps saved)")
+        self.lbl_task_status.setStyleSheet("font-weight: bold; font-size: 12px; color: #198754;")
+        self._append_log(f"[SCAN COMPLETE] All {total_steps} planned steps successfully measured and saved to disk.")
+
+    def _on_scan_aborted(self, steps_done: int) -> None:
+        """Called when scan is safely stopped before reaching the end."""
+        total_steps = self.spn_num_steps.value()
+        self.lbl_scan_progress.setText(
+            f"Scan Progress: Stopped at {steps_done} of {total_steps} steps"
+        )
+        self.lbl_task_status.setText(f"System Status: Scan Stopped by User ({steps_done} steps saved)")
+        self.lbl_task_status.setStyleSheet("font-weight: bold; font-size: 12px; color: #d97706;")
+        self._append_log(f"[SCAN ABORTED] Scan stopped by user after step {steps_done - 1} ({steps_done} files saved).")
+
+    def _on_scan_error(self, err_message: str) -> None:
+        """Handle unexpected scan error."""
+        self._append_log(f"[ERROR] Scan execution error: {err_message}")
+        self.lbl_task_status.setText("System Status: Scan Error")
+        self.lbl_task_status.setStyleSheet("font-weight: bold; font-size: 12px; color: #dc3545;")
+        QMessageBox.warning(self, "Scan Execution Error", f"Scan error occurred:\n\n{err_message}")
+
+    def _on_scan_task_finished(self) -> None:
+        """Cleanup thread and restore UI controls."""
+        if self.active_scan_task is not None:
+            self.active_scan_task.deleteLater()
+            self.active_scan_task = None
+        self._set_ui_scanning_state(is_scanning=False)
 
     def _update_display(self, frame: np.ndarray) -> None:
         """Update live image canvas safely without re-creating axes or leaking memory."""
@@ -659,9 +793,13 @@ class CameraMainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         """Ensure clean shutdown of active threads and hardware handles before closing."""
-        if self.active_task is not None and self.active_task.isRunning():
-            self._append_log("[SHUTDOWN] Waiting for active background acquisition to finalize...")
-            self.active_task.wait(3000)
+        if self.active_scan_task is not None and self.active_scan_task.isRunning():
+            self._append_log("[SHUTDOWN] Aborting active scan before window close...")
+            self.active_scan_task.request_abort()
+            self.active_scan_task.wait(3000)
+
+        if self.active_preview_task is not None and self.active_preview_task.isRunning():
+            self.active_preview_task.wait(2000)
 
         if self.camera.is_connected:
             self.camera.close()

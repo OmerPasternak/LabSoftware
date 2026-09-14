@@ -50,3 +50,35 @@ def test_scan_step_hdf5_output(tmp_path):
 
     cam.close()
 
+
+def test_execute_scan_full_sequence(tmp_path):
+    """Test full multi-step automated scan sequence execution."""
+    cam = MockPcoCamera(fast_simulation=True)
+    cam.connect()
+    scan_mgr = CameraScanManager(camera=cam, storage_dir=tmp_path)
+
+    results = list(
+        scan_mgr.execute_scan(
+            experiment_name="full_scan_test",
+            param_name="stage_pos_mm",
+            start_value=10.0,
+            step_size=0.5,
+            num_steps=4,
+            num_frames=2
+        )
+    )
+
+    assert len(results) == 4
+    for idx, (step, val, filepath, frame) in enumerate(results):
+        assert step == idx
+        assert pytest.approx(val, 1e-4) == 10.0 + idx * 0.5
+        assert filepath.exists()
+        assert frame.shape == (2160, 2560)
+
+        with h5py.File(filepath, "r") as h5f:
+            assert h5f.attrs["scan_step_index"] == idx
+            assert pytest.approx(h5f.attrs["scan_parameter_setpoint_value"], 1e-4) == 10.0 + idx * 0.5
+            assert h5f["images"].shape == (2, 2160, 2560)
+
+    cam.close()
+
