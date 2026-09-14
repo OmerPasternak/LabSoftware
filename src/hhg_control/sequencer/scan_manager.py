@@ -29,10 +29,14 @@ class CameraScanManager:
         param_name: str,
         param_value: float,
         num_frames: int
-    ) -> Path:
+    ) -> tuple[Path, np.ndarray]:
         """
         Acquire N frames at a given scan step and persist them to an HDF5 file.
         Output format: <storage_dir>/<experiment_name>_step_<step_index:04d>.h5
+        
+        Returns:
+            filepath: Path to the generated HDF5 file.
+            latest_frame: 2D numpy array (uint16) of the last acquired frame for live display.
         """
         if not self.camera.is_connected:
             raise RuntimeError("Cannot execute scan step: Camera is disconnected.")
@@ -55,20 +59,36 @@ class CameraScanManager:
                 compression="gzip",
                 compression_opts=1
             )
-            dset.attrs["units"] = "counts"
+            # Dataset descriptive metadata
+            dset.attrs["units"] = "16-bit digital counts (ADU)"
+            dset.attrs["physical_units"] = "16-bit digital counts (ADU)"
             dset.attrs["dimension_order"] = "[frame, y, x]"
+            dset.attrs["data_dimension_ordering"] = "[frame_index, sensor_height_y, sensor_width_x]"
+            dset.attrs["description"] = "Raw 16-bit sCMOS image stack recorded at this scan step"
 
+            # File-level descriptive metadata (includes legacy keys for MATLAB pipeline compatibility)
             h5f.attrs["experiment_name"] = clean_exp
+            h5f.attrs["experiment_identifier"] = clean_exp
             h5f.attrs["step_index"] = int(step_index)
+            h5f.attrs["scan_step_index"] = int(step_index)
             h5f.attrs["scan_parameter_name"] = str(param_name)
+            h5f.attrs["scan_parameter_display_name"] = str(param_name)
             h5f.attrs["scan_parameter_value"] = float(param_value)
+            h5f.attrs["scan_parameter_setpoint_value"] = float(param_value)
             h5f.attrs["exposure_time_s"] = float(exposure_s)
+            h5f.attrs["exposure_duration_seconds"] = float(exposure_s)
             h5f.attrs["num_frames"] = int(num_frames)
+            h5f.attrs["frame_accumulation_count"] = int(num_frames)
             h5f.attrs["timestamp_utc"] = timestamp_str
+            h5f.attrs["acquisition_timestamp_utc_iso8601"] = timestamp_str
             h5f.attrs["camera_model"] = str(sensor_info.get("model", "pco.edge"))
+            h5f.attrs["camera_manufacturer_and_model"] = str(sensor_info.get("model", "pco.edge"))
             h5f.attrs["camera_serial"] = str(sensor_info.get("serial_number", "UNKNOWN"))
+            h5f.attrs["camera_hardware_serial_number"] = str(sensor_info.get("serial_number", "UNKNOWN"))
             h5f.attrs["sensor_width"] = int(sensor_info.get("width", images.shape[2]))
+            h5f.attrs["sensor_pixel_width"] = int(sensor_info.get("width", images.shape[2]))
             h5f.attrs["sensor_height"] = int(sensor_info.get("height", images.shape[1]))
+            h5f.attrs["sensor_pixel_height"] = int(sensor_info.get("height", images.shape[1]))
 
-        return filepath
+        return filepath, images[-1]
 
