@@ -58,3 +58,4 @@ def test_acquire_and_compute_g2_mock_camera():
     assert 0.95 <= stats["g2_center"] <= 1.05
 
     cam.close()
+

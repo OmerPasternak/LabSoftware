@@ -4,10 +4,12 @@ Provides routines to calculate normalized intensity autocorrelation maps g^(2)(0
 per pixel across acquired camera frame stacks.
 """
 
+from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
 import numpy as np
 
 from ..drivers.base_camera import BaseCamera
+from .hdf5_io import load_scan_step
 
 
 def compute_g2_map(
@@ -130,3 +132,99 @@ def acquire_and_compute_g2(
     }
 
     return g2_map, summary_stats
+
+
+def compute_g2_from_scan(
+    storage_dir: Union[str, Path],
+    experiment_prefix: Optional[str] = None,
+    epsilon: float = 0.0,
+    background: Optional[Union[float, np.ndarray]] = None,
+    max_steps: Optional[int] = None,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """
+    Load saved HDF5 scan files from a storage directory and compute the 2D g^(2) map
+    across all steps using memory-efficient streaming.
+
+    Args:
+        storage_dir: Path to directory containing .h5 scan files (e.g. 'data/').
+        experiment_prefix: Optional prefix filter (e.g. 'HHG_Scan').
+        epsilon: Regularization parameter added to denominator (default: 0.0).
+        background: Optional dark pedestal or background offset to subtract (e.g. 100.0).
+        max_steps: Maximum number of scan step files to analyze. If None, analyzes all.
+
+    Returns:
+        g2_map: 2D numpy array of shape (height, width) containing g^(2) per pixel.
+        summary_stats: Diagnostic metrics across the loaded dataset.
+    """
+    dir_path = Path(storage_dir)
+    if not dir_path.is_dir():
+        raise NotADirectoryError(f"Directory not found: {dir_path}")
+
+    pattern = f"{experiment_prefix}*.h5" if experiment_prefix else "*.h5"
+    matched_files = sorted(dir_path.glob(pattern))
+
+    if not matched_files:
+        raise FileNotFoundError(f"No scan files matching '{pattern}' in {dir_path}")
+
+    if max_steps is not None and max_steps > 0:
+        matched_files = matched_files[:max_steps]
+
+    sum_i = None
+    sum_i2 = None
+    total_frames = 0
+    first_metadata = None
+
+    for f in matched_files:
+        try:
+            images, meta = load_scan_step(f)
+        except Exception:
+            continue
+
+        if first_metadata is None:
+            first_metadata = meta
+            height, width = images.shape[1], images.shape[2]
+            sum_i = np.zeros((height, width), dtype=np.float64)
+            sum_i2 = np.zeros((height, width), dtype=np.float64)
+
+        for frame in images:
+            frame_flt = frame.astype(np.float64)
+            if background is not None:
+                frame_flt = np.maximum(frame_flt - background, 0.0)
+
+            sum_i += frame_flt
+            sum_i2 += frame_flt * frame_flt
+            total_frames += 1
+
+    if total_frames < 2 or sum_i is None or sum_i2 is None:
+        raise ValueError(
+            f"At least 2 frames are required across the scan files to compute g^(2), found {total_frames}."
+        )
+
+    mean_i = sum_i / total_frames
+    mean_i2 = sum_i2 / total_frames
+
+    denom = (mean_i ** 2) + float(epsilon)
+    g2_map = np.full(mean_i.shape, np.nan, dtype=np.float64)
+    valid_mask = denom > 0.0
+    g2_map[valid_mask] = mean_i2[valid_mask] / denom[valid_mask]
+
+    peak_intensity = float(mean_i.max())
+    active_mask = mean_i > (0.1 * peak_intensity)
+    center_y, center_x = mean_i.shape[0] // 2, mean_i.shape[1] // 2
+
+    g2_center = float(g2_map[center_y, center_x]) if not np.isnan(g2_map[center_y, center_x]) else None
+    g2_active_mean = float(np.nanmean(g2_map[active_mask])) if np.any(active_mask) else None
+
+    summary_stats = {
+        "num_files": len(matched_files),
+        "total_frames": total_frames,
+        "mean_intensity_map": mean_i,
+        "peak_intensity": peak_intensity,
+        "g2_center": g2_center,
+        "g2_mean_active": g2_active_mean,
+        "first_file_metadata": first_metadata,
+    }
+
+    return g2_map, summary_stats
+
+

@@ -3,7 +3,13 @@ Demonstration script to verify Mock Camera data generation and extraction
 via quantum optics normalized intensity autocorrelation g^(2) analysis.
 """
 
+import sys
 import numpy as np
+
+# Ensure UTF-8 output on Windows consoles with Hebrew or international paths
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 from hhg_control.drivers.mock_camera import MockPcoCamera
 from hhg_control.analysis import acquire_and_compute_g2, compute_g2_map
 
@@ -54,3 +60,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
