@@ -123,7 +123,6 @@ class CameraScanManager:
         if start_step < 0 or start_step >= num_steps:
             raise ValueError(f"start_step must be between 0 and {num_steps - 1}, got {start_step}.")
 
-        for step in range(num_steps):
         for step in range(start_step, num_steps):
             if abort_check is not None and abort_check():
                 break
