@@ -3,6 +3,7 @@ Experiment Sequencer & Data Storage.
 Handles step acquisitions and records multi-frame HDF5 datasets compatible with MATLAB.
 """
 
+from collections.abc import Iterator
 from collections.abc import Callable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
@@ -107,6 +108,7 @@ class CameraScanManager:
         abort_check: Optional[Callable[[], bool]] = None,
     ) -> Iterator[tuple[int, float, Path, np.ndarray]]:
         """
+        Execute a multi-step scan sequence from step 0 to num_steps - 1.
         Execute a multi-step scan sequence from start_step to num_steps - 1.
 
         Yields:
@@ -121,6 +123,7 @@ class CameraScanManager:
         if start_step < 0 or start_step >= num_steps:
             raise ValueError(f"start_step must be between 0 and {num_steps - 1}, got {start_step}.")
 
+        for step in range(num_steps):
         for step in range(start_step, num_steps):
             if abort_check is not None and abort_check():
                 break

@@ -52,12 +52,15 @@ class PreviewTask(QThread):
 class ScanSequenceTask(QThread):
     """
     Dedicated background worker thread for executing a full multi-step scan sequence.
+    Iterates from step 0 to num_steps - 1, recording and saving HDF5 datasets at each step.
+    Supports graceful abort requests without corrupting files or hardware state.
     Supports starting from any step index (to continue paused scans), immediate step start
     notifications, and graceful abort requests without corrupting files or hardware state.
     """
     step_started = pyqtSignal(int, int, float, str)  # (step_idx, total_steps, param_val, param_name)
     step_completed = pyqtSignal(int, int, float, str, np.ndarray, Path)
     scan_finished = pyqtSignal(int)
+    scan_aborted = pyqtSignal(int)
     scan_aborted = pyqtSignal(int, int, float, str)  # (stopped_step_idx, total_steps, param_val, param_name)
     error_occurred = pyqtSignal(str)
 
@@ -94,6 +97,7 @@ class ScanSequenceTask(QThread):
 
     def run(self) -> None:
         try:
+            steps_done = 0
             def on_start(step: int, val: float) -> None:
                 self._current_step = step
                 self.step_started.emit(step, self.num_steps, val, self.param_name)
@@ -109,14 +113,17 @@ class ScanSequenceTask(QThread):
                 on_step_start=on_start,
                 abort_check=lambda: self._abort_requested,
             ):
+                steps_done += 1
                 self.step_completed.emit(
                     step, self.num_steps, val, self.param_name, latest_frame, filepath
                 )
                 if self._abort_requested:
+                    self.scan_aborted.emit(steps_done)
                     # User requested stop during/after this step; resume retakes this step as requested
                     self.scan_aborted.emit(step, self.num_steps, val, self.param_name)
                     return
 
+            self.scan_finished.emit(self.num_steps)
             if self._abort_requested:
                 val = self.start_val + self._current_step * self.step_size
                 self.scan_aborted.emit(self._current_step, self.num_steps, val, self.param_name)
@@ -349,6 +356,7 @@ class CameraMainWindow(QMainWindow):
         self.btn_take_measurement.setEnabled(False)
         self.btn_take_measurement.setToolTip("Start automated experiment scan through all steps until the end.")
         self.btn_take_measurement.clicked.connect(self._toggle_measurement_scan)
+        lay_buttons.addWidget(self.btn_take_measurement)
         lay_buttons.addWidget(self.btn_take_measurement, stretch=3)
 
         self.btn_cut_measurement = QPushButton("Cut Measurement Here")
@@ -678,6 +686,10 @@ class CameraMainWindow(QMainWindow):
         end_val = self.spn_end_val.value()
         curr_val = start_val + start_step * step_size
 
+        self._append_log(
+            f"[SCAN START] Initiating automated scan: {num_steps} steps from {start_val:.4f} "
+            f"to {end_val:.4f} (Step Size: {step_size:.4f})\n"
+            f"             Scanning parameter: '{param_name}' | Measurements per step: {num_frames}"
         # Immediately update progress and status the instant the button is pressed
         self.lbl_scan_progress.setText(
             f"Scan Progress: Step {start_step + 1} of {num_steps} (Acquiring...) | {param_name}: {curr_val:.4f}"
@@ -725,6 +737,7 @@ class CameraMainWindow(QMainWindow):
             self.btn_take_measurement.setStyleSheet(
                 "font-weight: bold; font-size: 13px; background-color: #dc3545; color: white; padding: 8px;"
             )
+            self.btn_take_measurement.setToolTip("Safely abort the experiment scan after the current step.")
             self.btn_take_measurement.setToolTip("Safely stop the experiment scan after the current step.")
             self.btn_take_measurement.setEnabled(True)
 
@@ -741,9 +754,20 @@ class CameraMainWindow(QMainWindow):
             self.txt_file_header.setEnabled(False)
             self.txt_scan_param.setEnabled(False)
             self.btn_browse.setEnabled(False)
+
+            self.lbl_task_status.setText("System Status: Scan in Progress...")
+            self.lbl_task_status.setStyleSheet("font-weight: bold; font-size: 12px; color: #0d6efd;")
         else:
+            self.btn_take_measurement.setText("Take Measurement")
+            self.btn_take_measurement.setStyleSheet(
+                "font-weight: bold; font-size: 13px; background-color: #0d6efd; color: white; padding: 8px;"
+            )
+            self.btn_take_measurement.setToolTip("Start automated experiment scan through all steps until the end.")
+            self.btn_take_measurement.setEnabled(self.camera.is_connected)
+
             self.btn_connect.setEnabled(True)
             self.btn_preview.setEnabled(self.camera.is_connected)
+            self.btn_connect.setEnabled(True)
             self.spn_exposure.setEnabled(True)
             self.spn_frames.setEnabled(True)
             self.spn_start_val.setEnabled(True)
@@ -791,8 +815,14 @@ class CameraMainWindow(QMainWindow):
         self._update_display(latest_frame)
 
         self.lbl_scan_progress.setText(
+            f"Scan Progress: Step {step_idx + 1} of {total_steps} | {param_name}: {param_val:.4f}"
             f"Scan Progress: Step {step_idx + 1} of {total_steps} (Saved) | {param_name}: {param_val:.4f}"
         )
+
+        if step_idx + 1 < total_steps:
+            self.lbl_task_status.setText(
+                f"System Status: In Progress [Measuring Step {step_idx + 2} of {total_steps}]..."
+            )
 
     def _on_scan_finished(self, total_steps: int) -> None:
         """Called when all steps in the scan sequence finish."""
@@ -806,6 +836,9 @@ class CameraMainWindow(QMainWindow):
         self.lbl_task_status.setStyleSheet("font-weight: bold; font-size: 12px; color: #198754;")
         self._append_log(f"[SCAN COMPLETE] All {total_steps} planned steps successfully measured and saved to disk.")
 
+    def _on_scan_aborted(self, steps_done: int) -> None:
+        """Called when scan is safely stopped before reaching the end."""
+        total_steps = self.spn_num_steps.value()
     def _on_scan_aborted(
         self,
         stopped_step_idx: int,
@@ -816,12 +849,15 @@ class CameraMainWindow(QMainWindow):
         """Called when scan is stopped before reaching the end."""
         self._paused_step = stopped_step_idx
         self.lbl_scan_progress.setText(
+            f"Scan Progress: Stopped at {steps_done} of {total_steps} steps"
             f"Scan Progress: Stopped at Step {stopped_step_idx + 1} of {total_steps} | {param_name}: {param_val:.4f}"
         )
+        self.lbl_task_status.setText(f"System Status: Scan Stopped by User ({steps_done} steps saved)")
         self.lbl_task_status.setText(
             f"System Status: Scan Stopped at Step {stopped_step_idx + 1} of {total_steps}"
         )
         self.lbl_task_status.setStyleSheet("font-weight: bold; font-size: 12px; color: #d97706;")
+        self._append_log(f"[SCAN ABORTED] Scan stopped by user after step {steps_done - 1} ({steps_done} files saved).")
         self._append_log(
             f"[SCAN STOPPED] Scan stopped at Step {stopped_step_idx} (Step {stopped_step_idx + 1} of {total_steps}).\n"
             f"              You can continue to retake Step {stopped_step_idx + 1} from the start, or cut the measurement."
