@@ -67,3 +67,4 @@ def test_analysis_hdf5_loaders_and_beam_profiling(tmp_path):
     assert fit_results["fwhm_x"] > fit_results["sigma_x"]
 
     cam.close()
+

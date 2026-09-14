@@ -113,3 +113,4 @@ def fit_gaussian_beam_profile(frame: np.ndarray) -> Dict[str, float]:
         "peak_intensity": float(frame.max()),
         "total_power": round(total_sig, 1)
     }
+

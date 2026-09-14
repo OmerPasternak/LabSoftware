@@ -8,3 +8,4 @@ from .camera_panel import CameraMainWindow, PreviewTask, ScanSequenceTask, main
 CameraPanel = CameraMainWindow
 
 __all__ = ["CameraMainWindow", "CameraPanel", "PreviewTask", "ScanSequenceTask", "main"]
+

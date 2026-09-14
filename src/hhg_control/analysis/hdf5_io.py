@@ -133,3 +133,4 @@ def load_full_scan(
         "mean_frames": mean_frames,
         "filepaths": [item["filepath"] for item in steps_data],
     }
+

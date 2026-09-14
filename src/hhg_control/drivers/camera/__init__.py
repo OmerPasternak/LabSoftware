@@ -7,3 +7,4 @@ from ..mock_camera import MockPcoCamera
 from ..pco_edge import PcoEdgeCamera
 
 __all__ = ["BaseCamera", "MockPcoCamera", "PcoEdgeCamera"]
+
