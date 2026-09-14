@@ -760,6 +760,7 @@ class CameraMainWindow(QMainWindow):
 
     def _update_display(self, frame: np.ndarray) -> None:
         """Update live image canvas safely without re-creating axes or leaking memory."""
+        # Calculate full-frame scientific metrics directly from raw full-resolution data
         c_min = int(frame.min())
         c_max = int(frame.max())
         c_mean = float(frame.mean())
@@ -773,17 +774,29 @@ class CameraMainWindow(QMainWindow):
             f"Pixel Intensity Metrics | Minimum: {c_min:,} ADU | Maximum: {c_max:,} ADU | Mean: {c_mean:,.1f} ADU{sat_warning}"
         )
 
+        # Downsample strictly for UI display to make screen rendering ~5-10x faster.
+        # Extent preserves true physical sensor coordinates (0 to 2560 on X, 0 to 2160 on Y).
+        downsample_factor = 2  # 1280 x 1080 display matrix
+        display_frame = frame[::downsample_factor, ::downsample_factor]
+        h_full, w_full = frame.shape
+
         if self._image_artist is None:
             self.axis.clear()
             self.axis.set_title("Camera Sensor Monitor (Latest Frame)", fontsize=11, fontweight="bold")
             self.axis.set_xlabel("Sensor X Pixel Index")
             self.axis.set_ylabel("Sensor Y Pixel Index")
-            self._image_artist = self.axis.imshow(frame, cmap="viridis", origin="upper", aspect="equal")
+            self._image_artist = self.axis.imshow(
+                display_frame,
+                cmap="viridis",
+                origin="upper",
+                aspect="equal",
+                extent=[0, w_full, h_full, 0]
+            )
             self._colorbar = self.figure.colorbar(self._image_artist, ax=self.axis, fraction=0.046, pad=0.04)
             self._colorbar.set_label("16-bit Sensor Counts (ADU)", rotation=270, labelpad=15)
             self.figure.tight_layout()
         else:
-            self._image_artist.set_data(frame)
+            self._image_artist.set_data(display_frame)
             self._image_artist.set_clim(vmin=max(0, c_min), vmax=max(c_min + 1, c_max))
 
         self.canvas.draw_idle()

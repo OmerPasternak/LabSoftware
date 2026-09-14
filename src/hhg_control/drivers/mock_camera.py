@@ -20,6 +20,29 @@ class MockPcoCamera(BaseCamera):
         self.fast_simulation = fast_simulation
         self._model = "pco.edge 5.5 USB (EMULATOR)"
         self._serial = "MOCK-EDGE-5501"
+        self._rng = np.random.default_rng(42)
+
+        # Precompute static 2D spatial Gaussian beam profile (sigma = 120 px, centered at (1280, 1080))
+        y, x = np.ogrid[:self.HEIGHT, :self.WIDTH]
+        center_y, center_x = self.HEIGHT // 2, self.WIDTH // 2
+        sigma_x, sigma_y = 120.0, 120.0
+        self._gaussian_profile = np.exp(
+            -(((x - center_x) ** 2) / (2 * sigma_x ** 2) + ((y - center_y) ** 2) / (2 * sigma_y ** 2))
+        ).astype(np.float32)
+
+        # Region of interest (ROI) bounding box for shot noise (+/- 4 sigma = 480 px)
+        # Outside 4 sigma the optical signal is zero, so Poisson shot noise variance is 0.
+        self._roi_y1 = max(0, int(center_y - 4 * sigma_y))
+        self._roi_y2 = min(self.HEIGHT, int(center_y + 4 * sigma_y))
+        self._roi_x1 = max(0, int(center_x - 4 * sigma_x))
+        self._roi_x2 = min(self.WIDTH, int(center_x + 4 * sigma_x))
+
+        # Pre-generate a bank of realistic dark noise patterns (mean = 100 ADU, std = 3 ADU)
+        # Eliminates generating 5.5 million float64 random numbers per frame on the CPU.
+        self._dark_bank = self._rng.normal(
+            loc=100.0, scale=3.0, size=(4, self.HEIGHT, self.WIDTH)
+        ).astype(np.float32)
+        self._dark_idx = 0
 
     def connect(self) -> None:
         self._is_connected = True
@@ -55,38 +78,32 @@ class MockPcoCamera(BaseCamera):
             time.sleep(self._exposure_time_s * num_frames)
 
         # =========================================================================
-        # SYNTHETIC SCMOS DATA GENERATION MODEL:
-        # 1. Geometry: Full pco.edge 5.5 sensor resolution (2560 x 2160 pixels, 16-bit uint16).
-        # 2. Dark Level / Readout Noise: Gaussian pedestal (mean = 100 ADU, std = 3 ADU).
-        # 3. Spatial Beam Profile: 2D Gaussian laser/HHG focus centered at (x0=1280, y0=1080)
-        #    with waist radius sigma_x = sigma_y = 120 pixels.
-        # 4. Exposure Scaling: Peak counts scale linearly with exposure duration up to 55,000 ADU.
-        # 5. Poisson Shot Noise: Quantum photon statistics where noise variance equals local signal.
+        # FAST VECTORIZED SCMOS DATA SYNTHESIS:
+        # 1. Full 2560 x 2160 uint16 sensor array allocation.
+        # 2. Dark Noise: Cycled from precomputed 16-bit Gaussian pedestal (100 +/- 3 ADU).
+        # 3. Optical Signal: 2D Gaussian beam scaled by exposure duration.
+        # 4. Poisson Shot Noise: Computed within beam ROI where signal > 0.
         # =========================================================================
         images = np.zeros((num_frames, self.HEIGHT, self.WIDTH), dtype=np.uint16)
         metadata = []
 
-        # Coordinate grid for 2D spatial beam spot
-        y, x = np.ogrid[:self.HEIGHT, :self.WIDTH]
-        center_y, center_x = self.HEIGHT // 2, self.WIDTH // 2
-        sigma_x, sigma_y = 120.0, 120.0
-        gaussian_profile = np.exp(-(((x - center_x) ** 2) / (2 * sigma_x ** 2) + 
-                                    ((y - center_y) ** 2) / (2 * sigma_y ** 2)))
-
-        # Exposure-dependent peak photon intensity (ADU counts)
-        peak_counts = min(55000.0, 5000.0 + (self._exposure_time_s / 0.010) * 8000.0)
+        peak_counts = np.float32(min(55000.0, 5000.0 + (self._exposure_time_s / 0.010) * 8000.0))
+        roi_signal = (
+            self._gaussian_profile[self._roi_y1:self._roi_y2, self._roi_x1:self._roi_x2] * peak_counts
+        )
+        roi_shot_std = np.sqrt(np.maximum(roi_signal, 1.0, dtype=np.float32))
+        roi_h = self._roi_y2 - self._roi_y1
+        roi_w = self._roi_x2 - self._roi_x1
 
         for i in range(num_frames):
-            # Thermal dark noise & electronic offset pedestal (100 +/- 3 ADU)
-            dark_noise = np.random.normal(loc=100.0, scale=3.0, size=(self.HEIGHT, self.WIDTH))
-            # Optical signal with Poisson photon shot noise (std = sqrt(signal))
-            signal = gaussian_profile * peak_counts
-            shot_noise = np.random.normal(loc=0.0, scale=np.sqrt(np.maximum(signal, 1.0)))
-            
-            # Synthesize final camera frame and clamp to physical 16-bit dynamic range [0, 65535]
-            frame = dark_noise + signal + shot_noise
-            images[i] = np.clip(frame, 0, 65535).astype(np.uint16)
-            
+            dark_frame = self._dark_bank[self._dark_idx % len(self._dark_bank)].copy()
+            self._dark_idx += 1
+
+            shot_noise = self._rng.standard_normal(size=(roi_h, roi_w), dtype=np.float32) * roi_shot_std
+            dark_frame[self._roi_y1:self._roi_y2, self._roi_x1:self._roi_x2] += roi_signal + shot_noise
+
+            images[i] = np.clip(dark_frame, 0, 65535).astype(np.uint16)
+
             metadata.append({
                 "frame_id": i,
                 "timestamp": time.time(),
