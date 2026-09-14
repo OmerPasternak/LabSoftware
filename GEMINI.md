@@ -18,6 +18,34 @@ Your job is to act as a careful, senior collaborator: propose designs, write cod
 
 4. Parallel migration. New software must be able to run alongside the existing LabVIEW system per-experiment-type. Do not propose changes that require a full cutover before validation.
 
+## INSTRUMENT INTEGRATION PLAYBOOK (ACTUATORS & DETECTORS)
+
+### 1. Architectural Model: Actuators vs. Detectors
+Every lab instrument belongs to one of two high-level roles:
+- **Actuators (Movers / Setters)**: Change experiment state before acquisition (delay stages, motorized mirror mounts, rotation stages, gas valve controllers). Uniform interface concepts: `move_to()`, `get_position()`, `is_moving()`, `stop()`, `home()`.
+- **Detectors (Sensors / Readers)**: Record physical signals at a given state (cameras, spectrometers, oscilloscopes, power meters, lock-in amplifiers). Uniform interface concepts: `acquire()`, `set_exposure()` / `set_timebase()`, `get_data()`.
+The sequencer must only interact with abstract Actuators and Detectors, never coupled to specific vendor hardware classes.
+
+### 2. Standardized 5-Step Workflow for Adding Instruments
+Whenever planning or adding a new instrument:
+1. **Lab Inventory & Protocol Audit**:
+   - Record manufacturer and exact model number.
+   - Identify physical bus (USB COM/RS-232, USBTMC, Ethernet/TCP, GPIB, PCIe).
+   - Inspect legacy LabVIEW VI block diagram to determine existing protocol (raw ASCII/SCPI commands vs. vendor DLL/.NET calls).
+   - Document strict physical safety limits (travel bounds, max speed, laser shutter interlocks).
+2. **Ecosystem Survey (Do Not Reinvent the Wheel)**:
+   - Check PyMoDAQ plugins (`pymodaq_plugins_*`), PyMeasure, QCoDeS, or vendor SDKs before writing custom drivers.
+3. **Contract & Unit Standardization (`Base<Instrument>`)**:
+   - Define abstract base class (`ABC`) establishing standard methods.
+   - Enforce unambiguous standard scientific units (e.g., stage position strictly in mm or μm; optical delay in fs; wavelength in nm; time in s; voltage in V). Never mix motor steps, mm, and delay in raw code.
+   - Embed software safety boundaries and limit validation directly into base class setters (`validate_position()`, `validate_exposure()`).
+4. **Mock Implementation & Offline Sequencer Integration (`Mock<Instrument>`)**:
+   - Create a realistic mock implementation producing synthetic data (e.g., spectral peaks, simulated motion delay).
+   - Build unit tests and verify sequencer/UI flows offline.
+5. **Physical Driver Implementation & Benchtop Validation**:
+   - Implement vendor-specific driver inheriting from the base class.
+   - Validate on hardware incrementally using small, safe benchtop scratch scripts before running automated scans.
+
 ## TECHNICAL DEFAULTS (deviate only with explicit reasoning, and flag it)
 
 - Language: Python (3.10+). Do not suggest MATLAB, C#, or LabVIEW-adjacent tools for instrument control unless the student explicitly asks you to evaluate an alternative.
