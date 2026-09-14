@@ -3,9 +3,10 @@ Experiment Sequencer & Data Storage.
 Handles step acquisitions and records multi-frame HDF5 datasets compatible with MATLAB.
 """
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 import h5py
 import numpy as np
 from ..drivers.base_camera import BaseCamera
@@ -101,9 +102,12 @@ class CameraScanManager:
         step_size: float,
         num_steps: int,
         num_frames: int,
+        start_step: int = 0,
+        on_step_start: Optional[Callable[[int, float], None]] = None,
+        abort_check: Optional[Callable[[], bool]] = None,
     ) -> Iterator[tuple[int, float, Path, np.ndarray]]:
         """
-        Execute a multi-step scan sequence from step 0 to num_steps - 1.
+        Execute a multi-step scan sequence from start_step to num_steps - 1.
 
         Yields:
             tuple[int, float, Path, np.ndarray]:
@@ -114,9 +118,17 @@ class CameraScanManager:
             raise RuntimeError("Cannot execute scan: Camera is disconnected.")
         if num_steps < 1:
             raise ValueError(f"Number of steps must be at least 1, got {num_steps}.")
+        if start_step < 0 or start_step >= num_steps:
+            raise ValueError(f"start_step must be between 0 and {num_steps - 1}, got {start_step}.")
 
-        for step in range(num_steps):
+        for step in range(start_step, num_steps):
+            if abort_check is not None and abort_check():
+                break
+
             val = start_value + step * step_size
+            if on_step_start is not None:
+                on_step_start(step, val)
+
             filepath, latest_frame = self.acquire_and_save_step(
                 experiment_name=experiment_name,
                 step_index=step,
@@ -125,4 +137,6 @@ class CameraScanManager:
                 num_frames=num_frames
             )
             yield step, val, filepath, latest_frame
+
+
 

@@ -82,3 +82,36 @@ def test_execute_scan_full_sequence(tmp_path):
 
     cam.close()
 
+
+def test_execute_scan_resume_and_callbacks(tmp_path):
+    """Test resuming an experiment scan from a given step index and callback invocations."""
+    cam = MockPcoCamera(fast_simulation=True)
+    cam.connect()
+    scan_mgr = CameraScanManager(camera=cam, storage_dir=tmp_path)
+
+    started_steps = []
+    def on_start(step_idx: int, val: float) -> None:
+        started_steps.append((step_idx, val))
+
+    # Resume from step 2 (retake step 2, then step 3)
+    results = list(
+        scan_mgr.execute_scan(
+            experiment_name="resume_test",
+            param_name="delay_mm",
+            start_value=1.0,
+            step_size=0.1,
+            num_steps=4,
+            num_frames=2,
+            start_step=2,
+            on_step_start=on_start,
+        )
+    )
+
+    assert len(results) == 2
+    assert started_steps == [(2, 1.2), (3, 1.3)]
+    assert [r[0] for r in results] == [2, 3]
+    for step_idx, val, filepath, frame in results:
+        assert filepath.exists()
+
+    cam.close()
+
