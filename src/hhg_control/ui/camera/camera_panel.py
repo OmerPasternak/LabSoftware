@@ -11,10 +11,11 @@ from pathlib import Path
 from typing import Optional
 import numpy as np
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from datetime import datetime, timezone
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QGroupBox, QLabel, QLineEdit, QDoubleSpinBox, QSpinBox,
+    QGroupBox, QLabel, QLineEdit, QDoubleSpinBox, QSpinBox, QComboBox,
     QPushButton, QFileDialog, QTextEdit, QMessageBox, QRadioButton,
     QButtonGroup, QScrollArea, QSplitter, QGridLayout, QFrame, QSizePolicy
 )
@@ -37,14 +38,13 @@ class PreviewTask(QThread):
     frame_ready = pyqtSignal(np.ndarray)
     error_occurred = pyqtSignal(str)
 
-    def __init__(self, camera: BaseCamera) -> None:
+    def __init__(self, scan_manager: CameraScanManager) -> None:
         super().__init__()
-        self.camera = camera
+        self.scan_manager = scan_manager
 
     def run(self) -> None:
         try:
-            images, _ = self.camera.acquire_frames(num_frames=1)
-            self.frame_ready.emit(images[0])
+            self.frame_ready.emit(self.scan_manager.acquire_preview())
         except Exception as exc:
             self.error_occurred.emit(str(exc))
 
@@ -60,7 +60,6 @@ class ScanSequenceTask(QThread):
     step_started = pyqtSignal(int, int, float, str)  # (step_idx, total_steps, param_val, param_name)
     step_completed = pyqtSignal(int, int, float, str, np.ndarray, Path)
     scan_finished = pyqtSignal(int)
-    scan_aborted = pyqtSignal(int)
     scan_aborted = pyqtSignal(int, int, float, str)  # (stopped_step_idx, total_steps, param_val, param_name)
     error_occurred = pyqtSignal(str)
 
@@ -118,12 +117,10 @@ class ScanSequenceTask(QThread):
                     step, self.num_steps, val, self.param_name, latest_frame, filepath
                 )
                 if self._abort_requested:
-                    self.scan_aborted.emit(steps_done)
                     # User requested stop during/after this step; resume retakes this step as requested
                     self.scan_aborted.emit(step, self.num_steps, val, self.param_name)
                     return
 
-            self.scan_finished.emit(self.num_steps)
             if self._abort_requested:
                 val = self.start_val + self._current_step * self.step_size
                 self.scan_aborted.emit(self._current_step, self.num_steps, val, self.param_name)
@@ -154,6 +151,7 @@ class CameraMainWindow(QMainWindow):
         self.active_preview_task: Optional[PreviewTask] = None
 
         # State tracking
+        self._live_requested = False
         self._is_updating_range: bool = False
         self._paused_step: Optional[int] = None
         self._current_executing_step: int = 0
@@ -198,8 +196,11 @@ class CameraMainWindow(QMainWindow):
 
         self.btn_connect = QPushButton("Connect")
         self.btn_connect.setStyleSheet("font-weight: bold; font-size: 13px; padding: 6px;")
-        self.btn_connect.setToolTip("Connect to physical camera if available, or seamlessly initialize simulated camera.")
+        self.btn_connect.setToolTip("Connect to the explicitly selected camera mode.")
         self.btn_connect.clicked.connect(self._toggle_connection)
+        self.camera_mode = QComboBox()
+        self.camera_mode.addItems(["Simulation", "Real pco.edge 5.5 USB 3.0"])
+        lay_connection.addWidget(self.camera_mode)
         lay_connection.addWidget(self.btn_connect)
 
         self.lbl_hw_status = QLabel("Status: Disconnected")
@@ -239,6 +240,36 @@ class CameraMainWindow(QMainWindow):
         self.btn_preview.setToolTip("Acquire a single frame and refresh the live monitor without saving to disk.")
         self.btn_preview.clicked.connect(self._capture_preview)
         lay_acq.addWidget(self.btn_preview)
+        self.btn_live = QPushButton("Start Live")
+        self.btn_live.clicked.connect(self._toggle_live)
+        lay_acq.addWidget(self.btn_live)
+        self.lbl_frame_time = QLabel("Frame received (UTC): ?")
+        lay_acq.addWidget(self.lbl_frame_time)
+        self.color_scale = QComboBox()
+        self.color_scale.addItems(["Auto scale", "Full 16-bit (0?65535)"])
+        lay_acq.addWidget(self.color_scale)
+        self.roi_group = QGroupBox("Hardware ROI (pixels, upper bounds excluded)")
+        roi_layout = QGridLayout(self.roi_group)
+        self.roi_bounds = []
+        for col, (label, maximum, value) in enumerate(zip(
+            ("X start", "Y start", "X end", "Y end"),
+            (2560, 2160, 2560, 2160), (0, 0, 2560, 2160),
+        )):
+            field = QSpinBox()
+            field.setRange(0, maximum)
+            field.setValue(value)
+            roi_layout.addWidget(QLabel(label), 0, col)
+            roi_layout.addWidget(field, 1, col)
+            self.roi_bounds.append(field)
+        apply_roi = QPushButton("Apply Hardware ROI")
+        apply_roi.clicked.connect(self._apply_roi)
+        roi_layout.addWidget(apply_roi, 2, 0, 1, 2)
+        reset_roi = QPushButton("Full Sensor")
+        reset_roi.clicked.connect(self._reset_roi)
+        roi_layout.addWidget(reset_roi, 2, 2, 1, 2)
+        self.lbl_roi = QLabel("Stop live viewing before applying ROI.")
+        roi_layout.addWidget(self.lbl_roi, 3, 0, 1, 4)
+        lay_acq.addWidget(self.roi_group)
         left_panel.addWidget(grp_acq)
 
         # --- Section 3: Data Storing ---
@@ -558,13 +589,18 @@ class CameraMainWindow(QMainWindow):
             is_simulated = False
 
             try:
-                from hhg_control.drivers.pco_edge import PcoEdgeCamera
-                self.camera = PcoEdgeCamera()
+                is_simulated = self.camera_mode.currentIndex() == 0
+                if is_simulated:
+                    self.camera = MockPcoCamera()
+                else:
+                    from hhg_control.drivers.pco_edge import PcoEdgeCamera
+                    self.camera = PcoEdgeCamera()
                 self.camera.connect()
-            except Exception:
-                self.camera = MockPcoCamera()
-                self.camera.connect()
-                is_simulated = True
+            except Exception as exc:
+                self.lbl_hw_status.setText("Status: Connection failed")
+                self.btn_connect.setEnabled(True)
+                QMessageBox.warning(self, "Camera connection failed", str(exc))
+                return
 
             conn_time = time.perf_counter() - t_start
             self.scan_manager.camera = self.camera
@@ -586,6 +622,7 @@ class CameraMainWindow(QMainWindow):
                     f"Serial #{info.get('serial_number')} in {conn_time:.2f} s."
                 )
 
+            self.camera_mode.setEnabled(False)
             self.btn_connect.setText("Disconnect")
             self.btn_connect.setEnabled(True)
             self.btn_preview.setEnabled(True)
@@ -594,6 +631,7 @@ class CameraMainWindow(QMainWindow):
             self.camera.close()
             self.lbl_hw_status.setText("Status: Disconnected")
             self.lbl_hw_status.setStyleSheet("color: #6c757d; font-weight: bold; font-size: 12px;")
+            self.camera_mode.setEnabled(True)
             self.btn_connect.setText("Connect")
             self.btn_preview.setEnabled(False)
             self.btn_take_measurement.setEnabled(False)
@@ -614,6 +652,41 @@ class CameraMainWindow(QMainWindow):
     # =========================================================================
     # Live Preview and Automated Scan Execution
     # =========================================================================
+    def _apply_roi(self) -> None:
+        """Apply a validated readout rectangle only while all acquisition is idle."""
+        if not self.camera.is_connected:
+            return
+        if self._live_requested or self.active_preview_task is not None or self.active_scan_task is not None:
+            self.lbl_roi.setText("Stop acquisition before applying ROI.")
+            return
+        try:
+            self.scan_manager.set_roi(tuple(field.value() for field in self.roi_bounds))
+        except Exception as exc:
+            QMessageBox.warning(self, "Hardware ROI", str(exc))
+        actual = self.camera.get_roi()
+        for field, value in zip(self.roi_bounds, actual):
+            field.setValue(value)
+        self.lbl_roi.setText(f"Applied ROI: {actual}")
+        self._clear_paused_scan("Hardware ROI changed")
+
+    def _reset_roi(self) -> None:
+        """Select the complete 2560 by 2160 sensor and apply while idle."""
+        for field, value in zip(self.roi_bounds, (0, 0, 2560, 2160)):
+            field.setValue(value)
+        self._apply_roi()
+
+    def _toggle_live(self) -> None:
+        """Repeat single-frame acquisitions; stopping finishes the current exposure."""
+        if self._live_requested:
+            self._live_requested = False
+            self.btn_live.setText("Start Live")
+            return
+        if not self.camera.is_connected or self.active_scan_task is not None:
+            return
+        self._live_requested = True
+        self.btn_live.setText("Stop Live (after current frame)")
+        self._capture_preview()
+
     def _capture_preview(self) -> None:
         """Capture a single preview frame for the live monitor without saving to disk."""
         if not self.camera.is_connected:
@@ -624,29 +697,50 @@ class CameraMainWindow(QMainWindow):
             return
 
         self.btn_preview.setEnabled(False)
+        self.btn_connect.setEnabled(False)
+        self.spn_exposure.setEnabled(False)
         self.btn_take_measurement.setEnabled(False)
         self.lbl_task_status.setText("System Status: Capturing Live Preview...")
         self.lbl_task_status.setStyleSheet("font-weight: bold; font-size: 12px; color: #0d6efd;")
 
-        self.active_preview_task = PreviewTask(camera=self.camera)
+        self.active_preview_task = PreviewTask(scan_manager=self.scan_manager)
         self.active_preview_task.frame_ready.connect(self._on_preview_frame_ready)
-        self.active_preview_task.error_occurred.connect(self._on_scan_error)
+        self.active_preview_task.error_occurred.connect(self._on_preview_error)
         self.active_preview_task.finished.connect(self._on_preview_task_finished)
         self.active_preview_task.start()
 
+    def _on_preview_error(self, message: str) -> None:
+        """Stop repeated preview acquisition after an error."""
+        self._live_requested = False
+        self.btn_live.setText("Start Live")
+        self._on_scan_error(message)
+
     def _on_preview_frame_ready(self, frame: np.ndarray) -> None:
+        """Display a frame with host receipt time, not a hardware exposure timestamp."""
+        self.lbl_frame_time.setText(f"Frame received (UTC): {datetime.now(timezone.utc).isoformat(timespec='milliseconds')}")
         self._update_display(frame)
-        self._append_log("[PREVIEW] Single preview frame captured and displayed (not saved to disk).")
 
     def _on_preview_task_finished(self) -> None:
         if self.active_preview_task is not None:
             self.active_preview_task.deleteLater()
             self.active_preview_task = None
+        if self._live_requested:
+            QTimer.singleShot(30, self._continue_live)
+            return
+        self.btn_connect.setEnabled(True)
+        self.spn_exposure.setEnabled(True)
         if self.camera.is_connected and (self.active_scan_task is None or not self.active_scan_task.isRunning()):
             self.btn_preview.setEnabled(True)
             self.btn_take_measurement.setEnabled(True)
             self.lbl_task_status.setText("System Status: Idle / Ready")
             self.lbl_task_status.setStyleSheet("font-weight: bold; font-size: 12px; color: #198754;")
+
+    def _continue_live(self) -> None:
+        """Schedule the next frame only while live viewing is requested."""
+        if self._live_requested:
+            self._capture_preview()
+        else:
+            self._on_preview_task_finished()
 
     def _toggle_measurement_scan(self) -> None:
         """
@@ -942,28 +1036,32 @@ class CameraMainWindow(QMainWindow):
         downsample_factor = 2  # 1280 x 1080 display matrix
         display_frame = frame[::downsample_factor, ::downsample_factor]
         h_full, w_full = frame.shape
+        x0, y0, x1, y1 = self.camera.get_roi()
 
         if self._image_artist is None:
             self.axis.clear()
             self.axis.set_title("Camera Sensor Monitor (Latest Frame)", fontsize=11, fontweight="bold")
             self.axis.set_xlabel("Sensor X Pixel Index")
             self.axis.set_ylabel("Sensor Y Pixel Index")
-            self._image_artist = self.axis.imshow(frame, cmap="viridis", origin="upper", aspect="equal")
             self._image_artist = self.axis.imshow(
                 display_frame,
                 cmap="viridis",
                 origin="upper",
                 aspect="equal",
-                extent=[0, w_full, h_full, 0]
+                extent=[x0, x1, y1, y0]
             )
             self._colorbar = self.figure.colorbar(self._image_artist, ax=self.axis, fraction=0.046, pad=0.04)
             self._colorbar.set_label("16-bit Sensor Counts (ADU)", rotation=270, labelpad=15)
             self.figure.tight_layout()
         else:
-            self._image_artist.set_data(frame)
             self._image_artist.set_data(display_frame)
+            self._image_artist.set_extent([x0, x1, y1, y0])
             self._image_artist.set_clim(vmin=max(0, c_min), vmax=max(c_min + 1, c_max))
 
+        if self.color_scale.currentIndex() == 1:
+            self._image_artist.set_clim(0, 65535)
+        else:
+            self._image_artist.set_clim(c_min, max(c_min + 1, c_max))
         self.canvas.draw_idle()
 
     def _append_log(self, message: str) -> None:
@@ -971,13 +1069,15 @@ class CameraMainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         """Ensure clean shutdown of active threads and hardware handles before closing."""
+        self._live_requested = False
+        self.btn_live.setText("Start Live")
         if self.active_scan_task is not None and self.active_scan_task.isRunning():
-            self._append_log("[SHUTDOWN] Aborting active scan before window close...")
             self.active_scan_task.request_abort()
-            self.active_scan_task.wait(3000)
-
+            event.ignore()
+            return
         if self.active_preview_task is not None and self.active_preview_task.isRunning():
-            self.active_preview_task.wait(2000)
+            event.ignore()
+            return
 
         if self.camera.is_connected:
             self.camera.close()
