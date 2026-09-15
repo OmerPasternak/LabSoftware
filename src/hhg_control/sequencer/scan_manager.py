@@ -8,7 +8,6 @@ from collections.abc import Callable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
-import json
 import h5py
 import numpy as np
 from ..drivers.base_camera import BaseCamera
@@ -21,15 +20,6 @@ class CameraScanManager:
         self.camera = camera
         self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
-
-    def acquire_preview(self) -> np.ndarray:
-        """Acquire one unsaved uint16 frame using the abstract camera contract."""
-        images, _ = self.camera.acquire_frames(1)
-        return images[0]
-
-    def set_roi(self, roi: tuple[int, int, int, int]) -> None:
-        """Set idle camera readout bounds in zero-based pixels, upper bounds excluded."""
-        self.camera.set_roi(roi)
 
     def set_storage_dir(self, new_dir: Path | str) -> None:
         self.storage_dir = Path(new_dir)
@@ -54,7 +44,7 @@ class CameraScanManager:
         if not self.camera.is_connected:
             raise RuntimeError("Cannot execute scan step: Camera is disconnected.")
 
-        images, frame_metadata = self.camera.acquire_frames(num_frames=num_frames)
+        images, _ = self.camera.acquire_frames(num_frames=num_frames)
         sensor_info = self.camera.get_sensor_info()
         exposure_s = self.camera.get_exposure_time()
 
@@ -72,9 +62,6 @@ class CameraScanManager:
                 compression="gzip",
                 compression_opts=1
             )
-            h5f.create_dataset("frame_metadata_json", data=[json.dumps(m, default=str) for m in frame_metadata],
-                               dtype=h5py.string_dtype("utf-8"))
-            h5f.attrs["roi_xyxy_exclusive"] = self.camera.get_roi()
             # Dataset descriptive metadata
             dset.attrs["units"] = "16-bit digital counts (ADU)"
             dset.attrs["physical_units"] = "16-bit digital counts (ADU)"

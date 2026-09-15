@@ -71,37 +71,6 @@ class BaseCamera(ABC):
         """Return sensor resolution, pixel size, model, and serial number."""
         pass
 
-    def get_roi(self) -> tuple[int, int, int, int]:
-        """Return zero-based (x0, y0, x1, y1) pixel bounds; upper bounds excluded."""
-        info = self.get_sensor_info()
-        return getattr(self, "_roi", (0, 0, info["width"], info["height"]))
-
-    def get_roi_limits(self) -> Dict[str, Any]:
-        """Return hardware pixel steps, minimum size, and symmetry requirements."""
-        return {"steps": (1, 1), "minimum": (1, 1), "symmetric": (False, False)}
-
-    def validate_roi(self, roi: tuple[int, int, int, int]) -> None:
-        """Reject invalid hardware ROI in unbinned sensor pixels; never silently snap."""
-        if len(roi) != 4 or any(type(v) is not int for v in roi):
-            raise ValueError("ROI requires four integer pixel bounds.")
-        x0, y0, x1, y1 = roi
-        info = self.get_sensor_info()
-        limits = self.get_roi_limits()
-        for start, end, size, step, minimum, symmetric in zip(
-            (x0, y0), (x1, y1), (info["width"], info["height"]),
-            limits["steps"], limits["minimum"], limits["symmetric"],
-        ):
-            if not 0 <= start < end <= size or end - start < minimum:
-                raise ValueError(f"ROI must stay inside sensor and span at least {limits['minimum']} pixels.")
-            if step < 1 or start % step or end % step:
-                raise ValueError(f"ROI bounds must follow pixel steps {limits['steps']}.")
-            if symmetric and start + end != size:
-                raise ValueError("ROI must be centered on the sensor on each required symmetry axis.")
-
-    def set_roi(self, roi: tuple[int, int, int, int]) -> None:
-        """Configure hardware readout bounds; unsupported drivers must reject this."""
-        raise NotImplementedError("Hardware ROI is not supported by this driver.")
-
     def __enter__(self):
         self.connect()
         return self

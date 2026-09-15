@@ -68,15 +68,6 @@ class MockPcoCamera(BaseCamera):
             "interface": "USB 3.0 (Emulated)"
         }
 
-    def get_roi_limits(self) -> Dict[str, Any]:
-        """Model 4-column steps and centered vertical readout for offline validation."""
-        return {"steps": (4, 1), "minimum": (64, 16), "symmetric": (False, True)}
-
-    def set_roi(self, roi: tuple[int, int, int, int]) -> None:
-        """Simulate unbinned hardware ROI, using zero-based exclusive upper bounds."""
-        self.validate_roi(roi)
-        self._roi = tuple(roi)
-
     def acquire_frames(self, num_frames: int) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
         if not self._is_connected:
             raise RuntimeError("Cannot acquire frames: Mock camera is not connected.")
@@ -121,9 +112,5 @@ class MockPcoCamera(BaseCamera):
                 "simulated": True
             })
 
-        x0, y0, x1, y1 = self.get_roi()
-        for meta in metadata:
-            meta["roi"] = self.get_roi()
-            meta["timestamp_source"] = "simulated host time"
-        return np.ascontiguousarray(images[:, y0:y1, x0:x1]), metadata
+        return images, metadata
 
