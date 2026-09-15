@@ -25,6 +25,27 @@ class CameraScanManager:
         self.storage_dir = Path(new_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
 
+    def set_roi(self, roi: tuple[int, int, int, int]) -> None:
+        """Set hardware ROI on the underlying camera."""
+        self.camera.set_roi(roi)
+
+    def get_roi(self) -> tuple[int, int, int, int]:
+        """Get current hardware ROI bounds (x0, y0, x1, y1)."""
+        return self.camera.get_roi()
+
+    def acquire_preview(self) -> tuple[np.ndarray, dict]:
+        """
+        Acquire a single frame without saving to disk for live viewing.
+        Returns:
+            frame: 2D numpy array (uint16)
+            metadata: dict with frame metadata including camera timestamp
+        """
+        if not self.camera.is_connected:
+            raise RuntimeError("Cannot acquire preview: Camera is disconnected.")
+        frames, metas = self.camera.acquire_frames(num_frames=1)
+        meta = metas[0] if metas else {}
+        return frames[0], meta
+
     def acquire_and_save_step(
         self,
         experiment_name: str,
@@ -92,6 +113,7 @@ class CameraScanManager:
             h5f.attrs["sensor_pixel_width"] = int(sensor_info.get("width", images.shape[2]))
             h5f.attrs["sensor_height"] = int(sensor_info.get("height", images.shape[1]))
             h5f.attrs["sensor_pixel_height"] = int(sensor_info.get("height", images.shape[1]))
+            h5f.attrs["roi_bounds"] = self.camera.get_roi()
 
         return filepath, images[-1]
 

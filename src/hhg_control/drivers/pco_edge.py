@@ -3,6 +3,8 @@ Concrete driver for the Excelitas pco.edge 5.5 USB camera.
 Wraps the official `pco` Python SDK (pco.Camera).
 """
 
+import time
+from datetime import datetime
 from typing import Tuple, List, Dict, Any
 import numpy as np
 from .base_camera import BaseCamera
@@ -76,6 +78,37 @@ class PcoEdgeCamera(BaseCamera):
     def get_sensor_info(self) -> Dict[str, Any]:
         return self._info
 
+    def get_roi_limits(self) -> Dict[str, Any]:
+        """Read hardware ROI steps, minimum dimensions, and symmetry from pco SDK."""
+        if self._cam is not None and hasattr(self._cam, "description"):
+            desc = getattr(self._cam, "description", {})
+            return {
+                "steps": desc.get("roi steps", (4, 1)),
+                "minimum": (desc.get("min width", 64), desc.get("min height", 16)),
+                "symmetric": (desc.get("roi is horz symmetric", False), desc.get("roi is vert symmetric", True))
+            }
+        return {"steps": (4, 1), "minimum": (64, 16), "symmetric": (False, True)}
+
+    def get_roi(self) -> tuple[int, int, int, int]:
+        """Translate SDK one-based inclusive ROI (x0, y0, x1, y1) to zero-based exclusive bounds."""
+        if self._cam is not None and hasattr(self._cam, "configuration"):
+            cfg = self._cam.configuration
+            if "roi" in cfg and cfg["roi"]:
+                x0, y0, x1, y1 = cfg["roi"]
+                return (x0 - 1, y0 - 1, x1, y1)
+        return getattr(self, "_roi", (0, 0, 2560, 2160))
+
+    def set_roi(self, roi: tuple[int, int, int, int]) -> None:
+        """Set hardware readout ROI on camera sensor."""
+        self.validate_roi(roi)
+        if self._cam is not None:
+            if getattr(self._cam, "is_recording", False):
+                self._cam.stop()
+            x0, y0, x1, y1 = roi
+            # PCO SDK expects 1-based (x0+1, y0+1, x1, y1)
+            self._cam.configuration = {"roi": (x0 + 1, y0 + 1, x1, y1)}
+        self._roi = tuple(roi)
+
     def acquire_frames(self, num_frames: int) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
         if not self._is_connected or self._cam is None:
             raise RuntimeError("Camera is not connected.")
@@ -88,11 +121,20 @@ class PcoEdgeCamera(BaseCamera):
         
         metas = []
         for i, meta in enumerate(metadata_list):
+            cam_time = None
+            if isinstance(meta, dict):
+                cam_time = meta.get("timestamp")
+            if not cam_time:
+                cam_time = time.time()
             metas.append({
                 "frame_id": i,
+                "camera_timestamp": cam_time,
+                "camera_time_str": datetime.now().strftime("%H:%M:%S.%f")[:-3],
                 "raw_meta": str(meta),
-                "exposure_s": self._exposure_time_s
+                "exposure_s": self._exposure_time_s,
+                "roi": self.get_roi()
             })
 
         return images_array, metas
+
 

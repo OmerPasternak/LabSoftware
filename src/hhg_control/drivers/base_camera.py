@@ -71,10 +71,56 @@ class BaseCamera(ABC):
         """Return sensor resolution, pixel size, model, and serial number."""
         pass
 
+    def get_roi(self) -> tuple[int, int, int, int]:
+        """Return zero-based (x0, y0, x1, y1) pixel bounds (upper bounds excluded)."""
+        info = self.get_sensor_info()
+        return getattr(self, "_roi", (0, 0, info.get("width", 2560), info.get("height", 2160)))
+
+    def get_roi_limits(self) -> Dict[str, Any]:
+        """Return hardware pixel steps, minimum size, and symmetry requirements."""
+        return {
+            "steps": (1, 1),
+            "minimum": (1, 1),
+            "symmetric": (False, False)
+        }
+
+    def validate_roi(self, roi: tuple[int, int, int, int]) -> None:
+        """Validate ROI parameters against sensor geometry and hardware constraints."""
+        if len(roi) != 4 or any(not isinstance(v, (int, np.integer)) for v in roi):
+            raise ValueError("ROI requires four integer pixel bounds (x0, y0, x1, y1).")
+        x0, y0, x1, y1 = [int(v) for v in roi]
+        info = self.get_sensor_info()
+        w, h = info.get("width", 2560), info.get("height", 2160)
+        limits = self.get_roi_limits()
+        step_x, step_y = limits["steps"]
+        min_w, min_h = limits["minimum"]
+        sym_x, sym_y = limits["symmetric"]
+
+        if not (0 <= x0 < x1 <= w) or not (0 <= y0 < y1 <= h):
+            raise ValueError(f"ROI ({x0}, {y0}, {x1}, {y1}) is outside sensor bounds [0, 0, {w}, {h}].")
+
+        if (x1 - x0) < min_w or (y1 - y0) < min_h:
+            raise ValueError(f"ROI span ({x1 - x0} x {y1 - y0}) is smaller than minimum ({min_w} x {min_h}).")
+
+        if (x0 % step_x != 0) or (x1 % step_x != 0):
+            raise ValueError(f"Horizontal ROI bounds must be multiples of {step_x} pixels.")
+        if (y0 % step_y != 0) or (y1 % step_y != 0):
+            raise ValueError(f"Vertical ROI bounds must be multiples of {step_y} pixels.")
+
+        if sym_x and (x0 + x1 != w):
+            raise ValueError(f"Horizontal ROI must be symmetric about sensor center (x0 + x1 = {w}).")
+        if sym_y and (y0 + y1 != h):
+            raise ValueError(f"Vertical ROI must be symmetric about sensor center (y0 + y1 = {h}).")
+
+    def set_roi(self, roi: tuple[int, int, int, int]) -> None:
+        """Configure hardware readout bounds."""
+        raise NotImplementedError("Hardware ROI is not supported by this camera driver.")
+
     def __enter__(self):
         self.connect()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
+
 

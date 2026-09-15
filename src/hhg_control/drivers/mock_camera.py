@@ -4,6 +4,7 @@ Simulates dark counts, read noise, and a Gaussian beam profile.
 """
 
 import time
+from datetime import datetime
 from typing import Tuple, List, Dict, Any
 import numpy as np
 from .base_camera import BaseCamera
@@ -68,6 +69,15 @@ class MockPcoCamera(BaseCamera):
             "interface": "USB 3.0 (Emulated)"
         }
 
+    def get_roi_limits(self) -> Dict[str, Any]:
+        """Hardware ROI limits matching pco.edge 5.5: 4-pixel X steps, vertically symmetric around y=1080."""
+        return {"steps": (4, 1), "minimum": (64, 16), "symmetric": (False, True)}
+
+    def set_roi(self, roi: tuple[int, int, int, int]) -> None:
+        """Simulate hardware sensor ROI in unbinned sensor pixels."""
+        self.validate_roi(roi)
+        self._roi = tuple(roi)
+
     def acquire_frames(self, num_frames: int) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
         if not self._is_connected:
             raise RuntimeError("Cannot acquire frames: Mock camera is not connected.")
@@ -95,6 +105,8 @@ class MockPcoCamera(BaseCamera):
         roi_h = self._roi_y2 - self._roi_y1
         roi_w = self._roi_x2 - self._roi_x1
 
+        x0, y0, x1, y1 = self.get_roi()
+
         for i in range(num_frames):
             dark_frame = self._dark_bank[self._dark_idx % len(self._dark_bank)].copy()
             self._dark_idx += 1
@@ -104,13 +116,19 @@ class MockPcoCamera(BaseCamera):
 
             images[i] = np.clip(dark_frame, 0, 65535).astype(np.uint16)
 
+            t_now = time.time()
             metadata.append({
                 "frame_id": i,
-                "timestamp": time.time(),
+                "timestamp": t_now,
+                "camera_timestamp": t_now,
+                "camera_time_str": datetime.now().strftime("%H:%M:%S.%f")[:-3],
                 "exposure_s": self._exposure_time_s,
+                "roi": (x0, y0, x1, y1),
                 "data_type": "Synthetic 2D Gaussian beam + Poisson shot noise + Dark pedestal",
                 "simulated": True
             })
 
-        return images, metadata
+        # Return strictly cropped ROI frames; pixels outside are shut off by hardware
+        cropped_images = np.ascontiguousarray(images[:, y0:y1, x0:x1])
+        return cropped_images, metadata
 
