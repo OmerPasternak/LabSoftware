@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGroupBox, QLabel, QLineEdit, QDoubleSpinBox, QSpinBox,
     QPushButton, QFileDialog, QTextEdit, QMessageBox,
-    QScrollArea, QSplitter, QGridLayout, QFrame, QSizePolicy
+    QScrollArea, QSplitter, QGridLayout, QFrame, QSizePolicy, QInputDialog
 )
 
 import matplotlib
@@ -160,6 +160,8 @@ class CameraMainWindow(QMainWindow):
         self._colorbar = None
         self._timestamp_artist = None
         self._roi_selector: Optional[RectangleSelector] = None
+        self._clim_low: int = 0       # current lower color limit (ADU)
+        self._clim_high: int = 65535  # current upper color limit (ADU)
 
         self._build_ui()
 
@@ -221,56 +223,9 @@ class CameraMainWindow(QMainWindow):
         self.canvas = FigureCanvasQTAgg(self.figure)
         self.canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.axis = self.figure.add_subplot(111)
-        self.axis.set_title("pco.edge 5.5 Camera Monitor", fontsize=11, fontweight="bold")
-        self.axis.set_xlabel("Sensor X Pixel Index")
-        self.axis.set_ylabel("Sensor Y Pixel Index")
         image_row.addWidget(self.canvas, stretch=10)
-
         self.canvas.mpl_connect("button_press_event", self._on_canvas_click)
 
-        # Manual Color Scale Strip (Adjacent to Colorbar)
-        clim_panel = QWidget()
-        lay_clim = QVBoxLayout(clim_panel)
-        lay_clim.setContentsMargins(4, 4, 4, 4)
-        lay_clim.setSpacing(6)
-        lay_clim.setAlignment(Qt.AlignmentFlag.AlignTop)
-
-        lbl_clim_title = QLabel("Color Scale\n(ADU)")
-        lbl_clim_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_clim_title.setStyleSheet("font-weight: bold; font-size: 11px; color: #495057;")
-        lay_clim.addWidget(lbl_clim_title)
-
-        lay_clim.addWidget(QLabel("Max:"))
-        self.spn_clim_max = QSpinBox()
-        self.spn_clim_max.setRange(1, 65535)
-        self.spn_clim_max.setValue(65535)
-        self.spn_clim_max.setMinimumWidth(80)
-        self.spn_clim_max.setToolTip("Upper color limit in ADU. Modifies display immediately.")
-        self.spn_clim_max.valueChanged.connect(self._on_clim_changed)
-        lay_clim.addWidget(self.spn_clim_max)
-
-        lay_clim.addWidget(QLabel("Min:"))
-        self.spn_clim_min = QSpinBox()
-        self.spn_clim_min.setRange(0, 65534)
-        self.spn_clim_min.setValue(0)
-        self.spn_clim_min.setMinimumWidth(80)
-        self.spn_clim_min.setToolTip("Lower color limit in ADU. Modifies display immediately.")
-        self.spn_clim_min.valueChanged.connect(self._on_clim_changed)
-        lay_clim.addWidget(self.spn_clim_min)
-
-        self.btn_clim_fit = QPushButton("Fit Frame")
-        self.btn_clim_fit.setStyleSheet("font-size: 11px; padding: 4px;")
-        self.btn_clim_fit.setToolTip("One-time adjustment of Min and Max to current frame intensity.")
-        self.btn_clim_fit.clicked.connect(self._fit_clim_to_current_frame)
-        lay_clim.addWidget(self.btn_clim_fit)
-
-        self.btn_clim_full = QPushButton("Full 16-bit")
-        self.btn_clim_full.setStyleSheet("font-size: 11px; padding: 4px;")
-        self.btn_clim_full.setToolTip("Reset limits to 0 - 65,535 ADU.")
-        self.btn_clim_full.clicked.connect(lambda: self._set_clim(0, 65535))
-        lay_clim.addWidget(self.btn_clim_full)
-
-        image_row.addWidget(clim_panel, stretch=0)
         lay_top.addLayout(image_row)
 
         # Intensity metrics status line below canvas
@@ -650,39 +605,45 @@ class CameraMainWindow(QMainWindow):
             QTimer.singleShot(25, self._capture_next_preview)
 
     # =========================================================================
-    # Display & Manual Color Scale
+    # Display & Color Scale (click colorbar tick to edit limits)
     # =========================================================================
-    def _on_clim_changed(self) -> None:
-        """Apply manual color limits immediately to the image canvas."""
+    def _set_clim(self, low: int, high: int) -> None:
+        """Set color limits programmatically.
+
+        Args:
+            low:  Lower intensity bound in ADU (0–65534).
+            high: Upper intensity bound in ADU (1–65535, must be > low).
+        """
+        self._clim_low = max(0, low)
+        self._clim_high = min(65535, max(low + 1, high))
         if self._image_artist is not None:
-            c_min = self.spn_clim_min.value()
-            c_max = max(c_min + 1, self.spn_clim_max.value())
-            self._image_artist.set_clim(c_min, c_max)
+            self._image_artist.set_clim(self._clim_low, self._clim_high)
             self.canvas.draw_idle()
 
-    def _set_clim(self, low: int, high: int) -> None:
-        self.spn_clim_min.setValue(low)
-        self.spn_clim_max.setValue(high)
-        self._on_clim_changed()
-
-    def _fit_clim_to_current_frame(self) -> None:
-        """One-time adjustment of Min and Max to match the latest frame."""
-        if hasattr(self, "_last_frame") and self._last_frame is not None:
-            c_min = int(self._last_frame.min())
-            c_max = int(self._last_frame.max())
-            self._set_clim(c_min, max(c_min + 1, c_max))
-
     def _on_canvas_click(self, event) -> None:
-        """Click on colorbar focuses the corresponding manual limit text box."""
+        """Click anywhere on the colorbar to edit the nearest limit.
+
+        Top half → edit upper (max) limit.
+        Bottom half → edit lower (min) limit.
+        A plain integer input dialog is shown; out-of-range or cancelled
+        inputs are silently ignored.
+        """
         if self._colorbar is None or event.inaxes != self._colorbar.ax:
             return
         bbox = self._colorbar.ax.bbox
-        if event.y >= (bbox.y0 + bbox.y1) / 2:
-            self.spn_clim_max.setFocus()
-            self.spn_clim_max.selectAll()
+        editing_max = event.y >= (bbox.y0 + bbox.y1) / 2
+        current = self._clim_high if editing_max else self._clim_low
+        label = "Upper limit (ADU, 0–65535):" if editing_max else "Lower limit (ADU, 0–65535):"
+        value, ok = QInputDialog.getInt(
+            self, "Set Color Scale", label,
+            value=current, min=0, max=65535, step=1
+        )
+        if not ok:
+            return
+        if editing_max:
+            self._set_clim(self._clim_low, value)
         else:
-            self.spn_clim_min.setFocus()
-            self.spn_clim_min.selectAll()
+            self._set_clim(value, self._clim_high)
 
     def _update_display(self, frame: np.ndarray, meta: Optional[dict] = None) -> None:
         """Update canvas display with 2x downsampling, zooming to active ROI."""
@@ -709,9 +670,6 @@ class CameraMainWindow(QMainWindow):
 
         if self._image_artist is None:
             self.axis.clear()
-            self.axis.set_title("pco.edge 5.5 Camera Monitor", fontsize=11, fontweight="bold")
-            self.axis.set_xlabel("Sensor X Pixel Index")
-            self.axis.set_ylabel("Sensor Y Pixel Index")
             self._image_artist = self.axis.imshow(
                 display_frame,
                 cmap="viridis",
@@ -720,7 +678,7 @@ class CameraMainWindow(QMainWindow):
                 extent=[x0, x1, y1, y0]
             )
             self._colorbar = self.figure.colorbar(self._image_artist, ax=self.axis, fraction=0.046, pad=0.04)
-            self._colorbar.set_label("16-bit Counts (ADU)", rotation=270, labelpad=15)
+            self._colorbar.ax.tick_params(labelsize=8)
             self.figure.tight_layout()
 
             self._roi_selector = RectangleSelector(
@@ -742,30 +700,26 @@ class CameraMainWindow(QMainWindow):
         self.axis.set_ylim(y1, y0)
 
         # Strictly apply manual limits (never overridden automatically)
-        self._image_artist.set_clim(self.spn_clim_min.value(), self.spn_clim_max.value())
+        self._image_artist.set_clim(self._clim_low, self._clim_high)
 
-        # Hardware Camera Timestamp Overlay (Top-Left)
+        # Hardware Camera Timestamp Overlay (Top-Left corner — time only)
         cam_time = ""
         if meta:
             cam_time = meta.get("camera_time_str") or ""
         if not cam_time:
             cam_time = datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
-        exp_ms = self.spn_exposure.value()
-        status_tag = "LIVE" if self._is_live_active else "FRAME"
-        overlay_text = f"[{status_tag} | Cam Time: {cam_time} | Frame #{self._frame_count} | Exp: {exp_ms:.1f} ms]"
-
         if self._timestamp_artist is None:
             self._timestamp_artist = self.axis.text(
-                0.02, 0.95, overlay_text,
+                0.01, 0.98, cam_time,
                 transform=self.axis.transAxes,
-                fontsize=9, color="#00ffcc",
-                fontweight="bold",
+                fontsize=7, color="#aaaaaa",
+                fontweight="normal",
                 va="top", ha="left",
-                bbox={"facecolor": "black", "alpha": 0.7, "edgecolor": "#00ffcc", "boxstyle": "round,pad=0.3"}
+                bbox={"facecolor": "black", "alpha": 0.25, "edgecolor": "none", "boxstyle": "round,pad=0.2"}
             )
         else:
-            self._timestamp_artist.set_text(overlay_text)
+            self._timestamp_artist.set_text(cam_time)
 
         self.canvas.draw_idle()
 

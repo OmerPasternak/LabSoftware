@@ -109,3 +109,4 @@ def test_scan_manager_preview_and_step_saving_with_roi(tmp_path: Path):
         assert h5f.attrs["scan_parameter_value"] == 1.234
 
     cam.close()
+
