@@ -6,14 +6,14 @@ manual color scale controls, camera-derived timestamps, and hardware-constrained
 
 import sys
 import os
-import time
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
 import numpy as np
 
-from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGroupBox, QLabel, QLineEdit, QDoubleSpinBox, QSpinBox,
@@ -31,147 +31,13 @@ import matplotlib.patches as mpatches
 from hhg_control.drivers.base_camera import BaseCamera, ReadoutMode
 from hhg_control.drivers.mock_camera import MockPcoCamera
 from hhg_control.sequencer.scan_manager import CameraScanManager
-
-
-class PreviewTask(QThread):
-    """
-    Background worker thread for capturing a single live preview frame without writing to disk.
-    Keeps the GUI responsive during exposure.
-    """
-    frame_ready = pyqtSignal(np.ndarray, dict)
-    error_occurred = pyqtSignal(str)
-
-    def __init__(self, scan_manager: CameraScanManager) -> None:
-        super().__init__()
-        self.scan_manager = scan_manager
-
-    def run(self) -> None:
-        try:
-            frame, meta = self.scan_manager.acquire_preview()
-            self.frame_ready.emit(frame, meta)
-        except Exception as exc:
-            self.error_occurred.emit(str(exc))
-
-
-class LiveStreamTask(QThread):
-    """
-    Persistent background worker thread for continuous live camera view.
-    Eliminates OS thread creation/destruction churn by running a steady acquisition loop.
-    """
-    frame_ready = pyqtSignal(np.ndarray, dict)
-    error_occurred = pyqtSignal(str)
-
-    def __init__(self, scan_manager: CameraScanManager, target_fps: float = 20.0) -> None:
-        super().__init__()
-        self.scan_manager = scan_manager
-        self.target_fps = target_fps
-        self._running = False
-        self.gui_ready = True
-
-    def stop(self) -> None:
-        self._running = False
-
-    def run(self) -> None:
-        self._running = True
-        min_interval = 1.0 / self.target_fps
-        while self._running:
-            t0 = time.perf_counter()
-            try:
-                # Flow control: do not acquire if GUI is still displaying the previous frame
-                if not self.gui_ready:
-                    time.sleep(0.005)
-                    continue
-
-                frame, meta = self.scan_manager.acquire_preview()
-                if self._running and self.gui_ready:
-                    self.gui_ready = False
-                    self.frame_ready.emit(frame, meta)
-            except Exception as exc:
-                if self._running:
-                    self.error_occurred.emit(str(exc))
-                break
-
-            elapsed = time.perf_counter() - t0
-            sleep_time = min_interval - elapsed
-            if sleep_time > 0 and self._running:
-                time.sleep(sleep_time)
-
-
-class ScanSequenceTask(QThread):
-    """
-    Dedicated background worker thread for executing a full multi-step scan sequence.
-    Iterates through planned scan steps, saving HDF5 datasets at each step.
-    Supports starting from any step index (to continue paused scans), immediate step start
-    notifications, and graceful abort requests without corrupting files or hardware state.
-    """
-    step_started = pyqtSignal(int, int, float, str)  # (step_idx, total_steps, param_val, param_name)
-    step_completed = pyqtSignal(int, int, float, str, np.ndarray, Path)
-    scan_finished = pyqtSignal(int)
-    scan_aborted = pyqtSignal(int, int, float, str)  # (stopped_step_idx, total_steps, param_val, param_name)
-    error_occurred = pyqtSignal(str)
-
-    def __init__(
-        self,
-        scan_mgr: CameraScanManager,
-        exp_name: str,
-        param_name: str,
-        start_val: float,
-        step_size: float,
-        num_steps: int,
-        num_frames: int,
-        start_step: int = 0,
-    ) -> None:
-        super().__init__()
-        self.scan_mgr = scan_mgr
-        self.exp_name = exp_name
-        self.param_name = param_name
-        self.start_val = start_val
-        self.step_size = step_size
-        self.num_steps = num_steps
-        self.num_frames = num_frames
-        self.start_step = start_step
-        self._abort_requested = False
-        self._current_step = start_step
-
-    def request_abort(self) -> None:
-        """Signal the scan loop to stop gracefully after completing the current step."""
-        self._abort_requested = True
-
-    @property
-    def is_abort_requested(self) -> bool:
-        return self._abort_requested
-
-    def run(self) -> None:
-        try:
-            def on_start(step: int, val: float) -> None:
-                self._current_step = step
-                self.step_started.emit(step, self.num_steps, val, self.param_name)
-
-            for step, val, filepath, latest_frame in self.scan_mgr.execute_scan(
-                experiment_name=self.exp_name,
-                param_name=self.param_name,
-                start_value=self.start_val,
-                step_size=self.step_size,
-                num_steps=self.num_steps,
-                num_frames=self.num_frames,
-                start_step=self.start_step,
-                on_step_start=on_start,
-                abort_check=lambda: self._abort_requested,
-            ):
-                self.step_completed.emit(
-                    step, self.num_steps, val, self.param_name, latest_frame, filepath
-                )
-                if self._abort_requested:
-                    self.scan_aborted.emit(step, self.num_steps, val, self.param_name)
-                    return
-
-            if self._abort_requested:
-                val = self.start_val + self._current_step * self.step_size
-                self.scan_aborted.emit(self._current_step, self.num_steps, val, self.param_name)
-            else:
-                self.scan_finished.emit(self.num_steps)
-        except Exception as exc:
-            self.error_occurred.emit(str(exc))
+from .workers import (
+    CameraConnectTask,
+    CameraModeTask,
+    LiveStreamTask,
+    PreviewTask,
+    ScanSequenceTask,
+)
 
 
 class CameraMainWindow(QMainWindow):
@@ -193,6 +59,8 @@ class CameraMainWindow(QMainWindow):
         self.active_scan_task: Optional[ScanSequenceTask] = None
         self.active_preview_task: Optional[PreviewTask] = None
         self.active_live_task: Optional[LiveStreamTask] = None
+        self.active_connect_task: Optional[CameraConnectTask] = None
+        self.active_mode_task: Optional[CameraModeTask] = None
 
         # State tracking
         self._is_live_active: bool = False
@@ -200,9 +68,14 @@ class CameraMainWindow(QMainWindow):
         self._is_updating_range: bool = False
         self._is_updating_roi: bool = False
         self._paused_step: Optional[int] = None
+        self._paused_run_id: Optional[str] = None
+        self._current_run_id: Optional[str] = None
         self._current_executing_step: int = 0
         self._frame_count: int = 0
         self._closing: bool = False
+        self._after_live_stopped: Optional[Callable[[], None]] = None
+        self._after_connect: Optional[Callable[[], None]] = None
+        self._resume_live_after_mode: bool = False
 
         # Matplotlib display caches
         self._image_artist = None
@@ -235,6 +108,14 @@ class CameraMainWindow(QMainWindow):
         # Top bar: GO / STOP / Status + Color Scale
         top_bar = QHBoxLayout()
         top_bar.setSpacing(8)
+
+        self.cmb_camera_source = QComboBox()
+        self.cmb_camera_source.addItem("Simulated", userData="simulated")
+        self.cmb_camera_source.addItem("Physical pco.edge", userData="physical")
+        self.cmb_camera_source.setToolTip(
+            "Select the camera explicitly. Physical-camera failures never fall back to synthetic data."
+        )
+        top_bar.addWidget(self.cmb_camera_source)
 
         self.btn_go = QPushButton("GO")
         self._set_go_button_style(active=False)
@@ -508,7 +389,7 @@ class CameraMainWindow(QMainWindow):
 
         store_grid.addWidget(QLabel("Folder:"), 0, 0)
         self.txt_storage_dir = QLineEdit(str(self.scan_manager.storage_dir))
-        self.txt_storage_dir.textChanged.connect(self._on_storage_dir_edited)
+        self.txt_storage_dir.editingFinished.connect(self._on_storage_dir_edited)
         store_grid.addWidget(self.txt_storage_dir, 0, 1)
 
         self.btn_browse = QPushButton("Browse")
@@ -568,10 +449,9 @@ class CameraMainWindow(QMainWindow):
             return
 
         if not self.camera.is_connected:
-            self._connect_camera()
-
-        if self.camera.is_connected:
-            self._start_live()
+            self._connect_camera(after_connect=self._start_live)
+            return
+        self._start_live()
 
     def _start_live(self) -> None:
         if not self.camera.is_connected:
@@ -589,18 +469,36 @@ class CameraMainWindow(QMainWindow):
             self.active_live_task = LiveStreamTask(scan_manager=self.scan_manager, target_fps=20.0)
             self.active_live_task.frame_ready.connect(self._on_live_frame_ready)
             self.active_live_task.error_occurred.connect(self._on_preview_error)
+            self.active_live_task.finished.connect(self._on_live_task_finished)
             self.active_live_task.start()
 
-    def _stop_live(self) -> None:
+    def _stop_live(self, after_stop: Optional[Callable[[], None]] = None) -> None:
+        """Request live stop and continue only after the worker confirms completion."""
         self._is_live_active = False
+        if after_stop is not None:
+            self._after_live_stopped = after_stop
         self._set_go_button_style(active=False)
-        self.lbl_system_status.setText("Status: Live Paused")
+        self.lbl_system_status.setText("Status: Stopping live acquisition...")
         self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #6c757d; padding-left: 8px;")
 
         if self.active_live_task is not None:
             self.active_live_task.stop()
-            self.active_live_task.wait(400)
-            self.active_live_task = None
+        else:
+            self._on_live_task_finished()
+
+    def _on_live_task_finished(self) -> None:
+        task = self.active_live_task
+        self.active_live_task = None
+        if task is not None:
+            task.deleteLater()
+        callback = self._after_live_stopped
+        self._after_live_stopped = None
+        if self._closing:
+            self.close()
+        elif callback is not None:
+            callback()
+        else:
+            self.lbl_system_status.setText("Status: Live Paused")
 
     def _on_stop_clicked(self) -> None:
         """Global Stop: halts live view or gracefully aborts in-progress scan."""
@@ -609,67 +507,74 @@ class CameraMainWindow(QMainWindow):
             self._stop_live()
 
         if self.active_scan_task is not None and self.active_scan_task.isRunning():
-            self.lbl_system_status.setText("Status: Aborting scan after current step...")
+            self.lbl_system_status.setText("Status: Aborting scan at next safe frame batch...")
             self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #d97706; padding-left: 8px;")
             self.btn_take_measurement.setText("Stopping...")
             self.btn_take_measurement.setEnabled(False)
             self.active_scan_task.request_abort()
 
-    def _connect_camera(self) -> None:
-        """Seamless camera connection: uses physical pco.edge 5.5 if detected, else mock emulator."""
+    def _connect_camera(self, after_connect: Optional[Callable[[], None]] = None) -> None:
+        """Connect the explicitly selected camera source in a worker thread."""
+        if self.active_connect_task is not None and self.active_connect_task.isRunning():
+            return
+        self._after_connect = after_connect
         self.lbl_system_status.setText("Status: Connecting to camera...")
         self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #d97706; padding-left: 8px;")
-        QApplication.processEvents()
+        self.btn_go.setEnabled(False)
+        self.cmb_camera_source.setEnabled(False)
+        source = self.cmb_camera_source.currentData()
+        self.active_connect_task = CameraConnectTask(source, self.spn_exposure.value() / 1000.0)
+        self.active_connect_task.connected.connect(self._on_camera_connected)
+        self.active_connect_task.error_occurred.connect(self._on_camera_connection_error)
+        self.active_connect_task.finished.connect(self._on_camera_connection_finished)
+        self.active_connect_task.start()
 
-        t_start = time.perf_counter()
-        is_sim = False
-
-        pco_error = None
-        try:
-            from hhg_control.drivers.pco_edge import PcoEdgeCamera
-            cam = PcoEdgeCamera()
-            cam.connect()
-            self.camera = cam
-        except Exception as err:
-            pco_error = str(err)
-            cam = MockPcoCamera()
-            cam.connect()
-            self.camera = cam
-            is_sim = True
-
-        conn_time = time.perf_counter() - t_start
+    def _on_camera_connected(self, camera: BaseCamera, is_sim: bool, connection_time: float) -> None:
+        self.camera = camera
         self.scan_manager.camera = self.camera
-        self._on_exposure_changed(self.spn_exposure.value())
-
         info = self.camera.get_sensor_info()
         model_name = info.get("model", "pco.edge 5.5")
-
         if is_sim:
-            if pco_error:
-                self._append_log(f"[INFO] Physical camera search: {pco_error}")
-            self._append_log(f"[CONNECT] Connected to simulated camera in {conn_time:.2f} s.")
+            self._append_log(f"[CONNECT] Connected to explicitly selected simulated camera in {connection_time:.2f} s.")
             self.lbl_system_status.setText("Status: Connected (Simulated Camera)")
         else:
-            self._append_log(f"[CONNECT] Connected to physical {model_name} on USB 3.0 in {conn_time:.2f} s.")
+            self._append_log(f"[CONNECT] Connected to physical {model_name} on USB 3.0 in {connection_time:.2f} s.")
             self.lbl_system_status.setText(f"Status: Connected ({model_name} USB 3.0)")
         self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #198754; padding-left: 8px;")
-
-        # Apply GUI readout mode to camera, or sync combobox if camera has mode
         desired_mode = self.cmb_readout_mode.itemData(self.cmb_readout_mode.currentIndex())
-        if desired_mode is not None and hasattr(self.camera, "set_readout_mode"):
-            try:
-                self.camera.set_readout_mode(desired_mode)
-            except Exception:
-                pass
+        if desired_mode is not None and self.camera.get_readout_mode() != desired_mode:
+            callback = self._after_connect
+            self._after_connect = None
+            self._start_mode_change(desired_mode, resume_live=False, after_mode=callback)
 
-        if hasattr(self.camera, "get_readout_mode"):
-            curr_mode = self.camera.get_readout_mode()
-            self.cmb_readout_mode.blockSignals(True)
-            for idx in range(self.cmb_readout_mode.count()):
-                if self.cmb_readout_mode.itemData(idx) == curr_mode:
-                    self.cmb_readout_mode.setCurrentIndex(idx)
-                    break
-            self.cmb_readout_mode.blockSignals(False)
+    def _on_camera_connection_error(self, error: str) -> None:
+        source_name = self.cmb_camera_source.currentText()
+        self._append_log(f"[CONNECT ERROR] {source_name}: {error}")
+        self.lbl_system_status.setText(f"Status: {source_name} connection failed")
+        self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #dc3545; padding-left: 8px;")
+        QMessageBox.warning(
+            self,
+            "Camera Connection Failed",
+            f"Could not connect to {source_name}:\n\n{error}\n\nNo simulated-camera fallback was performed.",
+        )
+        self._after_connect = None
+
+    def _on_camera_connection_finished(self) -> None:
+        task = self.active_connect_task
+        self.active_connect_task = None
+        if task is not None:
+            task.deleteLater()
+        self.btn_go.setEnabled(True)
+        if self._closing:
+            self.close()
+            return
+        if not self.camera.is_connected:
+            self.cmb_camera_source.setEnabled(True)
+            return
+        callback = self._after_connect
+        self._after_connect = None
+        if callback is not None and self.active_mode_task is None:
+            callback()
 
     def _on_readout_mode_changed(self, index: int) -> None:
         """Handle user toggling camera sensor readout mode (Rolling Shutter vs Global Reset)."""
@@ -694,7 +599,6 @@ class CameraMainWindow(QMainWindow):
             return
 
         if not self.camera.is_connected:
-            self._connect_camera()
             return
 
         if hasattr(self.camera, "get_readout_mode") and self.camera.get_readout_mode() == mode:
@@ -702,40 +606,64 @@ class CameraMainWindow(QMainWindow):
 
         was_live = self._is_live_active
         if was_live:
-            self._stop_live()
+            self._stop_live(after_stop=lambda: self._start_mode_change(mode, resume_live=True))
+            return
+        self._start_mode_change(mode, resume_live=False)
 
+    def _start_mode_change(
+        self,
+        mode: ReadoutMode,
+        resume_live: bool,
+        after_mode: Optional[Callable[[], None]] = None,
+    ) -> None:
+        if self.active_mode_task is not None and self.active_mode_task.isRunning():
+            return
         self.lbl_system_status.setText(f"Status: Switching to {mode.name}... (Camera reconfiguring)")
         self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #d97706; padding-left: 8px;")
         self._append_log(f"[READOUT MODE] Switching sensor mode to {mode.name} (PCO setup value {mode.value})...")
-        QApplication.processEvents()
+        self._resume_live_after_mode = resume_live
+        self._after_connect = after_mode
+        self.cmb_readout_mode.setEnabled(False)
+        self.active_mode_task = CameraModeTask(self.camera, mode)
+        self.active_mode_task.mode_applied.connect(self._on_mode_applied)
+        self.active_mode_task.error_occurred.connect(self._on_mode_error)
+        self.active_mode_task.finished.connect(self._on_mode_task_finished)
+        self.active_mode_task.start()
 
-        try:
-            self.camera.set_readout_mode(mode)
-            self._append_log(f"[READOUT MODE] Camera successfully configured to {mode.name}.")
-            self.lbl_system_status.setText(f"Status: Mode Active ({mode.name})")
-            self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #198754; padding-left: 8px;")
-            self.cmb_readout_mode.blockSignals(True)
-            for idx in range(self.cmb_readout_mode.count()):
-                if self.cmb_readout_mode.itemData(idx) == mode:
-                    self.cmb_readout_mode.setCurrentIndex(idx)
-                    break
-            self.cmb_readout_mode.blockSignals(False)
-        except Exception as exc:
-            self._append_log(f"[READOUT MODE ERROR] Failed to set {mode.name}: {exc}")
-            QMessageBox.warning(self, "Readout Mode Error", f"Could not switch readout mode to {mode.name}:\n\n{exc}")
-            # Revert combo box to current camera mode
-            self.cmb_readout_mode.blockSignals(True)
-            curr = self.camera.get_readout_mode()
-            for idx in range(self.cmb_readout_mode.count()):
-                if self.cmb_readout_mode.itemData(idx) == curr:
-                    self.cmb_readout_mode.setCurrentIndex(idx)
-                    break
-            self.cmb_readout_mode.blockSignals(False)
-        finally:
-            if was_live:
-                self._start_live()
-            else:
-                self._capture_single_preview()
+    def _on_mode_applied(self, mode: ReadoutMode) -> None:
+        self._append_log(f"[READOUT MODE] Camera successfully configured to {mode.name}.")
+        self.lbl_system_status.setText(f"Status: Mode Active ({mode.name})")
+        self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #198754; padding-left: 8px;")
+
+    def _on_mode_error(self, error: str) -> None:
+        self._append_log(f"[READOUT MODE ERROR] {error}")
+        QMessageBox.warning(self, "Readout Mode Error", f"Could not switch readout mode:\n\n{error}")
+        current = self.camera.get_readout_mode()
+        self.cmb_readout_mode.blockSignals(True)
+        for index in range(self.cmb_readout_mode.count()):
+            if self.cmb_readout_mode.itemData(index) == current:
+                self.cmb_readout_mode.setCurrentIndex(index)
+                break
+        self.cmb_readout_mode.blockSignals(False)
+
+    def _on_mode_task_finished(self) -> None:
+        task = self.active_mode_task
+        self.active_mode_task = None
+        if task is not None:
+            task.deleteLater()
+        self.cmb_readout_mode.setEnabled(True)
+        if self._closing:
+            self.close()
+            return
+        callback = self._after_connect
+        self._after_connect = None
+        if callback is not None:
+            callback()
+        elif self._resume_live_after_mode:
+            self._resume_live_after_mode = False
+            self._start_live()
+        else:
+            self._capture_single_preview()
 
     # =========================================================================
     # Live Preview & Single Capture
@@ -743,8 +671,9 @@ class CameraMainWindow(QMainWindow):
     def _capture_single_preview(self) -> None:
         """Acquire a single frame and update display without starting live loop."""
         if not self.camera.is_connected:
-            self._connect_camera()
-        if self.camera.is_connected and not self._is_live_active:
+            self._connect_camera(after_connect=self._capture_next_preview)
+            return
+        if not self._is_live_active:
             self._capture_next_preview()
 
     def _capture_next_preview(self) -> None:
@@ -785,6 +714,8 @@ class CameraMainWindow(QMainWindow):
         if self.active_preview_task is not None:
             self.active_preview_task.deleteLater()
             self.active_preview_task = None
+        if self._closing:
+            self.close()
 
     # =========================================================================
     # Display & Color Scale
@@ -853,20 +784,21 @@ class CameraMainWindow(QMainWindow):
         self._last_frame = frame
         self._frame_count += 1
 
-        # Pixel intensity metrics (fast sub-sampled for instant calculation on large frames)
-        sample = frame[::2, ::2] if frame.size > 500000 else frame
-        c_min = int(sample.min())
-        c_max = int(sample.max())
-        c_mean = float(sample.mean())
-        sat_warning = " [WARNING: SENSOR SATURATION DETECTED!]" if c_max >= 65530 else ""
-        sat_color = "#dc3545" if sat_warning else "#212529"
-        self.lbl_intensity_metrics.setStyleSheet(
-            f"font-size: 11px; font-weight: bold; padding: 3px 6px; background: #f8f9fa; "
-            f"border: 1px solid #dee2e6; border-radius: 3px; color: {sat_color};"
-        )
-        self.lbl_intensity_metrics.setText(
-            f"Pixel Intensity Metrics | Minimum: {c_min:,} ADU | Maximum: {c_max:,} ADU | Mean: {c_mean:,.1f} ADU{sat_warning}"
-        )
+        # Metrics are intentionally throttled; saturation still checks every pixel.
+        if self._frame_count == 1 or self._frame_count % 5 == 0:
+            sample = frame[::2, ::2] if frame.size > 500000 else frame
+            c_min = int(sample.min())
+            c_max = int(frame.max())
+            c_mean = float(sample.mean())
+            sat_warning = " [WARNING: SENSOR SATURATION DETECTED!]" if c_max >= 65530 else ""
+            sat_color = "#dc3545" if sat_warning else "#212529"
+            self.lbl_intensity_metrics.setStyleSheet(
+                f"font-size: 11px; font-weight: bold; padding: 3px 6px; background: #f8f9fa; "
+                f"border: 1px solid #dee2e6; border-radius: 3px; color: {sat_color};"
+            )
+            self.lbl_intensity_metrics.setText(
+                f"Pixel Intensity Metrics | Minimum: {c_min:,} ADU | Maximum: {c_max:,} ADU | Mean: {c_mean:,.1f} ADU{sat_warning}"
+            )
 
         # Adaptive downsampling to match 550x450 canvas, avoiding wasting CPU rendering millions of invisible pixels
         h, w = frame.shape
@@ -918,7 +850,7 @@ class CameraMainWindow(QMainWindow):
                 self.axis.set_xlim(x0, x1)
                 self.axis.set_ylim(y1, y0)
 
-        # Hardware Camera Timestamp Overlay (Top-Left corner — time only)
+        # Display timestamp overlay. Per-frame metadata records whether it came from the SDK or host.
         cam_time = ""
         if meta:
             cam_time = meta.get("camera_time_str") or ""
@@ -1228,6 +1160,8 @@ class CameraMainWindow(QMainWindow):
     def _clear_paused_scan(self, reason: str = "") -> None:
         if self._paused_step is not None:
             self._paused_step = None
+            self._paused_run_id = None
+            self._current_run_id = None
             self.btn_cut_measurement.setVisible(False)
             self.btn_take_measurement.setText("Take Measurement")
             if reason:
@@ -1256,8 +1190,8 @@ class CameraMainWindow(QMainWindow):
     # =========================================================================
     # Storage Directory Handlers
     # =========================================================================
-    def _on_storage_dir_edited(self, text: str) -> None:
-        folder = Path(text.strip()).expanduser()
+    def _on_storage_dir_edited(self) -> None:
+        folder = Path(self.txt_storage_dir.text().strip()).expanduser()
         self.scan_manager.set_storage_dir(folder)
 
     def _browse_directory(self) -> None:
@@ -1286,7 +1220,8 @@ class CameraMainWindow(QMainWindow):
     def _toggle_measurement_scan(self) -> None:
         """Start scan, stop in-progress scan, or continue paused scan."""
         if not self.camera.is_connected:
-            self._connect_camera()
+            self._connect_camera(after_connect=self._toggle_measurement_scan)
+            return
 
         # If scan is already running, this button functions as Stop
         if self.active_scan_task is not None and self.active_scan_task.isRunning():
@@ -1295,9 +1230,14 @@ class CameraMainWindow(QMainWindow):
 
         # Stop live stream cleanly before starting multi-step scan
         if self._is_live_active:
-            self._stop_live()
+            self._stop_live(after_stop=self._toggle_measurement_scan)
+            return
 
         start_step = self._paused_step if self._paused_step is not None else 0
+        if start_step == 0:
+            self._current_run_id = datetime.now().strftime("%Y%m%dT%H%M%S_%f")
+        else:
+            self._current_run_id = self._paused_run_id
 
         target_dir = Path(self.txt_storage_dir.text().strip()).expanduser().resolve()
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -1341,6 +1281,7 @@ class CameraMainWindow(QMainWindow):
             num_steps=num_steps,
             num_frames=num_frames,
             start_step=start_step,
+            run_id=self._current_run_id,
         )
         self.active_scan_task.step_started.connect(self._on_scan_step_started)
         self.active_scan_task.step_completed.connect(self._on_scan_step_completed)
@@ -1414,6 +1355,8 @@ class CameraMainWindow(QMainWindow):
 
     def _on_scan_finished(self, total_steps: int) -> None:
         self._paused_step = None
+        self._paused_run_id = None
+        self._current_run_id = None
         end_val = self.spn_end_val.value()
         param_name = self.txt_scan_param.text().strip() or "Setpoint"
         self.lbl_scan_progress.setText(
@@ -1431,6 +1374,7 @@ class CameraMainWindow(QMainWindow):
         param_name: str
     ) -> None:
         self._paused_step = stopped_step_idx
+        self._paused_run_id = self._current_run_id
         self.lbl_scan_progress.setText(
             f"Scan Progress: Stopped at Step {stopped_step_idx + 1} of {total_steps} | {param_name}: {param_val:.4f}"
         )
@@ -1444,6 +1388,8 @@ class CameraMainWindow(QMainWindow):
     def _cut_measurement(self) -> None:
         stopped = self._paused_step
         self._paused_step = None
+        self._paused_run_id = None
+        self._current_run_id = None
         self.btn_cut_measurement.setVisible(False)
         self.btn_take_measurement.setText("Take Measurement")
         self.btn_take_measurement.setStyleSheet(
@@ -1496,7 +1442,7 @@ class CameraMainWindow(QMainWindow):
         self.txt_activity_log.append(message)
 
     def closeEvent(self, event) -> None:
-        """Graceful shutdown: stop live, abort scan, wait for threads, then disconnect camera."""
+        """Cooperatively stop workers before disconnecting the camera."""
         self._is_live_active = False
 
         if self.active_scan_task is not None and self.active_scan_task.isRunning():
@@ -1505,13 +1451,26 @@ class CameraMainWindow(QMainWindow):
             event.ignore()
             return
 
-        if self.active_live_task is not None:
-            self.active_live_task.stop()
-            self.active_live_task.wait(400)
-            self.active_live_task = None
+        if self.active_live_task is not None and self.active_live_task.isRunning():
+            self._closing = True
+            self._stop_live()
+            event.ignore()
+            return
 
         if self.active_preview_task is not None and self.active_preview_task.isRunning():
-            self.active_preview_task.wait(500)
+            self._closing = True
+            event.ignore()
+            return
+
+        if self.active_connect_task is not None and self.active_connect_task.isRunning():
+            self._closing = True
+            event.ignore()
+            return
+
+        if self.active_mode_task is not None and self.active_mode_task.isRunning():
+            self._closing = True
+            event.ignore()
+            return
 
         try:
             if self.camera.is_connected:
