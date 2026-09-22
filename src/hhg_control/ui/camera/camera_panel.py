@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGroupBox, QLabel, QLineEdit, QDoubleSpinBox, QSpinBox,
     QPushButton, QFileDialog, QTextEdit, QMessageBox,
-    QScrollArea, QSplitter, QGridLayout, QFrame, QSizePolicy
+    QGridLayout, QFrame, QSizePolicy
 )
 
 import matplotlib
@@ -172,14 +172,14 @@ class CameraMainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
 
         root_layout = QVBoxLayout(central_widget)
-        root_layout.setContentsMargins(8, 8, 8, 8)
-        root_layout.setSpacing(6)
+        root_layout.setContentsMargins(6, 6, 6, 6)
+        root_layout.setSpacing(4)
 
         # =========================================================================
-        # Top Docked Bar: GO and STOP Buttons (Top-Left Docked)
+        # Top bar: GO / STOP / Status
         # =========================================================================
         top_bar = QHBoxLayout()
-        top_bar.setSpacing(10)
+        top_bar.setSpacing(8)
 
         self.btn_go = QPushButton("GO")
         self._set_go_button_style(active=False)
@@ -192,319 +192,274 @@ class CameraMainWindow(QMainWindow):
             "background-color: #dc3545; border: 2px solid #dc3545; color: white; "
             "font-weight: bold; font-size: 13px; padding: 6px 20px; border-radius: 4px;"
         )
-        self.btn_stop.setToolTip("Stop all operations immediately (live stream or active scan).")
+        self.btn_stop.setToolTip("Stop all operations immediately.")
         self.btn_stop.clicked.connect(self._on_stop_clicked)
         top_bar.addWidget(self.btn_stop)
 
+        self.btn_preview = QPushButton("Single Frame")
+        self.btn_preview.setStyleSheet("padding: 6px 12px;")
+        self.btn_preview.setToolTip("Acquire one frame and refresh display without writing to disk.")
+        self.btn_preview.clicked.connect(self._capture_single_preview)
+        top_bar.addWidget(self.btn_preview)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setFrameShadow(QFrame.Shadow.Sunken)
+        top_bar.addWidget(sep)
+
         self.lbl_system_status = QLabel("Status: Idle / Ready")
-        self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #198754; padding-left: 8px;")
+        self.lbl_system_status.setStyleSheet(
+            "font-weight: bold; font-size: 13px; color: #198754; padding-left: 4px;"
+        )
         top_bar.addWidget(self.lbl_system_status)
-
         top_bar.addStretch()
-        root_layout.addLayout(top_bar)
 
-        # =========================================================================
-        # Main Vertical Splitter: Top (Image Monitor ~1/3-1/4), Bottom (Controls)
-        # =========================================================================
-        self.v_splitter = QSplitter(Qt.Orientation.Vertical)
-        root_layout.addWidget(self.v_splitter)
-
-        # -------------------------------------------------------------------------
-        # Pane 1: Top Image Frame Monitor & Manual Color Scale Controls
-        # -------------------------------------------------------------------------
-        top_container = QWidget()
-        lay_top = QVBoxLayout(top_container)
-        lay_top.setContentsMargins(2, 2, 2, 2)
-        lay_top.setSpacing(4)
-
-        image_row = QHBoxLayout()
-        image_row.setSpacing(8)
-
-        # Centered Canvas
-        self.figure = Figure(figsize=(8, 4.2), dpi=100)
-        self.canvas = FigureCanvasQTAgg(self.figure)
-        self.canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.axis = self.figure.add_subplot(111)
-        image_row.addWidget(self.canvas, stretch=10)
-        self.canvas.mpl_connect("button_press_event", self._on_canvas_click)
-
-        lay_top.addLayout(image_row)
-
-        # ---- Color-scale controls row ----------------------------------------
-        cscale_row = QHBoxLayout()
-        cscale_row.setSpacing(6)
-        cscale_row.addStretch()
-
-        cscale_row.addWidget(QLabel("Color Scale  Min:"))
+        # Color scale controls — right-aligned in the top bar to save vertical space
+        top_bar.addWidget(QLabel("Color Scale  Min:"))
         self.spn_clim_low = QSpinBox()
         self.spn_clim_low.setRange(0, 65534)
         self.spn_clim_low.setValue(0)
-        self.spn_clim_low.setMinimumWidth(80)
+        self.spn_clim_low.setFixedWidth(75)
         self.spn_clim_low.setToolTip("Lower ADU bound for color map (0–65534)")
-        cscale_row.addWidget(self.spn_clim_low)
+        top_bar.addWidget(self.spn_clim_low)
 
-        cscale_row.addWidget(QLabel("Max:"))
+        top_bar.addWidget(QLabel("Max:"))
         self.spn_clim_high = QSpinBox()
         self.spn_clim_high.setRange(1, 65535)
         self.spn_clim_high.setValue(65535)
-        self.spn_clim_high.setMinimumWidth(80)
+        self.spn_clim_high.setFixedWidth(75)
         self.spn_clim_high.setToolTip("Upper ADU bound for color map (1–65535)")
-        cscale_row.addWidget(self.spn_clim_high)
+        top_bar.addWidget(self.spn_clim_high)
 
         btn_apply_clim = QPushButton("Set")
-        btn_apply_clim.setFixedWidth(48)
-        btn_apply_clim.setToolTip("Apply color scale limits to current image")
+        btn_apply_clim.setFixedWidth(42)
+        btn_apply_clim.setToolTip("Apply color scale limits")
         btn_apply_clim.clicked.connect(self._on_clim_apply_clicked)
-        cscale_row.addWidget(btn_apply_clim)
+        top_bar.addWidget(btn_apply_clim)
 
         btn_auto_clim = QPushButton("Auto")
-        btn_auto_clim.setFixedWidth(52)
-        btn_auto_clim.setToolTip("Set limits to last frame min/max")
+        btn_auto_clim.setFixedWidth(46)
+        btn_auto_clim.setToolTip("Auto-scale to frame min/max")
         btn_auto_clim.clicked.connect(self._on_clim_auto_clicked)
-        cscale_row.addWidget(btn_auto_clim)
+        top_bar.addWidget(btn_auto_clim)
 
-        cscale_row.addStretch()
-        lay_top.addLayout(cscale_row)
-        # ----------------------------------------------------------------------
+        root_layout.addLayout(top_bar)
 
-        # Intensity metrics status line below canvas
-        self.lbl_intensity_metrics = QLabel("Pixel Intensity Metrics | Minimum: -- ADU | Maximum: -- ADU | Mean: -- ADU")
+        # =========================================================================
+        # Canvas — fills all remaining vertical space
+        # =========================================================================
+        self.figure = Figure(dpi=100)
+        self.figure.subplots_adjust(left=0.04, right=0.96, top=0.97, bottom=0.04)
+        self.canvas = FigureCanvasQTAgg(self.figure)
+        self.canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.axis = self.figure.add_subplot(111)
+        self.canvas.mpl_connect("button_press_event", self._on_canvas_click)
+        root_layout.addWidget(self.canvas, stretch=10)
+
+        # Intensity metrics strip below canvas
+        self.lbl_intensity_metrics = QLabel(
+            "Pixel Intensity Metrics | Minimum: -- ADU | Maximum: -- ADU | Mean: -- ADU"
+        )
         self.lbl_intensity_metrics.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_intensity_metrics.setStyleSheet("font-size: 11px; font-weight: bold; padding: 3px; background: #f8f9fa;")
-        lay_top.addWidget(self.lbl_intensity_metrics)
+        self.lbl_intensity_metrics.setStyleSheet(
+            "font-size: 11px; font-weight: bold; padding: 2px; background: #f0f0f0;"
+        )
+        root_layout.addWidget(self.lbl_intensity_metrics)
 
-        self.v_splitter.addWidget(top_container)
+        # =========================================================================
+        # Bottom strip — three compact group boxes side-by-side, no scroll area
+        # =========================================================================
+        bottom_row = QHBoxLayout()
+        bottom_row.setSpacing(6)
+        bottom_row.setContentsMargins(0, 0, 0, 0)
 
-        # -------------------------------------------------------------------------
-        # Pane 2: Bottom Compact Control Panels (Enclosed in QScrollArea)
-        # -------------------------------------------------------------------------
-        bottom_scroll = QScrollArea()
-        bottom_scroll.setWidgetResizable(True)
-        bottom_scroll.setFrameShape(QFrame.Shape.NoFrame)
-
-        bottom_container = QWidget()
-        lay_bottom = QHBoxLayout(bottom_container)
-        lay_bottom.setContentsMargins(4, 6, 4, 4)
-        lay_bottom.setSpacing(10)
-
-        # --- Column 1: Camera & Hardware ROI ---
+        # --- Group 1: Camera & Hardware ROI --------------------------------
         grp_camera = QGroupBox("Camera & Hardware ROI")
-        lay_cam = QVBoxLayout(grp_camera)
-        lay_cam.setSpacing(6)
+        lay_cam = QGridLayout(grp_camera)
+        lay_cam.setSpacing(4)
+        lay_cam.setContentsMargins(6, 8, 6, 6)
 
-        grid_cam = QGridLayout()
-        grid_cam.setSpacing(6)
-
-        grid_cam.addWidget(QLabel("Exposure (ms):"), 0, 0)
+        lay_cam.addWidget(QLabel("Exposure (ms):"), 0, 0)
         self.spn_exposure = QDoubleSpinBox()
         self.spn_exposure.setRange(0.5, 10000.0)
         self.spn_exposure.setValue(10.0)
         self.spn_exposure.setDecimals(2)
-        self.spn_exposure.setMinimumHeight(26)
         self.spn_exposure.valueChanged.connect(self._on_exposure_changed)
-        grid_cam.addWidget(self.spn_exposure, 0, 1)
+        lay_cam.addWidget(self.spn_exposure, 0, 1)
 
-        grid_cam.addWidget(QLabel("Frames / Step:"), 0, 2)
+        lay_cam.addWidget(QLabel("Frames/Step:"), 0, 2)
         self.spn_frames = QSpinBox()
         self.spn_frames.setRange(1, 1000)
         self.spn_frames.setValue(5)
-        self.spn_frames.setMinimumHeight(26)
-        grid_cam.addWidget(self.spn_frames, 0, 3)
+        lay_cam.addWidget(self.spn_frames, 0, 3)
 
-        lay_cam.addLayout(grid_cam)
-
-        self.btn_preview = QPushButton("Capture Single Preview Frame")
-        self.btn_preview.setStyleSheet("padding: 4px;")
-        self.btn_preview.setToolTip("Acquire one frame and refresh display without writing to disk.")
-        self.btn_preview.clicked.connect(self._capture_single_preview)
-        lay_cam.addWidget(self.btn_preview)
-
-        # Hardware ROI sub-box
-        box_roi = QGroupBox("Hardware Sensor ROI (Pixels)")
-        lay_roi = QVBoxLayout(box_roi)
-        lay_roi.setSpacing(4)
-
-        lbl_roi_hint = QLabel("Vertical centered on Y=1080 (pco.edge symmetry). X in 4-px steps.")
-        lbl_roi_hint.setStyleSheet("font-size: 10px; color: #6c757d; font-style: italic;")
-        lay_roi.addWidget(lbl_roi_hint)
-
-        grid_roi = QGridLayout()
-        grid_roi.setSpacing(4)
-
-        grid_roi.addWidget(QLabel("X Start:"), 0, 0)
+        # ROI spinboxes inline
+        lay_cam.addWidget(QLabel("X:"), 1, 0)
         self.spn_roi_x0 = QSpinBox()
         self.spn_roi_x0.setRange(0, 2496)
         self.spn_roi_x0.setSingleStep(4)
         self.spn_roi_x0.setValue(0)
+        self.spn_roi_x0.setToolTip("ROI X Start (4-px steps, 0–2496)")
         self.spn_roi_x0.editingFinished.connect(self._on_roi_x0_changed)
-        grid_roi.addWidget(self.spn_roi_x0, 0, 1)
+        lay_cam.addWidget(self.spn_roi_x0, 1, 1)
 
-        grid_roi.addWidget(QLabel("X End:"), 0, 2)
         self.spn_roi_x1 = QSpinBox()
         self.spn_roi_x1.setRange(64, 2560)
         self.spn_roi_x1.setSingleStep(4)
         self.spn_roi_x1.setValue(2560)
+        self.spn_roi_x1.setToolTip("ROI X End (4-px steps, 64–2560)")
         self.spn_roi_x1.editingFinished.connect(self._on_roi_x1_changed)
-        grid_roi.addWidget(self.spn_roi_x1, 0, 3)
+        lay_cam.addWidget(self.spn_roi_x1, 1, 2, 1, 2)
 
-        grid_roi.addWidget(QLabel("Y Start:"), 1, 0)
+        lay_cam.addWidget(QLabel("Y (sym):"), 2, 0)
         self.spn_roi_y0 = QSpinBox()
         self.spn_roi_y0.setRange(0, 1072)
         self.spn_roi_y0.setValue(0)
+        self.spn_roi_y0.setToolTip("ROI Y Start — mirrored around sensor centre Y=1080")
         self.spn_roi_y0.valueChanged.connect(self._on_roi_y0_changed)
-        grid_roi.addWidget(self.spn_roi_y0, 1, 1)
+        lay_cam.addWidget(self.spn_roi_y0, 2, 1)
 
-        grid_roi.addWidget(QLabel("Y End:"), 1, 2)
         self.spn_roi_y1 = QSpinBox()
         self.spn_roi_y1.setRange(1088, 2160)
         self.spn_roi_y1.setValue(2160)
+        self.spn_roi_y1.setToolTip("ROI Y End — auto-set symmetrically")
         self.spn_roi_y1.valueChanged.connect(self._on_roi_y1_changed)
-        grid_roi.addWidget(self.spn_roi_y1, 1, 3)
+        lay_cam.addWidget(self.spn_roi_y1, 2, 2, 1, 2)
 
-        lay_roi.addLayout(grid_roi)
+        lbl_roi_hint = QLabel("Y centred on 1080 (pco.edge). X in 4-px steps.")
+        lbl_roi_hint.setStyleSheet("font-size: 9px; color: #6c757d; font-style: italic;")
+        lay_cam.addWidget(lbl_roi_hint, 3, 0, 1, 4)
 
-        lay_roi_btns = QHBoxLayout()
-        lay_roi_btns.setSpacing(4)
-        self.btn_apply_roi = QPushButton("Apply Hardware ROI")
+        roi_btn_row = QHBoxLayout()
+        roi_btn_row.setSpacing(4)
+        self.btn_apply_roi = QPushButton("Apply ROI")
         self.btn_apply_roi.setStyleSheet("padding: 4px; font-weight: bold;")
         self.btn_apply_roi.clicked.connect(self._apply_roi)
-        lay_roi_btns.addWidget(self.btn_apply_roi)
+        roi_btn_row.addWidget(self.btn_apply_roi)
 
         self.btn_full_sensor = QPushButton("Full Sensor")
         self.btn_full_sensor.setStyleSheet("padding: 4px;")
         self.btn_full_sensor.clicked.connect(self._reset_full_sensor)
-        lay_roi_btns.addWidget(self.btn_full_sensor)
+        roi_btn_row.addWidget(self.btn_full_sensor)
 
         self.btn_draw_roi = QPushButton("Draw ROI")
         self.btn_draw_roi.setCheckable(True)
         self.btn_draw_roi.setStyleSheet("padding: 4px;")
-        self.btn_draw_roi.setToolTip("Click and drag on the camera image to select an ROI region.")
+        self.btn_draw_roi.setToolTip("Drag a rectangle on the image to select ROI.")
         self.btn_draw_roi.toggled.connect(self._toggle_draw_roi)
-        lay_roi_btns.addWidget(self.btn_draw_roi)
+        roi_btn_row.addWidget(self.btn_draw_roi)
 
-        lay_roi.addLayout(lay_roi_btns)
-        lay_cam.addWidget(box_roi)
+        lay_cam.addLayout(roi_btn_row, 4, 0, 1, 4)
 
-        lay_bottom.addWidget(grp_camera, stretch=1)
+        bottom_row.addWidget(grp_camera, stretch=3)
 
-        # --- Column 2: Experiment Parameters ---
+        # --- Group 2: Experiment Parameters --------------------------------
         grp_exp = QGroupBox("Experiment Parameters")
-        lay_exp = QVBoxLayout(grp_exp)
-        lay_exp.setSpacing(6)
+        lay_exp = QGridLayout(grp_exp)
+        lay_exp.setSpacing(4)
+        lay_exp.setContentsMargins(6, 8, 6, 6)
 
-        grid_exp = QGridLayout()
-        grid_exp.setSpacing(6)
-
-        grid_exp.addWidget(QLabel("Start Value:"), 0, 0)
+        lay_exp.addWidget(QLabel("Start:"), 0, 0)
         self.spn_start_val = QDoubleSpinBox()
         self.spn_start_val.setRange(-1e6, 1e6)
         self.spn_start_val.setDecimals(4)
         self.spn_start_val.setValue(0.0)
-        self.spn_start_val.setMinimumHeight(26)
         self.spn_start_val.valueChanged.connect(self._on_start_val_changed)
-        grid_exp.addWidget(self.spn_start_val, 0, 1)
+        lay_exp.addWidget(self.spn_start_val, 0, 1)
 
-        grid_exp.addWidget(QLabel("End Value:"), 0, 2)
+        lay_exp.addWidget(QLabel("End:"), 0, 2)
         self.spn_end_val = QDoubleSpinBox()
         self.spn_end_val.setRange(-1e6, 1e6)
         self.spn_end_val.setDecimals(4)
         self.spn_end_val.setValue(0.4500)
-        self.spn_end_val.setMinimumHeight(26)
         self.spn_end_val.valueChanged.connect(self._on_end_val_changed)
-        grid_exp.addWidget(self.spn_end_val, 0, 3)
+        lay_exp.addWidget(self.spn_end_val, 0, 3)
 
-        grid_exp.addWidget(QLabel("Step Size:"), 1, 0)
+        lay_exp.addWidget(QLabel("Step:"), 1, 0)
         self.spn_step_size = QDoubleSpinBox()
         self.spn_step_size.setRange(-1e6, 1e6)
         self.spn_step_size.setDecimals(4)
         self.spn_step_size.setValue(0.0500)
-        self.spn_step_size.setMinimumHeight(26)
         self.spn_step_size.valueChanged.connect(self._on_step_size_changed)
-        grid_exp.addWidget(self.spn_step_size, 1, 1)
+        lay_exp.addWidget(self.spn_step_size, 1, 1)
 
-        grid_exp.addWidget(QLabel("Num Steps:"), 1, 2)
+        lay_exp.addWidget(QLabel("N Steps:"), 1, 2)
         self.spn_num_steps = QSpinBox()
         self.spn_num_steps.setRange(2, 100000)
         self.spn_num_steps.setValue(10)
-        self.spn_num_steps.setMinimumHeight(26)
         self.spn_num_steps.valueChanged.connect(self._on_num_steps_changed)
-        grid_exp.addWidget(self.spn_num_steps, 1, 3)
-
-        lay_exp.addLayout(grid_exp)
+        lay_exp.addWidget(self.spn_num_steps, 1, 3)
 
         self.lbl_scan_progress = QLabel("Scan Progress: Ready (0 of 10 steps) | Delay Stage (mm): 0.0000")
-        self.lbl_scan_progress.setStyleSheet("font-weight: bold; font-size: 11px; color: #0d6efd; padding: 2px 0px;")
-        lay_exp.addWidget(self.lbl_scan_progress)
+        self.lbl_scan_progress.setStyleSheet(
+            "font-weight: bold; font-size: 10px; color: #0d6efd; padding: 2px 0px;"
+        )
+        self.lbl_scan_progress.setWordWrap(True)
+        lay_exp.addWidget(self.lbl_scan_progress, 2, 0, 1, 4)
 
-        lay_scan_btns = QHBoxLayout()
-        lay_scan_btns.setSpacing(6)
-
+        scan_btn_row = QHBoxLayout()
+        scan_btn_row.setSpacing(4)
         self.btn_take_measurement = QPushButton("Take Measurement")
         self.btn_take_measurement.setStyleSheet(
-            "font-weight: bold; font-size: 13px; background-color: #0d6efd; color: white; padding: 8px;"
+            "font-weight: bold; font-size: 12px; background-color: #0d6efd; color: white; padding: 6px;"
         )
-        self.btn_take_measurement.setToolTip("Start automated experiment scan sequence through all steps.")
+        self.btn_take_measurement.setToolTip("Start automated scan sequence.")
         self.btn_take_measurement.clicked.connect(self._toggle_measurement_scan)
-        lay_scan_btns.addWidget(self.btn_take_measurement, stretch=3)
+        scan_btn_row.addWidget(self.btn_take_measurement, stretch=3)
 
-        self.btn_cut_measurement = QPushButton("Cut Measurement")
+        self.btn_cut_measurement = QPushButton("Cut")
         self.btn_cut_measurement.setStyleSheet(
-            "font-weight: bold; font-size: 12px; background-color: #6c757d; color: white; padding: 8px;"
+            "font-weight: bold; font-size: 11px; background-color: #6c757d; color: white; padding: 6px;"
         )
         self.btn_cut_measurement.setVisible(False)
         self.btn_cut_measurement.clicked.connect(self._cut_measurement)
-        lay_scan_btns.addWidget(self.btn_cut_measurement, stretch=1)
+        scan_btn_row.addWidget(self.btn_cut_measurement, stretch=1)
 
-        lay_exp.addLayout(lay_scan_btns)
-        lay_bottom.addWidget(grp_exp, stretch=1)
+        lay_exp.addLayout(scan_btn_row, 3, 0, 1, 4)
 
-        # --- Column 3: Data Storing & Activity Log ---
-        grp_storage = QGroupBox("Data Storing & Activity Log")
+        bottom_row.addWidget(grp_exp, stretch=3)
+
+        # --- Group 3: Data Storage & Log -----------------------------------
+        grp_storage = QGroupBox("Data Storage & Activity Log")
         lay_storage = QVBoxLayout(grp_storage)
-        lay_storage.setSpacing(6)
+        lay_storage.setSpacing(4)
+        lay_storage.setContentsMargins(6, 8, 6, 6)
 
-        grid_store = QGridLayout()
-        grid_store.setSpacing(4)
+        store_grid = QGridLayout()
+        store_grid.setSpacing(4)
 
-        grid_store.addWidget(QLabel("Folder:"), 0, 0)
+        store_grid.addWidget(QLabel("Folder:"), 0, 0)
         self.txt_storage_dir = QLineEdit(str(self.scan_manager.storage_dir))
         self.txt_storage_dir.textChanged.connect(self._on_storage_dir_edited)
-        grid_store.addWidget(self.txt_storage_dir, 0, 1)
+        store_grid.addWidget(self.txt_storage_dir, 0, 1)
 
         self.btn_browse = QPushButton("Browse")
         self.btn_browse.clicked.connect(self._browse_directory)
-        grid_store.addWidget(self.btn_browse, 0, 2)
+        store_grid.addWidget(self.btn_browse, 0, 2)
 
         self.btn_open_folder = QPushButton("Open")
         self.btn_open_folder.clicked.connect(self._open_storage_folder)
-        grid_store.addWidget(self.btn_open_folder, 0, 3)
+        store_grid.addWidget(self.btn_open_folder, 0, 3)
 
-        grid_store.addWidget(QLabel("Header:"), 1, 0)
+        store_grid.addWidget(QLabel("Header:"), 1, 0)
         self.txt_file_header = QLineEdit("HHG Scan")
-        grid_store.addWidget(self.txt_file_header, 1, 1)
+        store_grid.addWidget(self.txt_file_header, 1, 1)
 
-        grid_store.addWidget(QLabel("Param:"), 1, 2)
+        store_grid.addWidget(QLabel("Param:"), 1, 2)
         self.txt_scan_param = QLineEdit("Delay Stage (mm)")
         self.txt_scan_param.textChanged.connect(lambda _: self._update_progress_display())
-        grid_store.addWidget(self.txt_scan_param, 1, 3)
+        store_grid.addWidget(self.txt_scan_param, 1, 3)
 
-        lay_storage.addLayout(grid_store)
+        lay_storage.addLayout(store_grid)
 
         self.txt_activity_log = QTextEdit()
         self.txt_activity_log.setReadOnly(True)
-        self.txt_activity_log.setMinimumHeight(90)
-        self.txt_activity_log.setStyleSheet("font-family: Consolas, monospace; font-size: 11px;")
-        lay_storage.addWidget(self.txt_activity_log)
+        self.txt_activity_log.setStyleSheet("font-family: Consolas, monospace; font-size: 10px;")
+        lay_storage.addWidget(self.txt_activity_log, stretch=1)
 
-        lay_bottom.addWidget(grp_storage, stretch=1)
+        bottom_row.addWidget(grp_storage, stretch=4)
 
-        bottom_scroll.setWidget(bottom_container)
-        self.v_splitter.addWidget(bottom_scroll)
-
-        # Set splitter default ratio (~1/3-1/4 top, rest bottom)
-        self.v_splitter.setStretchFactor(0, 1)
-        self.v_splitter.setStretchFactor(1, 2)
-        self.v_splitter.setSizes([320, 560])
+        root_layout.addLayout(bottom_row, stretch=0)
 
         self._update_progress_display()
 
@@ -713,7 +668,6 @@ class CameraMainWindow(QMainWindow):
             )
             self._colorbar = self.figure.colorbar(self._image_artist, ax=self.axis, fraction=0.046, pad=0.04)
             self._colorbar.ax.tick_params(labelsize=8)
-            self.figure.tight_layout()
 
             self._roi_selector = RectangleSelector(
                 self.axis,
