@@ -37,10 +37,6 @@ class MockPcoCamera(BaseCamera):
         self._roi_x1 = max(0, int(center_x - 4 * sigma_x))
         self._roi_x2 = min(self.WIDTH, int(center_x + 4 * sigma_x))
 
-        # Pre-generate a bank of realistic dark noise patterns (mean = 100 ADU, std = 3 ADU)
-        self._dark_bank = self._rng.normal(
-            loc=100.0, scale=3.0, size=(4, self.HEIGHT, self.WIDTH)
-        ).astype(np.float32)
         # Pre-generate bank of realistic dark noise patterns directly in uint16 for speed
         self._dark_bank = np.clip(
             self._rng.normal(loc=100.0, scale=3.0, size=(4, self.HEIGHT, self.WIDTH)),
@@ -57,7 +53,23 @@ class MockPcoCamera(BaseCamera):
         self._is_connected = True
 
     def close(self) -> None:
+        self.stop_live()
         self._is_connected = False
+
+    def start_live(self, buffer_size: int = 4) -> None:
+        """Start simulated live acquisition; buffer size is accepted for API parity."""
+        del buffer_size
+        if not self._is_connected:
+            raise RuntimeError("Cannot start live acquisition: Mock camera is not connected.")
+        self._live_active = True
+
+    def acquire_live_frame(self, timeout_s: float | None = None) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """Acquire the next synthetic live frame within the configured exposure time."""
+        del timeout_s
+        if not getattr(self, "_live_active", False):
+            raise RuntimeError("Live acquisition is not active.")
+        frames, metadata = self.acquire_frames(1)
+        return frames[0], metadata[0]
 
     # ------------------------------------------------------------------
     # Exposure
@@ -181,6 +193,7 @@ class MockPcoCamera(BaseCamera):
                 "timestamp":         t_now,
                 "camera_timestamp":  t_now,
                 "camera_time_str":   datetime.now().strftime("%H:%M:%S.%f")[:-3],
+                "timestamp_source":  "simulated_host_clock",
                 "exposure_s":        self._exposure_time_s,
                 "roi":               (x0, y0, x1, y1),
                 "readout_mode":      self._readout_mode.name,
@@ -189,4 +202,3 @@ class MockPcoCamera(BaseCamera):
             })
 
         return images, metadata
-

@@ -42,9 +42,11 @@ def compute_beam_centroid(
         h, w = frame.shape
         return float(w / 2.0), float(h / 2.0)
 
-    y_indices, x_indices = np.indices(signal.shape)
-    centroid_x = float((x_indices * signal).sum() / total_signal)
-    centroid_y = float((y_indices * signal).sum() / total_signal)
+    # Axis projections avoid allocating two full-resolution index arrays.
+    x_projection = signal.sum(axis=0)
+    y_projection = signal.sum(axis=1)
+    centroid_x = float(np.dot(np.arange(signal.shape[1], dtype=np.float64), x_projection) / total_signal)
+    centroid_y = float(np.dot(np.arange(signal.shape[0], dtype=np.float64), y_projection) / total_signal)
 
     return centroid_x, centroid_y
 
@@ -93,9 +95,12 @@ def fit_gaussian_beam_profile(frame: np.ndarray) -> Dict[str, float]:
             "total_power": 0.0
         }
 
-    y_indices, x_indices = np.indices(signal.shape)
-    var_x = float(((x_indices - cx) ** 2 * signal).sum() / total_sig)
-    var_y = float(((y_indices - cy) ** 2 * signal).sum() / total_sig)
+    x_projection = signal.sum(axis=0)
+    y_projection = signal.sum(axis=1)
+    x_offsets = np.arange(signal.shape[1], dtype=np.float64) - cx
+    y_offsets = np.arange(signal.shape[0], dtype=np.float64) - cy
+    var_x = float(np.dot(x_offsets * x_offsets, x_projection) / total_sig)
+    var_y = float(np.dot(y_offsets * y_offsets, y_projection) / total_sig)
 
     sigma_x = float(np.sqrt(max(var_x, 0.0)))
     sigma_y = float(np.sqrt(max(var_y, 0.0)))
@@ -113,4 +118,3 @@ def fit_gaussian_beam_profile(frame: np.ndarray) -> Dict[str, float]:
         "peak_intensity": float(frame.max()),
         "total_power": round(total_sig, 1)
     }
-

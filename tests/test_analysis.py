@@ -22,16 +22,18 @@ def test_analysis_hdf5_loaders_and_beam_profiling(tmp_path):
     scan_mgr = CameraScanManager(camera=cam, storage_dir=tmp_path)
 
     # Acquire 3 steps
+    saved_files = []
     for step in range(3):
-        scan_mgr.acquire_and_save_step(
+        filepath, _ = scan_mgr.acquire_and_save_step(
             experiment_name="analysis_test",
             step_index=step,
             param_name="delay_stage_mm",
             param_value=float(step * 0.2),
             num_frames=2
         )
+        saved_files.append(filepath)
 
-    first_step_file = tmp_path / "analysis_test_step_0000.h5"
+    first_step_file = saved_files[0]
     assert first_step_file.exists()
 
     # 1. Test get_scan_metadata without loading arrays
@@ -67,4 +69,3 @@ def test_analysis_hdf5_loaders_and_beam_profiling(tmp_path):
     assert fit_results["fwhm_x"] > fit_results["sigma_x"]
 
     cam.close()
-

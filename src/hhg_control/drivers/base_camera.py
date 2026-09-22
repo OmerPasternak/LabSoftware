@@ -5,6 +5,7 @@ All camera drivers (real hardware or mocks) must conform strictly to this contra
 
 from abc import ABC, abstractmethod
 from enum import IntEnum
+from collections.abc import Iterator
 from typing import Tuple, List, Dict, Any
 import numpy as np
 
@@ -92,6 +93,44 @@ class BaseCamera(ABC):
             metadata: List of dicts containing timestamps and hardware flags.
         """
         pass
+
+    def iter_frames(
+        self,
+        num_frames: int,
+        batch_size: int = 4,
+    ) -> Iterator[Tuple[np.ndarray, List[Dict[str, Any]]]]:
+        """Yield bounded frame batches for memory-safe storage.
+
+        Args:
+            num_frames: Total number of frames to acquire.
+            batch_size: Maximum frames returned per batch. Units are frames.
+        """
+        if num_frames < 1:
+            raise ValueError("num_frames must be >= 1.")
+        if batch_size < 1:
+            raise ValueError("batch_size must be >= 1.")
+        remaining = num_frames
+        while remaining:
+            count = min(batch_size, remaining)
+            yield self.acquire_frames(count)
+            remaining -= count
+
+    def start_live(self, buffer_size: int = 4) -> None:
+        """Start continuous preview acquisition with a bounded frame buffer."""
+        if not self.is_connected:
+            raise RuntimeError("Camera is not connected.")
+        self._live_active = True
+
+    def acquire_live_frame(self, timeout_s: float | None = None) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """Return the newest preview frame and metadata."""
+        if not getattr(self, "_live_active", False):
+            raise RuntimeError("Live acquisition is not active.")
+        frames, metadata = self.acquire_frames(1)
+        return frames[0], metadata[0] if metadata else {}
+
+    def stop_live(self) -> None:
+        """Stop continuous preview acquisition and release its buffers."""
+        self._live_active = False
 
     @abstractmethod
     def get_sensor_info(self) -> Dict[str, Any]:

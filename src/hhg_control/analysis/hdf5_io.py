@@ -4,9 +4,27 @@ Parses HHG experiment scan files into NumPy arrays compatible with scientific an
 """
 
 from pathlib import Path
+from collections.abc import Iterator
 from typing import Any, Dict, List, Optional, Tuple, Union
 import h5py
 import numpy as np
+
+
+def iter_scan_step_frames(
+    filepath: Union[str, Path], batch_size: int = 4
+) -> Iterator[np.ndarray]:
+    """Yield HDF5 image batches without loading a complete scan step into RAM."""
+    if batch_size < 1:
+        raise ValueError("batch_size must be >= 1.")
+    path = Path(filepath)
+    with h5py.File(path, "r") as h5f:
+        if "images" not in h5f:
+            raise KeyError(f"Missing 'images' dataset in {path}")
+        images = h5f["images"]
+        if images.ndim != 3:
+            raise ValueError(f"Expected [frame, y, x] data in {path}, got shape {images.shape}.")
+        for start in range(0, images.shape[0], batch_size):
+            yield images[start:min(start + batch_size, images.shape[0])]
 
 
 def get_scan_metadata(filepath: Union[str, Path]) -> Dict[str, Any]:
@@ -94,6 +112,7 @@ def load_full_scan(
 
     # Read steps and sort by scan_step_index
     steps_data = []
+    read_errors = []
     for f in matched_files:
         try:
             imgs, meta = load_scan_step(f)
@@ -106,8 +125,14 @@ def load_full_scan(
                 "images": imgs,
                 "metadata": meta,
             })
-        except Exception:
-            continue
+        except Exception as exc:
+            read_errors.append(f"{f.name}: {exc}")
+
+    if read_errors:
+        raise ValueError(
+            "One or more scan files could not be read; refusing a silently incomplete dataset: "
+            + "; ".join(read_errors)
+        )
 
     if not steps_data:
         raise ValueError(f"No valid scan datasets could be parsed in {dir_path}")
@@ -133,4 +158,3 @@ def load_full_scan(
         "mean_frames": mean_frames,
         "filepaths": [item["filepath"] for item in steps_data],
     }
-
