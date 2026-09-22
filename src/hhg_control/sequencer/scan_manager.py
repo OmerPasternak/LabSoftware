@@ -114,6 +114,9 @@ class CameraScanManager:
             h5f.attrs["sensor_height"] = int(sensor_info.get("height", images.shape[1]))
             h5f.attrs["sensor_pixel_height"] = int(sensor_info.get("height", images.shape[1]))
             h5f.attrs["roi_bounds"] = self.camera.get_roi()
+            if hasattr(self.camera, "get_readout_mode"):
+                h5f.attrs["readout_mode"] = self.camera.get_readout_mode().name
+                h5f.attrs["readout_mode_value"] = int(self.camera.get_readout_mode().value)
 
         return filepath, images[-1]
 

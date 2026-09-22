@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGroupBox, QLabel, QLineEdit, QDoubleSpinBox, QSpinBox,
     QPushButton, QFileDialog, QTextEdit, QMessageBox,
-    QGridLayout, QFrame, QSizePolicy
+    QGridLayout, QFrame, QSizePolicy, QComboBox
 )
 
 import matplotlib
@@ -28,7 +28,7 @@ from matplotlib.figure import Figure
 from matplotlib.widgets import RectangleSelector
 import matplotlib.patches as mpatches
 
-from hhg_control.drivers.base_camera import BaseCamera
+from hhg_control.drivers.base_camera import BaseCamera, ReadoutMode
 from hhg_control.drivers.mock_camera import MockPcoCamera
 from hhg_control.sequencer.scan_manager import CameraScanManager
 
@@ -293,15 +293,30 @@ class CameraMainWindow(QMainWindow):
         self.spn_frames.setValue(5)
         lay_cam.addWidget(self.spn_frames, 0, 3)
 
-        # ROI spinboxes inline
-        lay_cam.addWidget(QLabel("X:"), 1, 0)
+        # Readout mode selector (row 1)
+        lay_cam.addWidget(QLabel("Readout Mode:"), 1, 0)
+        self.cmb_readout_mode = QComboBox()
+        self.cmb_readout_mode.addItem("Rolling Shutter", userData=ReadoutMode.ROLLING_SHUTTER)
+        self.cmb_readout_mode.addItem("Global Reset (HHG)", userData=ReadoutMode.GLOBAL_RESET)
+        self.cmb_readout_mode.setCurrentIndex(0)
+        self.cmb_readout_mode.setToolTip(
+            "Rolling Shutter: rows exposed sequentially — produces a light-sheet artefact "
+            "with pulsed sources (laser pulse hits only the open rows).\n\n"
+            "Global Reset: all rows start exposure simultaneously — recommended for HHG. "
+            "⚠ Switching requires camera reboot (~5 s)."
+        )
+        self.cmb_readout_mode.currentIndexChanged.connect(self._on_readout_mode_changed)
+        lay_cam.addWidget(self.cmb_readout_mode, 1, 1, 1, 3)
+
+        # ROI spinboxes (rows 2 & 3)
+        lay_cam.addWidget(QLabel("X:"), 2, 0)
         self.spn_roi_x0 = QSpinBox()
         self.spn_roi_x0.setRange(0, 2496)
         self.spn_roi_x0.setSingleStep(4)
         self.spn_roi_x0.setValue(0)
         self.spn_roi_x0.setToolTip("ROI X Start (4-px steps, 0–2496)")
         self.spn_roi_x0.editingFinished.connect(self._on_roi_x0_changed)
-        lay_cam.addWidget(self.spn_roi_x0, 1, 1)
+        lay_cam.addWidget(self.spn_roi_x0, 2, 1)
 
         self.spn_roi_x1 = QSpinBox()
         self.spn_roi_x1.setRange(64, 2560)
@@ -309,26 +324,26 @@ class CameraMainWindow(QMainWindow):
         self.spn_roi_x1.setValue(2560)
         self.spn_roi_x1.setToolTip("ROI X End (4-px steps, 64–2560)")
         self.spn_roi_x1.editingFinished.connect(self._on_roi_x1_changed)
-        lay_cam.addWidget(self.spn_roi_x1, 1, 2, 1, 2)
+        lay_cam.addWidget(self.spn_roi_x1, 2, 2, 1, 2)
 
-        lay_cam.addWidget(QLabel("Y (sym):"), 2, 0)
+        lay_cam.addWidget(QLabel("Y (sym):"), 3, 0)
         self.spn_roi_y0 = QSpinBox()
         self.spn_roi_y0.setRange(0, 1072)
         self.spn_roi_y0.setValue(0)
         self.spn_roi_y0.setToolTip("ROI Y Start — mirrored around sensor centre Y=1080")
         self.spn_roi_y0.valueChanged.connect(self._on_roi_y0_changed)
-        lay_cam.addWidget(self.spn_roi_y0, 2, 1)
+        lay_cam.addWidget(self.spn_roi_y0, 3, 1)
 
         self.spn_roi_y1 = QSpinBox()
         self.spn_roi_y1.setRange(1088, 2160)
         self.spn_roi_y1.setValue(2160)
         self.spn_roi_y1.setToolTip("ROI Y End — auto-set symmetrically")
         self.spn_roi_y1.valueChanged.connect(self._on_roi_y1_changed)
-        lay_cam.addWidget(self.spn_roi_y1, 2, 2, 1, 2)
+        lay_cam.addWidget(self.spn_roi_y1, 3, 2, 1, 2)
 
         lbl_roi_hint = QLabel("Y centred on 1080 (pco.edge). X in 4-px steps.")
         lbl_roi_hint.setStyleSheet("font-size: 9px; color: #6c757d; font-style: italic;")
-        lay_cam.addWidget(lbl_roi_hint, 3, 0, 1, 4)
+        lay_cam.addWidget(lbl_roi_hint, 4, 0, 1, 4)
 
         roi_btn_row = QHBoxLayout()
         roi_btn_row.setSpacing(4)
@@ -558,6 +573,89 @@ class CameraMainWindow(QMainWindow):
             self._append_log(f"[CONNECT] Connected to physical {model_name} on USB 3.0 in {conn_time:.2f} s.")
             self.lbl_system_status.setText(f"Status: Connected ({model_name} USB 3.0)")
         self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #198754; padding-left: 8px;")
+
+        # Apply GUI readout mode to camera, or sync combobox if camera has mode
+        desired_mode = self.cmb_readout_mode.itemData(self.cmb_readout_mode.currentIndex())
+        if desired_mode is not None and hasattr(self.camera, "set_readout_mode"):
+            try:
+                self.camera.set_readout_mode(desired_mode)
+            except Exception:
+                pass
+
+        if hasattr(self.camera, "get_readout_mode"):
+            curr_mode = self.camera.get_readout_mode()
+            self.cmb_readout_mode.blockSignals(True)
+            for idx in range(self.cmb_readout_mode.count()):
+                if self.cmb_readout_mode.itemData(idx) == curr_mode:
+                    self.cmb_readout_mode.setCurrentIndex(idx)
+                    break
+            self.cmb_readout_mode.blockSignals(False)
+
+    def _on_readout_mode_changed(self, index: int) -> None:
+        """Handle user toggling camera sensor readout mode (Rolling Shutter vs Global Reset)."""
+        mode = self.cmb_readout_mode.itemData(index)
+        if mode is None:
+            return
+
+        # Block mode changes while an automated scan is actively writing datasets
+        if self.active_scan_task is not None and self.active_scan_task.isRunning():
+            QMessageBox.warning(
+                self,
+                "Scan in Progress",
+                "Cannot change sensor readout mode while an experiment scan is executing."
+            )
+            self.cmb_readout_mode.blockSignals(True)
+            curr = self.camera.get_readout_mode()
+            for idx in range(self.cmb_readout_mode.count()):
+                if self.cmb_readout_mode.itemData(idx) == curr:
+                    self.cmb_readout_mode.setCurrentIndex(idx)
+                    break
+            self.cmb_readout_mode.blockSignals(False)
+            return
+
+        if not self.camera.is_connected:
+            self._connect_camera()
+            return
+
+        if hasattr(self.camera, "get_readout_mode") and self.camera.get_readout_mode() == mode:
+            return
+
+        was_live = self._is_live_active
+        if was_live:
+            self._stop_live()
+
+        self.lbl_system_status.setText(f"Status: Switching to {mode.name}... (Camera reconfiguring)")
+        self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #d97706; padding-left: 8px;")
+        self._append_log(f"[READOUT MODE] Switching sensor mode to {mode.name} (PCO setup value {mode.value})...")
+        QApplication.processEvents()
+
+        try:
+            self.camera.set_readout_mode(mode)
+            self._append_log(f"[READOUT MODE] Camera successfully configured to {mode.name}.")
+            self.lbl_system_status.setText(f"Status: Mode Active ({mode.name})")
+            self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #198754; padding-left: 8px;")
+            self.cmb_readout_mode.blockSignals(True)
+            for idx in range(self.cmb_readout_mode.count()):
+                if self.cmb_readout_mode.itemData(idx) == mode:
+                    self.cmb_readout_mode.setCurrentIndex(idx)
+                    break
+            self.cmb_readout_mode.blockSignals(False)
+        except Exception as exc:
+            self._append_log(f"[READOUT MODE ERROR] Failed to set {mode.name}: {exc}")
+            QMessageBox.warning(self, "Readout Mode Error", f"Could not switch readout mode to {mode.name}:\n\n{exc}")
+            # Revert combo box to current camera mode
+            self.cmb_readout_mode.blockSignals(True)
+            curr = self.camera.get_readout_mode()
+            for idx in range(self.cmb_readout_mode.count()):
+                if self.cmb_readout_mode.itemData(idx) == curr:
+                    self.cmb_readout_mode.setCurrentIndex(idx)
+                    break
+            self.cmb_readout_mode.blockSignals(False)
+        finally:
+            if was_live:
+                self._start_live()
+            else:
+                self._capture_single_preview()
 
     # =========================================================================
     # Live Preview & Single Capture

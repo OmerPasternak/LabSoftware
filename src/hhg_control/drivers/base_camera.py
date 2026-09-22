@@ -4,6 +4,7 @@ All camera drivers (real hardware or mocks) must conform strictly to this contra
 """
 
 from abc import ABC, abstractmethod
+from enum import IntEnum
 from typing import Tuple, List, Dict, Any
 import numpy as np
 
@@ -11,6 +12,31 @@ import numpy as np
 class CameraSafetyError(ValueError):
     """Raised when an acquisition parameter violates safe operating limits."""
     pass
+
+
+class ReadoutMode(IntEnum):
+    """Sensor readout modes for the pco.edge 5.5 sCMOS camera.
+
+    Values match the PCO SDK ``set_camera_setup`` shutter-mode parameter
+    (C constant SCCMOS_FORMAT_*).
+
+    Attributes:
+        ROLLING_SHUTTER: Standard sCMOS rolling readout.  Each row is exposed
+            sequentially; different rows capture the scene at slightly
+            different times.  Gives the highest frame rate but produces a
+            **light-sheet artefact** with pulsed laser sources (HHG) where
+            only the rows open during the laser pulse receive signal.
+        GLOBAL_SHUTTER:  True global shutter — all pixels expose and read out
+            simultaneously.  Not available on the pco.edge 5.5 (sCMOS
+            architecture); listed here for completeness and future cameras.
+        GLOBAL_RESET:    All rows reset (start of exposure) simultaneously so
+            every pixel integrates the same laser pulse.  Readout is still
+            sequential (rolling), but there is no light-sheet artefact.
+            **Recommended mode for HHG / pulsed-laser experiments.**
+    """
+    ROLLING_SHUTTER = 1
+    GLOBAL_SHUTTER  = 2   # Not supported on pco.edge 5.5 sCMOS
+    GLOBAL_RESET    = 4   # Recommended for pulsed laser / HHG
 
 
 class BaseCamera(ABC):
@@ -22,6 +48,7 @@ class BaseCamera(ABC):
     def __init__(self) -> None:
         self._is_connected: bool = False
         self._exposure_time_s: float = 0.010  # default 10 ms
+        self._readout_mode: ReadoutMode = ReadoutMode.ROLLING_SHUTTER
 
     @property
     def is_connected(self) -> bool:
@@ -115,6 +142,34 @@ class BaseCamera(ABC):
     def set_roi(self, roi: tuple[int, int, int, int]) -> None:
         """Configure hardware readout bounds."""
         raise NotImplementedError("Hardware ROI is not supported by this camera driver.")
+
+    def get_readout_mode(self) -> ReadoutMode:
+        """Return the current sensor readout mode.
+
+        Returns:
+            ReadoutMode enum value reflecting the mode currently programmed
+            into the camera hardware (or the most recently requested mode
+            for drivers that cache the setting).
+        """
+        return self._readout_mode
+
+    def set_readout_mode(self, mode: ReadoutMode) -> None:
+        """Configure the sensor readout mode.
+
+        Switching modes on a physical pco.edge requires a full camera
+        reboot (~3–5 s).  Drivers that implement this must:
+          1. Stop any active recording.
+          2. Call the SDK shutter-mode setter (PCO ``set_camera_setup``).
+          3. Reboot/restart the camera and reconnect.
+          4. Update ``self._readout_mode``.
+
+        Raises:
+            NotImplementedError: If this driver does not support readout
+                mode selection (default behaviour).
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support readout mode selection."
+        )
 
     def __enter__(self):
         self.connect()
