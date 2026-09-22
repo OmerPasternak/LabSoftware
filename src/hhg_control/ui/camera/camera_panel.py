@@ -715,12 +715,10 @@ class CameraMainWindow(QMainWindow):
         """Acquire a single frame and update display without starting live loop."""
         if not self.camera.is_connected:
             self._connect_camera()
-        if self.camera.is_connected:
         if self.camera.is_connected and not self._is_live_active:
             self._capture_next_preview()
 
     def _capture_next_preview(self) -> None:
-        if not self.camera.is_connected:
         if not self.camera.is_connected or self._is_live_active:
             return
         if self.active_preview_task is not None and self.active_preview_task.isRunning():
