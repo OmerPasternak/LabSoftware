@@ -26,6 +26,7 @@ matplotlib.use("QtAgg")
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from matplotlib.widgets import RectangleSelector
+import matplotlib.patches as mpatches
 
 from hhg_control.drivers.base_camera import BaseCamera
 from hhg_control.drivers.mock_camera import MockPcoCamera
@@ -160,6 +161,7 @@ class CameraMainWindow(QMainWindow):
         self._colorbar = None
         self._timestamp_artist = None
         self._roi_selector: Optional[RectangleSelector] = None
+        self._roi_patch = None           # persistent Rectangle patch drawn when ROI is applied
         self._clim_low: int = 0       # current lower color limit (ADU)
         self._clim_high: int = 65535  # current upper color limit (ADU)
 
@@ -334,7 +336,7 @@ class CameraMainWindow(QMainWindow):
         self.spn_roi_x0.setRange(0, 2496)
         self.spn_roi_x0.setSingleStep(4)
         self.spn_roi_x0.setValue(0)
-        self.spn_roi_x0.valueChanged.connect(self._on_roi_x0_changed)
+        self.spn_roi_x0.editingFinished.connect(self._on_roi_x0_changed)
         grid_roi.addWidget(self.spn_roi_x0, 0, 1)
 
         grid_roi.addWidget(QLabel("X End:"), 0, 2)
@@ -342,7 +344,7 @@ class CameraMainWindow(QMainWindow):
         self.spn_roi_x1.setRange(64, 2560)
         self.spn_roi_x1.setSingleStep(4)
         self.spn_roi_x1.setValue(2560)
-        self.spn_roi_x1.valueChanged.connect(self._on_roi_x1_changed)
+        self.spn_roi_x1.editingFinished.connect(self._on_roi_x1_changed)
         grid_roi.addWidget(self.spn_roi_x1, 0, 3)
 
         grid_roi.addWidget(QLabel("Y Start:"), 1, 0)
@@ -721,11 +723,11 @@ class CameraMainWindow(QMainWindow):
                 minspanx=5,
                 minspany=5,
                 spancoords="data",
-                interactive=True,
+                interactive=False,
                 props=dict(facecolor="none", edgecolor="cyan", linewidth=1, linestyle="-"),
-                handle_props=dict(markersize=4, markerfacecolor="cyan", markeredgecolor="cyan"),
             )
             self._roi_selector.set_active(False)
+            self._roi_patch = None  # persistent outline shown after Apply Hardware ROI
         else:
             self._image_artist.set_data(display_frame)
             self._image_artist.set_extent([x0, x1, y1, y0])
@@ -859,17 +861,38 @@ class CameraMainWindow(QMainWindow):
             f"               Click 'Apply Hardware ROI' to apply to camera sensor."
         )
 
-    def _clear_roi_selector_drawing(self) -> None:
-        """Hide the drawn ROI rectangle and deactivate draw mode without triggering toggle signal."""
+    def _deactivate_draw_roi(self) -> None:
+        """Deactivate draw-ROI mode and uncheck the button (keeps drawn outline visible)."""
         if self._roi_selector is not None:
             self._roi_selector.set_active(False)
-            # Clear any visible selection geometry
-            self._roi_selector.set_visible(False)
-            self.canvas.draw_idle()
-        # Suppress the toggled signal while unchecking
         self.btn_draw_roi.blockSignals(True)
         self.btn_draw_roi.setChecked(False)
         self.btn_draw_roi.blockSignals(False)
+
+    def _draw_roi_patch(self, x0: int, y0: int, x1: int, y1: int) -> None:
+        """Stamp a persistent cyan outline rectangle onto the axis at the given pixel coords.
+
+        This patch is a plain matplotlib artist (not a RectangleSelector widget), so it
+        survives frame redraws without needing the draw-mode to be active.  A previous
+        patch is removed before adding the new one.
+        """
+        if self._roi_patch is not None:
+            try:
+                self._roi_patch.remove()
+            except ValueError:
+                pass
+            self._roi_patch = None
+
+        width = x1 - x0
+        height = y1 - y0   # in image coords (y increases downward)
+        # Rectangle origin is (x0, y0) where y0 is the top edge in image space
+        self._roi_patch = mpatches.Rectangle(
+            (x0, y0), width, height,
+            linewidth=1, edgecolor="cyan", facecolor="none",
+            linestyle="--", zorder=5
+        )
+        self.axis.add_patch(self._roi_patch)
+        self.canvas.draw_idle()
 
     def _apply_roi(self) -> None:
         """Configure hardware ROI on sensor; pixels outside are shut off and monitor zooms in."""
@@ -891,7 +914,8 @@ class CameraMainWindow(QMainWindow):
                 f"[ROI APPLIED] Sensor readout set to X:[{x0}, {x1}], Y:[{y0}, {y1}] ({x1-x0}x{y1-y0} px).\n"
                 f"              Outside pixels shut off. Display zoomed to ROI."
             )
-            self._clear_roi_selector_drawing()
+            self._deactivate_draw_roi()
+            self._draw_roi_patch(x0, y0, x1, y1)
             self._clear_paused_scan("Hardware ROI modified")
         except Exception as exc:
             QMessageBox.warning(self, "Invalid Hardware ROI", str(exc))
@@ -902,7 +926,7 @@ class CameraMainWindow(QMainWindow):
                 self._capture_single_preview()
 
     def _reset_full_sensor(self) -> None:
-        """Reset ROI to full 2560 x 2160 unbinned sensor array."""
+        """Reset ROI to full 2560 x 2160 unbinned sensor array and remove any ROI patch."""
         self._is_updating_roi = True
         try:
             self.spn_roi_x0.setValue(0)
@@ -911,6 +935,13 @@ class CameraMainWindow(QMainWindow):
             self.spn_roi_y1.setValue(2160)
         finally:
             self._is_updating_roi = False
+        # Remove persistent patch before applying full-sensor ROI
+        if self._roi_patch is not None:
+            try:
+                self._roi_patch.remove()
+            except ValueError:
+                pass
+            self._roi_patch = None
         self._apply_roi()
 
     # =========================================================================
