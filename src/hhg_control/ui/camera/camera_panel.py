@@ -61,11 +61,12 @@ class LiveStreamTask(QThread):
     frame_ready = pyqtSignal(np.ndarray, dict)
     error_occurred = pyqtSignal(str)
 
-    def __init__(self, scan_manager: CameraScanManager, target_fps: float = 30.0) -> None:
+    def __init__(self, scan_manager: CameraScanManager, target_fps: float = 20.0) -> None:
         super().__init__()
         self.scan_manager = scan_manager
         self.target_fps = target_fps
         self._running = False
+        self.gui_ready = True
 
     def stop(self) -> None:
         self._running = False
@@ -76,8 +77,14 @@ class LiveStreamTask(QThread):
         while self._running:
             t0 = time.perf_counter()
             try:
+                # Flow control: do not acquire if GUI is still displaying the previous frame
+                if not self.gui_ready:
+                    time.sleep(0.005)
+                    continue
+
                 frame, meta = self.scan_manager.acquire_preview()
-                if self._running:
+                if self._running and self.gui_ready:
+                    self.gui_ready = False
                     self.frame_ready.emit(frame, meta)
             except Exception as exc:
                 if self._running:
@@ -173,7 +180,7 @@ class CameraMainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("HHG Attosecond Lab - pco.edge 5.5 Camera Controller & Sequencer")
-        self.resize(920, 560)
+        self.resize(1040, 580)
 
         # Instrumentation layer
         self.camera: BaseCamera = MockPcoCamera()
@@ -204,6 +211,7 @@ class CameraMainWindow(QMainWindow):
         self._roi_patch = None           # persistent Rectangle patch drawn when ROI is applied or edited
         self._clim_low: int = 0          # current lower color limit (ADU)
         self._clim_high: int = 65535     # current upper color limit (ADU)
+        self._current_displayed_roi: Optional[tuple[int, int, int, int]] = None
 
         self._build_ui()
 
@@ -280,11 +288,11 @@ class CameraMainWindow(QMainWindow):
 
         left_pane.addLayout(top_bar)
 
-        # Canvas — compact size (~1/3 of previous size), zero dead margins
+        # Canvas — enlarged by ~45% (550x450 px), tightly cropped margins
         self.figure = Figure(dpi=100)
-        self.figure.subplots_adjust(left=0.08, right=0.88, top=0.96, bottom=0.08)
+        self.figure.subplots_adjust(left=0.07, right=0.90, top=0.97, bottom=0.07)
         self.canvas = FigureCanvasQTAgg(self.figure)
-        self.canvas.setFixedSize(380, 310)
+        self.canvas.setFixedSize(550, 450)
         self.axis = self.figure.add_subplot(111)
         self.canvas.mpl_connect("button_press_event", self._on_canvas_click)
         left_pane.addWidget(self.canvas)
@@ -554,10 +562,9 @@ class CameraMainWindow(QMainWindow):
         self._set_go_button_style(active=True)
         self.lbl_system_status.setText("Status: Live View Active (Streaming)")
         self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #198754; padding-left: 8px;")
-        self._capture_next_preview()
 
         if self.active_live_task is None or not self.active_live_task.isRunning():
-            self.active_live_task = LiveStreamTask(scan_manager=self.scan_manager, target_fps=30.0)
+            self.active_live_task = LiveStreamTask(scan_manager=self.scan_manager, target_fps=20.0)
             self.active_live_task.frame_ready.connect(self._on_live_frame_ready)
             self.active_live_task.error_occurred.connect(self._on_preview_error)
             self.active_live_task.start()
@@ -735,15 +742,15 @@ class CameraMainWindow(QMainWindow):
     def _on_live_frame_ready(self, frame: np.ndarray, meta: dict) -> None:
         """Handle incoming live stream frame from persistent LiveStreamTask."""
         if not self._is_live_active:
+            if self.active_live_task is not None:
+                self.active_live_task.gui_ready = True
             return
-        # Drop frame if the UI thread is still busy drawing or processing user input
-        if self._is_rendering:
-            return
-        self._is_rendering = True
+
         try:
             self._update_display(frame, meta=meta)
         finally:
-            self._is_rendering = False
+            if self.active_live_task is not None:
+                self.active_live_task.gui_ready = True
 
     def _on_preview_frame_ready(self, frame: np.ndarray, meta: dict) -> None:
         self._update_display(frame, meta=meta)
@@ -756,9 +763,6 @@ class CameraMainWindow(QMainWindow):
         if self.active_preview_task is not None:
             self.active_preview_task.deleteLater()
             self.active_preview_task = None
-
-        if self._is_live_active and (self.active_scan_task is None or not self.active_scan_task.isRunning()):
-            QTimer.singleShot(25, self._capture_next_preview)
 
     # =========================================================================
     # Display & Color Scale
@@ -810,14 +814,15 @@ class CameraMainWindow(QMainWindow):
         pass
 
     def _update_display(self, frame: np.ndarray, meta: Optional[dict] = None) -> None:
-        """Update canvas display with 2x downsampling, zooming to active ROI with zero dead space."""
+        """Update canvas display with adaptive downsampling, zooming to active ROI with zero dead space."""
         self._last_frame = frame
         self._frame_count += 1
 
-        # Pixel intensity metrics
-        c_min = int(frame.min())
-        c_max = int(frame.max())
-        c_mean = float(frame.mean())
+        # Pixel intensity metrics (fast sub-sampled for instant calculation on large frames)
+        sample = frame[::2, ::2] if frame.size > 500000 else frame
+        c_min = int(sample.min())
+        c_max = int(sample.max())
+        c_mean = float(sample.mean())
         sat_warning = " [WARNING: SENSOR SATURATION DETECTED!]" if c_max >= 65530 else ""
         sat_color = "#dc3545" if sat_warning else "#212529"
         self.lbl_intensity_metrics.setStyleSheet(
@@ -827,11 +832,12 @@ class CameraMainWindow(QMainWindow):
             f"Pixel Intensity Metrics | Minimum: {c_min:,} ADU | Maximum: {c_max:,} ADU | Mean: {c_mean:,.1f} ADU{sat_warning}"
         )
 
-        # 2x downsampling for fast real-time screen rendering
-        downsample_factor = 2
-        # Adaptive downsampling: 4x for full sensor frames (>1000 px) cuts render time from 105ms to ~25ms
-        downsample_factor = 4 if (frame.shape[0] >= 1000 and frame.shape[1] >= 1000) else 1
-        display_frame = frame[::downsample_factor, ::downsample_factor]
+        # Adaptive downsampling to match 550x450 canvas, avoiding wasting CPU rendering millions of invisible pixels
+        h, w = frame.shape
+        step_y = max(1, h // 450)
+        step_x = max(1, w // 550)
+        downsample_factor = max(step_y, step_x)
+        display_frame = frame[::downsample_factor, ::downsample_factor] if downsample_factor > 1 else frame
         x0, y0, x1, y1 = self.camera.get_roi()
 
         if self._image_artist is None:
@@ -862,17 +868,19 @@ class CameraMainWindow(QMainWindow):
             )
             self._roi_selector.set_active(False)
             self._roi_patch = None
+            self._current_displayed_roi = (x0, y0, x1, y1)
+            self.axis.set_aspect("auto")
+            self.axis.set_xlim(x0, x1)
+            self.axis.set_ylim(y1, y0)
+            self._image_artist.set_clim(self._clim_low, self._clim_high)
         else:
             self._image_artist.set_data(display_frame)
-            self._image_artist.set_extent([x0, x1, y1, y0])
-
-        # Fill viewport tightly without dead space
-        self.axis.set_aspect("auto")
-        self.axis.set_xlim(x0, x1)
-        self.axis.set_ylim(y1, y0)
-
-        # Strictly apply manual limits (never overridden automatically)
-        self._image_artist.set_clim(self._clim_low, self._clim_high)
+            if self._current_displayed_roi != (x0, y0, x1, y1):
+                self._current_displayed_roi = (x0, y0, x1, y1)
+                self._image_artist.set_extent([x0, x1, y1, y0])
+                self.axis.set_aspect("auto")
+                self.axis.set_xlim(x0, x1)
+                self.axis.set_ylim(y1, y0)
 
         # Hardware Camera Timestamp Overlay (Top-Left corner — time only)
         cam_time = ""
@@ -1080,6 +1088,7 @@ class CameraMainWindow(QMainWindow):
 
         try:
             self.scan_manager.set_roi((x0, y0, x1, y1))
+            self._current_displayed_roi = None
             self._append_log(
                 f"[ROI APPLIED] Sensor readout set to X:[{x0}, {x1}], Y:[{y0}, {y1}] ({x1-x0}x{y1-y0} px).\n"
                 f"              Outside pixels shut off. Display zoomed to ROI."
@@ -1107,6 +1116,7 @@ class CameraMainWindow(QMainWindow):
         try:
             # Send full-sensor ROI to camera hardware
             self.scan_manager.set_roi((0, 0, 2560, 2160))
+            self._current_displayed_roi = None
             self._append_log(
                 "[FULL SENSOR] Switched readout to full 2560×2160. "
                 "Configured ROI preserved — click 'Apply Hardware ROI' to reactivate it."
