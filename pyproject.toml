@@ -7,7 +7,7 @@ name = "hhg-control"
 version = "0.1.0"
 description = "HHG Lab Instrumentation Control Package"
 authors = [{ name = "HHG Lab" }]
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 dependencies = [
     "numpy>=1.24.0",
     "h5py>=3.8.0",
@@ -16,10 +16,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = [
-    "pytest>=7.0.0",
+hardware-pco = [
+    "pco==2.2.1; sys_platform == 'win32' or sys_platform == 'linux'",
 ]
+test = [
+    "pytest>=7.0,<10",
+    "pytest-qt>=4.4,<5",
+]
+
+[project.scripts]
+hhg-camera = "hhg_control.ui.camera.camera_panel:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.pytest.ini_options]
+pythonpath = ["src"]
