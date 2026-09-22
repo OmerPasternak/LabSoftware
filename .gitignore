@@ -5,6 +5,7 @@ __pycache__/
 *.hdf5
 data/
 venv/
+.venv/
 .env
 .pytest_cache/
 *.egg-info/
