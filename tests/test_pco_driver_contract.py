@@ -58,6 +58,11 @@ class FakeSdk:
         self.rebooted = True
 
 
+def test_pco_sdk_symbol_is_always_defined():
+    """Keep the optional SDK patchable when the vendor package is absent."""
+    assert hasattr(pco_edge, "pco")
+
+
 def test_pco_live_uses_persistent_ring_buffer(monkeypatch):
     fake = FakePcoCamera("USB 3.0")
     monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface: fake))

@@ -10,9 +10,11 @@ import numpy as np
 from .base_camera import BaseCamera, ReadoutMode
 
 try:
-    import pco
+    import pco as _pco
+    pco = _pco
     PCO_AVAILABLE = True
 except (ImportError, RuntimeError) as err:
+    pco = None
     PCO_AVAILABLE = False
     PCO_IMPORT_ERROR = str(err)
 
