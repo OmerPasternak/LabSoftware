@@ -155,6 +155,7 @@ class CameraMainWindow(QMainWindow):
         self._paused_step: Optional[int] = None
         self._current_executing_step: int = 0
         self._frame_count: int = 0
+        self._closing: bool = False
 
         # Matplotlib display caches
         self._image_artist = None
@@ -1327,20 +1328,33 @@ class CameraMainWindow(QMainWindow):
 
         self._set_ui_scanning_state(is_scanning=False)
 
+        # If user closed window while scan was aborting, finish close now
+        if self._closing:
+            self.close()
+
     def _append_log(self, message: str) -> None:
         self.txt_activity_log.append(message)
 
     def closeEvent(self, event) -> None:
+        """Graceful shutdown: stop live, abort scan, wait for threads, then disconnect camera."""
         self._is_live_active = False
+
         if self.active_scan_task is not None and self.active_scan_task.isRunning():
+            self._closing = True
             self.active_scan_task.request_abort()
             event.ignore()
             return
+
         if self.active_preview_task is not None and self.active_preview_task.isRunning():
-            event.ignore()
-            return
-        if self.camera.is_connected:
-            self.camera.close()
+            self.active_preview_task.wait(500)
+
+        try:
+            if self.camera.is_connected:
+                self.camera.close()
+                self._append_log("[CLOSE] Camera disconnected cleanly.")
+        except Exception as exc:
+            self._append_log(f"[CLOSE] Warning during camera disconnect: {exc}")
+
         event.accept()
 
 
