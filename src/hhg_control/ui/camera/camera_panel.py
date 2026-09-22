@@ -554,6 +554,7 @@ class CameraMainWindow(QMainWindow):
         self._set_go_button_style(active=True)
         self.lbl_system_status.setText("Status: Live View Active (Streaming)")
         self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #198754; padding-left: 8px;")
+        self._capture_next_preview()
 
         if self.active_live_task is None or not self.active_live_task.isRunning():
             self.active_live_task = LiveStreamTask(scan_manager=self.scan_manager, target_fps=30.0)
@@ -594,12 +595,14 @@ class CameraMainWindow(QMainWindow):
         t_start = time.perf_counter()
         is_sim = False
 
+        pco_error = None
         try:
             from hhg_control.drivers.pco_edge import PcoEdgeCamera
             cam = PcoEdgeCamera()
             cam.connect()
             self.camera = cam
-        except Exception:
+        except Exception as err:
+            pco_error = str(err)
             cam = MockPcoCamera()
             cam.connect()
             self.camera = cam
@@ -613,6 +616,8 @@ class CameraMainWindow(QMainWindow):
         model_name = info.get("model", "pco.edge 5.5")
 
         if is_sim:
+            if pco_error:
+                self._append_log(f"[INFO] Physical camera search: {pco_error}")
             self._append_log(f"[CONNECT] Connected to simulated camera in {conn_time:.2f} s.")
             self.lbl_system_status.setText("Status: Connected (Simulated Camera)")
         else:
@@ -710,10 +715,12 @@ class CameraMainWindow(QMainWindow):
         """Acquire a single frame and update display without starting live loop."""
         if not self.camera.is_connected:
             self._connect_camera()
+        if self.camera.is_connected:
         if self.camera.is_connected and not self._is_live_active:
             self._capture_next_preview()
 
     def _capture_next_preview(self) -> None:
+        if not self.camera.is_connected:
         if not self.camera.is_connected or self._is_live_active:
             return
         if self.active_preview_task is not None and self.active_preview_task.isRunning():
@@ -751,6 +758,9 @@ class CameraMainWindow(QMainWindow):
         if self.active_preview_task is not None:
             self.active_preview_task.deleteLater()
             self.active_preview_task = None
+
+        if self._is_live_active and (self.active_scan_task is None or not self.active_scan_task.isRunning()):
+            QTimer.singleShot(25, self._capture_next_preview)
 
     # =========================================================================
     # Display & Color Scale
@@ -819,6 +829,8 @@ class CameraMainWindow(QMainWindow):
             f"Pixel Intensity Metrics | Minimum: {c_min:,} ADU | Maximum: {c_max:,} ADU | Mean: {c_mean:,.1f} ADU{sat_warning}"
         )
 
+        # 2x downsampling for fast real-time screen rendering
+        downsample_factor = 2
         # Adaptive downsampling: 4x for full sensor frames (>1000 px) cuts render time from 105ms to ~25ms
         downsample_factor = 4 if (frame.shape[0] >= 1000 and frame.shape[1] >= 1000) else 1
         display_frame = frame[::downsample_factor, ::downsample_factor]

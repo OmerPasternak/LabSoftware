@@ -37,6 +37,10 @@ class MockPcoCamera(BaseCamera):
         self._roi_x1 = max(0, int(center_x - 4 * sigma_x))
         self._roi_x2 = min(self.WIDTH, int(center_x + 4 * sigma_x))
 
+        # Pre-generate a bank of realistic dark noise patterns (mean = 100 ADU, std = 3 ADU)
+        self._dark_bank = self._rng.normal(
+            loc=100.0, scale=3.0, size=(4, self.HEIGHT, self.WIDTH)
+        ).astype(np.float32)
         # Pre-generate bank of realistic dark noise patterns directly in uint16 for speed
         self._dark_bank = np.clip(
             self._rng.normal(loc=100.0, scale=3.0, size=(4, self.HEIGHT, self.WIDTH)),
@@ -185,3 +189,4 @@ class MockPcoCamera(BaseCamera):
             })
 
         return images, metadata
+
