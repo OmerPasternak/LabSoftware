@@ -870,7 +870,7 @@ class CameraMainWindow(QMainWindow):
         self.btn_draw_roi.blockSignals(False)
 
     def _draw_roi_patch(self, x0: int, y0: int, x1: int, y1: int) -> None:
-        """Stamp a persistent cyan outline rectangle onto the axis at the given pixel coords.
+        """Stamp a persistent white outline rectangle onto the axis at the given pixel coords.
 
         This patch is a plain matplotlib artist (not a RectangleSelector widget), so it
         survives frame redraws without needing the draw-mode to be active.  A previous
@@ -885,11 +885,10 @@ class CameraMainWindow(QMainWindow):
 
         width = x1 - x0
         height = y1 - y0   # in image coords (y increases downward)
-        # Rectangle origin is (x0, y0) where y0 is the top edge in image space
         self._roi_patch = mpatches.Rectangle(
             (x0, y0), width, height,
-            linewidth=1, edgecolor="cyan", facecolor="none",
-            linestyle="--", zorder=5
+            linewidth=1.5, edgecolor="white", facecolor="none",
+            linestyle="-", zorder=5
         )
         self.axis.add_patch(self._roi_patch)
         self.canvas.draw_idle()
@@ -926,23 +925,33 @@ class CameraMainWindow(QMainWindow):
                 self._capture_single_preview()
 
     def _reset_full_sensor(self) -> None:
-        """Reset ROI to full 2560 x 2160 unbinned sensor array and remove any ROI patch."""
-        self._is_updating_roi = True
+        """Switch camera readout to full 2560×2160 sensor without touching the configured ROI.
+
+        The spinbox values and the ROI patch overlay are preserved so the user can
+        see exactly where the configured ROI sits within the full frame.  Pressing
+        'Apply Hardware ROI' afterwards will re-apply the saved ROI to the sensor.
+        """
+        if not self.camera.is_connected:
+            self._connect_camera()
+
+        was_live = self._is_live_active
+        if was_live:
+            self._stop_live()
+
         try:
-            self.spn_roi_x0.setValue(0)
-            self.spn_roi_x1.setValue(2560)
-            self.spn_roi_y0.setValue(0)
-            self.spn_roi_y1.setValue(2160)
+            # Send full-sensor ROI to camera hardware only — do not touch spinboxes or patch
+            self.scan_manager.set_roi((0, 0, 2560, 2160))
+            self._append_log(
+                "[FULL SENSOR] Switched readout to full 2560×2160. "
+                "Configured ROI preserved — click 'Apply Hardware ROI' to reactivate it."
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Error switching to full sensor", str(exc))
         finally:
-            self._is_updating_roi = False
-        # Remove persistent patch before applying full-sensor ROI
-        if self._roi_patch is not None:
-            try:
-                self._roi_patch.remove()
-            except ValueError:
-                pass
-            self._roi_patch = None
-        self._apply_roi()
+            if was_live:
+                self._start_live()
+            else:
+                self._capture_single_preview()
 
     # =========================================================================
     # Two-Way Automatic Calculation & Display Sync for Experiment Parameters
