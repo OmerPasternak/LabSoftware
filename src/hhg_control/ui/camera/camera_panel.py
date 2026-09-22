@@ -180,6 +180,7 @@ class CameraMainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("HHG Attosecond Lab - pco.edge 5.5 Camera Controller & Sequencer")
+        self.resize(920, 560)
         self.resize(1040, 580)
 
         # Instrumentation layer
@@ -212,6 +213,7 @@ class CameraMainWindow(QMainWindow):
         self._clim_low: int = 0          # current lower color limit (ADU)
         self._clim_high: int = 65535     # current upper color limit (ADU)
         self._current_displayed_roi: Optional[tuple[int, int, int, int]] = None
+        self._is_dragging_roi: bool = False
 
         self._build_ui()
 
@@ -243,7 +245,7 @@ class CameraMainWindow(QMainWindow):
         self.btn_stop = QPushButton("STOP")
         self.btn_stop.setStyleSheet(
             "background-color: #dc3545; border: 2px solid #dc3545; color: white; "
-            "font-weight: bold; font-size: 13px; padding: 6px 20px; border-radius: 4px;"
+            "font-weight: bold; font-size: 12px; padding: 4px 14px; border-radius: 4px;"
         )
         self.btn_stop.setToolTip("Stop all operations immediately.")
         self.btn_stop.clicked.connect(self._on_stop_clicked)
@@ -256,54 +258,74 @@ class CameraMainWindow(QMainWindow):
 
         self.lbl_system_status = QLabel("Status: Idle / Ready")
         self.lbl_system_status.setStyleSheet(
-            "font-weight: bold; font-size: 13px; color: #198754; padding-left: 4px;"
+            "font-weight: bold; font-size: 11px; color: #198754; padding-left: 2px;"
         )
         top_bar.addWidget(self.lbl_system_status)
         top_bar.addStretch()
 
-        # Color scale controls — auto-apply immediately on change (no Set button needed)
-        top_bar.addWidget(QLabel("Color Scale  Min:"))
+        # Compact Color Scale docked to top right of image — only applies when pressing Enter
+        lbl_clim = QLabel("Scale:")
+        lbl_clim.setStyleSheet("font-size: 11px; font-weight: bold; color: #495057;")
+        top_bar.addWidget(lbl_clim)
+
+        lbl_min = QLabel("Min")
+        lbl_min.setStyleSheet("font-size: 10px; color: #6c757d;")
+        top_bar.addWidget(lbl_min)
+
         self.spn_clim_low = QSpinBox()
         self.spn_clim_low.setRange(0, 65534)
         self.spn_clim_low.setValue(0)
-        self.spn_clim_low.setMinimumWidth(80)
-        self.spn_clim_low.setToolTip("Lower ADU bound for color map (0–65534)")
+        self.spn_clim_low.setFixedWidth(64)
+        self.spn_clim_low.setStyleSheet("font-size: 11px; padding: 1px 2px;")
+        self.spn_clim_low.setToolTip("Min ADU. Type value and press Enter to apply.")
+        self.spn_clim_low.setKeyboardTracking(False)
         self.spn_clim_low.valueChanged.connect(self._on_clim_changed)
+        self.spn_clim_low.editingFinished.connect(self._on_clim_changed)
         top_bar.addWidget(self.spn_clim_low)
 
-        top_bar.addWidget(QLabel("Max:"))
+        lbl_max = QLabel("Max")
+        lbl_max.setStyleSheet("font-size: 10px; color: #6c757d;")
+        top_bar.addWidget(lbl_max)
+
         self.spn_clim_high = QSpinBox()
         self.spn_clim_high.setRange(1, 65535)
         self.spn_clim_high.setValue(65535)
-        self.spn_clim_high.setMinimumWidth(80)
-        self.spn_clim_high.setToolTip("Upper ADU bound for color map (1–65535)")
+        self.spn_clim_high.setFixedWidth(64)
+        self.spn_clim_high.setStyleSheet("font-size: 11px; padding: 1px 2px;")
+        self.spn_clim_high.setToolTip("Max ADU. Type value and press Enter to apply.")
+        self.spn_clim_high.setKeyboardTracking(False)
         self.spn_clim_high.valueChanged.connect(self._on_clim_changed)
+        self.spn_clim_high.editingFinished.connect(self._on_clim_changed)
         top_bar.addWidget(self.spn_clim_high)
 
         btn_auto_clim = QPushButton("Auto")
-        btn_auto_clim.setFixedWidth(46)
-        btn_auto_clim.setToolTip("Auto-scale to frame min/max")
+        btn_auto_clim.setFixedWidth(38)
+        btn_auto_clim.setStyleSheet("padding: 2px 4px; font-size: 10px; font-weight: bold;")
+        btn_auto_clim.setToolTip("Auto-scale color limits to current frame min/max")
         btn_auto_clim.clicked.connect(self._on_clim_auto_clicked)
         top_bar.addWidget(btn_auto_clim)
 
         left_pane.addLayout(top_bar)
 
-        # Canvas — enlarged by ~45% (550x450 px), tightly cropped margins
+        # Canvas — enlarged (550x450 px), tightly cropped margins
         self.figure = Figure(dpi=100)
         self.figure.subplots_adjust(left=0.07, right=0.90, top=0.97, bottom=0.07)
         self.canvas = FigureCanvasQTAgg(self.figure)
         self.canvas.setFixedSize(550, 450)
         self.axis = self.figure.add_subplot(111)
-        self.canvas.mpl_connect("button_press_event", self._on_canvas_click)
+        self.canvas.mpl_connect("button_press_event", self._on_canvas_button_press)
+        self.canvas.mpl_connect("button_release_event", self._on_canvas_button_release)
         left_pane.addWidget(self.canvas)
 
-        # Intensity metrics strip below canvas
+        # Intensity metrics strip below canvas — matched to image width (550 px)
         self.lbl_intensity_metrics = QLabel(
             "Pixel Intensity Metrics | Minimum: -- ADU | Maximum: -- ADU | Mean: -- ADU"
         )
+        self.lbl_intensity_metrics.setFixedWidth(550)
         self.lbl_intensity_metrics.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_intensity_metrics.setStyleSheet(
-            "font-size: 11px; font-weight: bold; padding: 2px; background: #f0f0f0;"
+            "font-size: 11px; font-weight: bold; padding: 3px 6px; background: #f8f9fa; "
+            "border: 1px solid #dee2e6; border-radius: 3px; color: #212529;"
         )
         left_pane.addWidget(self.lbl_intensity_metrics)
         left_pane.addStretch(1)
@@ -741,7 +763,7 @@ class CameraMainWindow(QMainWindow):
 
     def _on_live_frame_ready(self, frame: np.ndarray, meta: dict) -> None:
         """Handle incoming live stream frame from persistent LiveStreamTask."""
-        if not self._is_live_active:
+        if not self._is_live_active or self._is_dragging_roi:
             if self.active_live_task is not None:
                 self.active_live_task.gui_ready = True
             return
@@ -810,11 +832,24 @@ class CameraMainWindow(QMainWindow):
         if hasattr(self, "_last_frame") and self._last_frame is not None:
             self._set_clim(int(self._last_frame.min()), int(self._last_frame.max()))
 
+    def _on_canvas_button_press(self, event) -> None:
+        """Track when user starts dragging an ROI to pause live frame blitting and eliminate lag."""
+        if getattr(self, "btn_draw_roi", None) and self.btn_draw_roi.isChecked():
+            self._is_dragging_roi = True
+
+    def _on_canvas_button_release(self, event) -> None:
+        """Resume live frame blitting after user finishes dragging an ROI."""
+        self._is_dragging_roi = False
+
     def _on_canvas_click(self, event) -> None:
         pass
 
     def _update_display(self, frame: np.ndarray, meta: Optional[dict] = None) -> None:
         """Update canvas display with adaptive downsampling, zooming to active ROI with zero dead space."""
+        # Never interrupt canvas while the user is actively dragging the ROI rectangle
+        if self._is_dragging_roi:
+            return
+
         self._last_frame = frame
         self._frame_count += 1
 
@@ -826,7 +861,8 @@ class CameraMainWindow(QMainWindow):
         sat_warning = " [WARNING: SENSOR SATURATION DETECTED!]" if c_max >= 65530 else ""
         sat_color = "#dc3545" if sat_warning else "#212529"
         self.lbl_intensity_metrics.setStyleSheet(
-            f"font-size: 11px; font-weight: bold; padding: 2px; background: #f8f9fa; color: {sat_color};"
+            f"font-size: 11px; font-weight: bold; padding: 3px 6px; background: #f8f9fa; "
+            f"border: 1px solid #dee2e6; border-radius: 3px; color: {sat_color};"
         )
         self.lbl_intensity_metrics.setText(
             f"Pixel Intensity Metrics | Minimum: {c_min:,} ADU | Maximum: {c_max:,} ADU | Mean: {c_mean:,.1f} ADU{sat_warning}"
@@ -984,6 +1020,7 @@ class CameraMainWindow(QMainWindow):
 
     def _on_roi_drawn(self, eclick, erelease) -> None:
         """Handle rectangle drawn on image: expand Y symmetrically around 1080 and snap X."""
+        self._is_dragging_roi = False
         if eclick.xdata is None or erelease.xdata is None or eclick.ydata is None or erelease.ydata is None:
             return
 
@@ -1029,6 +1066,7 @@ class CameraMainWindow(QMainWindow):
 
     def _deactivate_draw_roi(self) -> None:
         """Deactivate draw-ROI mode and uncheck the button."""
+        self._is_dragging_roi = False
         if self._roi_selector is not None:
             self._roi_selector.clear()
             self._roi_selector.set_active(False)
