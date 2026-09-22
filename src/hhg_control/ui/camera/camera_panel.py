@@ -13,7 +13,7 @@ from typing import Optional
 from datetime import datetime
 import numpy as np
 
-from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, QPoint
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGroupBox, QLabel, QLineEdit, QDoubleSpinBox, QSpinBox,
@@ -304,97 +304,117 @@ class CameraMainWindow(QMainWindow):
         # Canvas — enlarged (550x450 px), tightly cropped margins
         self.figure = Figure(dpi=100)
         self.figure.subplots_adjust(left=0.07, right=0.90, top=0.97, bottom=0.07)
+        # Image row: Canvas (550x450 px) + Fixed Color Scale Control Box (outside the image)
+        image_row = QHBoxLayout()
+        image_row.setSpacing(6)
+        image_row.setContentsMargins(0, 0, 0, 0)
+
         self.canvas = FigureCanvasQTAgg(self.figure)
         self.canvas.setFixedSize(550, 450)
         self.axis = self.figure.add_subplot(111)
         self.canvas.mpl_connect("button_press_event", self._on_canvas_button_press)
         self.canvas.mpl_connect("button_release_event", self._on_canvas_button_release)
-        left_pane.addWidget(self.canvas)
+        image_row.addWidget(self.canvas)
 
-        # Vertical Color Scale Tag — pinned to top-right corner of the image
-        self.scale_tag = DraggableScaleTag(parent=self.canvas)
-        self.scale_tag.setObjectName("scaleTag")
-        self.scale_tag.setStyleSheet("""
-            QFrame#scaleTag {
-                background-color: rgba(255, 255, 255, 0.90);
-                border: 1px solid #adb5bd;
-                border-radius: 5px;
+        # Fixed Color Scale Box — placed outside the image canvas right next to the colorbar
+        self.grp_color_scale = QGroupBox("Color Scale")
+        self.grp_color_scale.setFixedWidth(86)
+        self.grp_color_scale.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                font-size: 11px;
+                color: #343a40;
+                border: 1px solid #ced4da;
+                border-radius: 4px;
+                margin-top: 6px;
+                padding-top: 8px;
+                background-color: #fdfdfd;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 6px;
+                padding: 0 3px;
             }
             QLabel {
-                font-size: 9px;
+                font-size: 10px;
+                font-weight: 500;
                 color: #495057;
-                background: transparent;
             }
             QSpinBox {
                 font-size: 10px;
-                padding: 1px 2px;
+                padding: 2px 2px;
                 background: #ffffff;
                 border: 1px solid #ced4da;
-                border-radius: 2px;
+                border-radius: 3px;
             }
             QPushButton {
-                font-size: 9px;
+                font-size: 10px;
                 font-weight: bold;
-                padding: 2px;
+                padding: 3px;
                 background-color: #f1f3f5;
                 border: 1px solid #ced4da;
-                border-radius: 2px;
+                border-radius: 3px;
             }
             QPushButton:hover {
                 background-color: #e9ecef;
             }
         """)
-        lay_tag = QVBoxLayout(self.scale_tag)
-        lay_tag.setContentsMargins(4, 4, 4, 4)
-        lay_tag.setSpacing(2)
+        lay_scale = QVBoxLayout(self.grp_color_scale)
+        lay_scale.setContentsMargins(6, 6, 6, 6)
+        lay_scale.setSpacing(4)
 
-        lbl_header = QLabel("Scale")
-        lbl_header.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_header.setStyleSheet("font-weight: bold; font-size: 10px; color: #343a40;")
-        lbl_header.setToolTip("Drag here to reposition scale tag")
-        lay_tag.addWidget(lbl_header)
-
-        lbl_max = QLabel("Max")
-        lay_tag.addWidget(lbl_max)
+        lbl_max = QLabel("Max:")
+        lay_scale.addWidget(lbl_max)
 
         self.spn_clim_high = QSpinBox()
         self.spn_clim_high.setRange(1, 65535)
         self.spn_clim_high.setValue(65535)
-        self.spn_clim_high.setFixedWidth(58)
-        self.spn_clim_high.setToolTip("Max ADU. Type value and press Enter to apply.")
+        self.spn_clim_high.setFixedWidth(72)
+        self.spn_clim_high.setToolTip("Max ADU. Press Enter to apply.")
         self.spn_clim_high.setKeyboardTracking(False)
         self.spn_clim_high.valueChanged.connect(self._on_clim_changed)
         self.spn_clim_high.editingFinished.connect(self._on_clim_changed)
-        lay_tag.addWidget(self.spn_clim_high)
+        lay_scale.addWidget(self.spn_clim_high)
 
-        lbl_min = QLabel("Min")
-        lay_tag.addWidget(lbl_min)
+        lay_scale.addSpacing(3)
+
+        lbl_min = QLabel("Min:")
+        lay_scale.addWidget(lbl_min)
 
         self.spn_clim_low = QSpinBox()
         self.spn_clim_low.setRange(0, 65534)
         self.spn_clim_low.setValue(0)
-        self.spn_clim_low.setFixedWidth(58)
-        self.spn_clim_low.setToolTip("Min ADU. Type value and press Enter to apply.")
+        self.spn_clim_low.setFixedWidth(72)
+        self.spn_clim_low.setToolTip("Min ADU. Press Enter to apply.")
         self.spn_clim_low.setKeyboardTracking(False)
         self.spn_clim_low.valueChanged.connect(self._on_clim_changed)
         self.spn_clim_low.editingFinished.connect(self._on_clim_changed)
-        lay_tag.addWidget(self.spn_clim_low)
+        lay_scale.addWidget(self.spn_clim_low)
+
+        lay_scale.addSpacing(6)
 
         btn_auto_clim = QPushButton("Auto")
-        btn_auto_clim.setFixedWidth(58)
+        btn_auto_clim.setFixedWidth(72)
         btn_auto_clim.setToolTip("Auto-scale color limits to current frame min/max")
         btn_auto_clim.clicked.connect(self._on_clim_auto_clicked)
-        lay_tag.addWidget(btn_auto_clim)
+        lay_scale.addWidget(btn_auto_clim)
 
-        self.scale_tag.setFixedSize(66, 126)
-        self.scale_tag.move(386, 16)
-        self.scale_tag.raise_()
+        btn_full_clim = QPushButton("Full")
+        btn_full_clim.setFixedWidth(72)
+        btn_full_clim.setToolTip("Reset color limits to full 16-bit range (0–65535)")
+        btn_full_clim.clicked.connect(lambda: self._set_clim(0, 65535))
+        lay_scale.addWidget(btn_full_clim)
 
-        # Intensity metrics strip below canvas — matched to image width (550 px)
+        lay_scale.addStretch(1)
+        image_row.addWidget(self.grp_color_scale)
+
+        left_pane.addLayout(image_row)
+
+        # Intensity metrics strip below canvas — matched to image row width (642 px)
         self.lbl_intensity_metrics = QLabel(
             "Pixel Intensity Metrics | Minimum: -- ADU | Maximum: -- ADU | Mean: -- ADU"
         )
-        self.lbl_intensity_metrics.setFixedWidth(550)
+        self.lbl_intensity_metrics.setFixedWidth(642)
         self.lbl_intensity_metrics.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_intensity_metrics.setStyleSheet(
             "font-size: 11px; font-weight: bold; padding: 3px 6px; background: #f8f9fa; "
