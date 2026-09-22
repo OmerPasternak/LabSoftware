@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGroupBox, QLabel, QLineEdit, QDoubleSpinBox, QSpinBox,
     QPushButton, QFileDialog, QTextEdit, QMessageBox,
-    QScrollArea, QSplitter, QGridLayout, QFrame, QSizePolicy, QInputDialog
+    QScrollArea, QSplitter, QGridLayout, QFrame, QSizePolicy
 )
 
 import matplotlib
@@ -228,6 +228,43 @@ class CameraMainWindow(QMainWindow):
 
         lay_top.addLayout(image_row)
 
+        # ---- Color-scale controls row ----------------------------------------
+        cscale_row = QHBoxLayout()
+        cscale_row.setSpacing(6)
+        cscale_row.addStretch()
+
+        cscale_row.addWidget(QLabel("Color Scale  Min:"))
+        self.spn_clim_low = QSpinBox()
+        self.spn_clim_low.setRange(0, 65534)
+        self.spn_clim_low.setValue(0)
+        self.spn_clim_low.setMinimumWidth(80)
+        self.spn_clim_low.setToolTip("Lower ADU bound for color map (0–65534)")
+        cscale_row.addWidget(self.spn_clim_low)
+
+        cscale_row.addWidget(QLabel("Max:"))
+        self.spn_clim_high = QSpinBox()
+        self.spn_clim_high.setRange(1, 65535)
+        self.spn_clim_high.setValue(65535)
+        self.spn_clim_high.setMinimumWidth(80)
+        self.spn_clim_high.setToolTip("Upper ADU bound for color map (1–65535)")
+        cscale_row.addWidget(self.spn_clim_high)
+
+        btn_apply_clim = QPushButton("Set")
+        btn_apply_clim.setFixedWidth(48)
+        btn_apply_clim.setToolTip("Apply color scale limits to current image")
+        btn_apply_clim.clicked.connect(self._on_clim_apply_clicked)
+        cscale_row.addWidget(btn_apply_clim)
+
+        btn_auto_clim = QPushButton("Auto")
+        btn_auto_clim.setFixedWidth(52)
+        btn_auto_clim.setToolTip("Set limits to last frame min/max")
+        btn_auto_clim.clicked.connect(self._on_clim_auto_clicked)
+        cscale_row.addWidget(btn_auto_clim)
+
+        cscale_row.addStretch()
+        lay_top.addLayout(cscale_row)
+        # ----------------------------------------------------------------------
+
         # Intensity metrics status line below canvas
         self.lbl_intensity_metrics = QLabel("Pixel Intensity Metrics | Minimum: -- ADU | Maximum: -- ADU | Mean: -- ADU")
         self.lbl_intensity_metrics.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -297,7 +334,7 @@ class CameraMainWindow(QMainWindow):
         self.spn_roi_x0.setRange(0, 2496)
         self.spn_roi_x0.setSingleStep(4)
         self.spn_roi_x0.setValue(0)
-        self.spn_roi_x0.valueChanged.connect(self._on_roi_x_changed)
+        self.spn_roi_x0.valueChanged.connect(self._on_roi_x0_changed)
         grid_roi.addWidget(self.spn_roi_x0, 0, 1)
 
         grid_roi.addWidget(QLabel("X End:"), 0, 2)
@@ -305,7 +342,7 @@ class CameraMainWindow(QMainWindow):
         self.spn_roi_x1.setRange(64, 2560)
         self.spn_roi_x1.setSingleStep(4)
         self.spn_roi_x1.setValue(2560)
-        self.spn_roi_x1.valueChanged.connect(self._on_roi_x_changed)
+        self.spn_roi_x1.valueChanged.connect(self._on_roi_x1_changed)
         grid_roi.addWidget(self.spn_roi_x1, 0, 3)
 
         grid_roi.addWidget(QLabel("Y Start:"), 1, 0)
@@ -608,7 +645,7 @@ class CameraMainWindow(QMainWindow):
     # Display & Color Scale (click colorbar tick to edit limits)
     # =========================================================================
     def _set_clim(self, low: int, high: int) -> None:
-        """Set color limits programmatically.
+        """Set color limits programmatically and sync spinbox values.
 
         Args:
             low:  Lower intensity bound in ADU (0–65534).
@@ -616,34 +653,29 @@ class CameraMainWindow(QMainWindow):
         """
         self._clim_low = max(0, low)
         self._clim_high = min(65535, max(low + 1, high))
+        # Sync spinboxes without triggering extra redraws
+        self.spn_clim_low.blockSignals(True)
+        self.spn_clim_high.blockSignals(True)
+        self.spn_clim_low.setValue(self._clim_low)
+        self.spn_clim_high.setValue(self._clim_high)
+        self.spn_clim_low.blockSignals(False)
+        self.spn_clim_high.blockSignals(False)
         if self._image_artist is not None:
             self._image_artist.set_clim(self._clim_low, self._clim_high)
             self.canvas.draw_idle()
 
-    def _on_canvas_click(self, event) -> None:
-        """Click anywhere on the colorbar to edit the nearest limit.
+    def _on_clim_apply_clicked(self) -> None:
+        """Apply the Min/Max spinbox values as the new color scale."""
+        self._set_clim(self.spn_clim_low.value(), self.spn_clim_high.value())
 
-        Top half → edit upper (max) limit.
-        Bottom half → edit lower (min) limit.
-        A plain integer input dialog is shown; out-of-range or cancelled
-        inputs are silently ignored.
-        """
-        if self._colorbar is None or event.inaxes != self._colorbar.ax:
-            return
-        bbox = self._colorbar.ax.bbox
-        editing_max = event.y >= (bbox.y0 + bbox.y1) / 2
-        current = self._clim_high if editing_max else self._clim_low
-        label = "Upper limit (ADU, 0–65535):" if editing_max else "Lower limit (ADU, 0–65535):"
-        value, ok = QInputDialog.getInt(
-            self, "Set Color Scale", label,
-            value=current, min=0, max=65535, step=1
-        )
-        if not ok:
-            return
-        if editing_max:
-            self._set_clim(self._clim_low, value)
-        else:
-            self._set_clim(value, self._clim_high)
+    def _on_clim_auto_clicked(self) -> None:
+        """Auto-scale to the last acquired frame's min and max pixel values."""
+        if hasattr(self, "_last_frame") and self._last_frame is not None:
+            self._set_clim(int(self._last_frame.min()), int(self._last_frame.max()))
+
+    def _on_canvas_click(self, event) -> None:
+        """Reserved for future canvas interactions (color scale editing moved to spinboxes)."""
+        pass
 
     def _update_display(self, frame: np.ndarray, meta: Optional[dict] = None) -> None:
         """Update canvas display with 2x downsampling, zooming to active ROI."""
@@ -689,7 +721,9 @@ class CameraMainWindow(QMainWindow):
                 minspanx=5,
                 minspany=5,
                 spancoords="data",
-                interactive=True
+                interactive=True,
+                props=dict(facecolor="none", edgecolor="cyan", linewidth=1, linestyle="-"),
+                handle_props=dict(markersize=4, markerfacecolor="cyan", markeredgecolor="cyan"),
             )
             self._roi_selector.set_active(False)
         else:
@@ -726,15 +760,38 @@ class CameraMainWindow(QMainWindow):
     # =========================================================================
     # Hardware ROI Symmetrical Constraints & Snapping
     # =========================================================================
-    def _on_roi_x_changed(self) -> None:
+    def _on_roi_x0_changed(self) -> None:
+        """Snap X Start to 4-px grid and ensure minimum span of 64 px (push X End up if needed)."""
         if self._is_updating_roi:
             return
         self._is_updating_roi = True
         try:
             x0 = (self.spn_roi_x0.value() // 4) * 4
-            x1 = ((self.spn_roi_x1.value() + 3) // 4) * 4
+            x0 = max(0, min(2496, x0))
+            x1 = self.spn_roi_x1.value()
             if x1 - x0 < 64:
                 x1 = min(2560, x0 + 64)
+                # If x1 hit the wall, pull x0 back instead
+                if x1 == 2560:
+                    x0 = 2560 - 64
+            self.spn_roi_x0.setValue(x0)
+            self.spn_roi_x1.setValue(x1)
+        finally:
+            self._is_updating_roi = False
+
+    def _on_roi_x1_changed(self) -> None:
+        """Snap X End to 4-px grid and ensure minimum span of 64 px (push X Start down if needed)."""
+        if self._is_updating_roi:
+            return
+        self._is_updating_roi = True
+        try:
+            x1 = ((self.spn_roi_x1.value() + 3) // 4) * 4
+            x1 = max(64, min(2560, x1))
+            x0 = self.spn_roi_x0.value()
+            if x1 - x0 < 64:
+                x0 = max(0, x1 - 64)
+                if x0 == 0:
+                    x1 = 64
             self.spn_roi_x0.setValue(x0)
             self.spn_roi_x1.setValue(x1)
         finally:
@@ -802,6 +859,18 @@ class CameraMainWindow(QMainWindow):
             f"               Click 'Apply Hardware ROI' to apply to camera sensor."
         )
 
+    def _clear_roi_selector_drawing(self) -> None:
+        """Hide the drawn ROI rectangle and deactivate draw mode without triggering toggle signal."""
+        if self._roi_selector is not None:
+            self._roi_selector.set_active(False)
+            # Clear any visible selection geometry
+            self._roi_selector.set_visible(False)
+            self.canvas.draw_idle()
+        # Suppress the toggled signal while unchecking
+        self.btn_draw_roi.blockSignals(True)
+        self.btn_draw_roi.setChecked(False)
+        self.btn_draw_roi.blockSignals(False)
+
     def _apply_roi(self) -> None:
         """Configure hardware ROI on sensor; pixels outside are shut off and monitor zooms in."""
         if not self.camera.is_connected:
@@ -822,7 +891,7 @@ class CameraMainWindow(QMainWindow):
                 f"[ROI APPLIED] Sensor readout set to X:[{x0}, {x1}], Y:[{y0}, {y1}] ({x1-x0}x{y1-y0} px).\n"
                 f"              Outside pixels shut off. Display zoomed to ROI."
             )
-            self.btn_draw_roi.setChecked(False)
+            self._clear_roi_selector_drawing()
             self._clear_paused_scan("Hardware ROI modified")
         except Exception as exc:
             QMessageBox.warning(self, "Invalid Hardware ROI", str(exc))

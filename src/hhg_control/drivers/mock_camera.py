@@ -97,7 +97,11 @@ class MockPcoCamera(BaseCamera):
         images = np.zeros((num_frames, self.HEIGHT, self.WIDTH), dtype=np.uint16)
         metadata = []
 
-        peak_counts = np.float32(min(55000.0, 5000.0 + (self._exposure_time_s / 0.010) * 8000.0))
+        base_peak = np.float32(min(55000.0, 5000.0 + (self._exposure_time_s / 0.010) * 8000.0))
+        # Sinusoidal modulation: ±40% amplitude at 2 Hz so update rate is clearly visible by eye
+        t_now = time.time()
+        modulation = 1.0 + 0.40 * np.sin(2 * np.pi * 2.0 * t_now)
+        peak_counts = np.float32(base_peak * modulation)
         roi_signal = (
             self._gaussian_profile[self._roi_y1:self._roi_y2, self._roi_x1:self._roi_x2] * peak_counts
         )
