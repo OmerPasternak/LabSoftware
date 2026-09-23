@@ -23,6 +23,17 @@ evidence available on 2026-09-24, not a hardware acceptance result.
 - Completed scan steps are uncompressed HDF5 (`uint16`, `[frame, y, x]`) with
   frame metadata. A physical scan fails on FIFO overflow, frame-number gaps,
   or a full writer queue, retaining an incomplete `.h5.partial` file.
+- The **External trigger** checkbox beside exposure selects the PCO SDK's
+  *External Exposure Start* mode: one fixed-duration exposure is requested per
+  accepted trigger pulse. The exposure field still sets that duration. The
+  setting is read back before a scan and stored as HDF5 `trigger_mode`.
+  Simulation records the selection but does not wait for real pulses.
+- A matched software benchmark is available with
+  `./.venv/Scripts/python.exe -m scripts.benchmark_simulation_overhead`.
+  It times 2 x 1,000 frames at 1740 x 128, 1 ms, using the production HDF5
+  scan writer for realistic mock, mock without its exposure sleep, and
+  prepared-frame replay. Reports go to `data/test_data`; its own HDF5 files
+  are removed after measurement. The replay has no USB or camera SDK cost.
 
 ## Before the lab session
 
@@ -40,12 +51,18 @@ evidence available on 2026-09-24, not a hardware acceptance result.
    per laser shot is not established. A smaller centered ROI or different
    interface may help, but must be verified on hardware. Configure and verify
    the intended external trigger before claiming laser-shot synchronization.
+   On the bench, confirm the actual trigger connector, electrical levels,
+   polarity, and timing from the installed camera/manual before connecting the
+   laser timing source. Test a slow known pulse train first, then compare pulse
+   and saved-frame counts before increasing rate.
 
 ## Controlled physical trial
 
 1. Begin with the intended 1740 × 128 centered ROI and 1 ms exposure. One
    millisecond is shorter than the approximately 2.20 ms period at 455 fps;
    shortening exposure alone is unlikely to remove a readout/transfer limit.
+   With external triggering, no frame will arrive until a valid pulse does;
+   missing or too-fast pulses may cause a timeout or dropped-shot count.
 2. First acquire a short safe run, then 1,000 frames, then a sustained run
    long enough to expose storage stalls. Compare against pco.camware at the
    **same** ROI, shutter, exposure, trigger, USB port, and PC when possible.
