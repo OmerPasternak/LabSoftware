@@ -49,6 +49,8 @@ Run offline tests before each lab deployment:
 The physical driver, readout-mode switching, timing, trigger behavior, and ROI
 must additionally be verified on the benchtop with conservative settings before
 automated scans. Offline tests are not hardware acceptance.
+Use [the camera lab validation plan](docs/camera_lab_validation_plan.md) for
+the first physical-camera session and its acceptance checks.
 
 ## Data
 
@@ -73,6 +75,17 @@ The current camera-file layout and MATLAB reading notes are documented in
 bounded frame batches, per-frame HDF5 chunks, and a separate file per
 scan step; changing to a different HDF5 hierarchy would require a reader
 migration and a new schema version.
+
+For axis-resolved intensity correlations, open
+`scripts/analyze_camera_axis_g2.m` in MATLAB and Run it. Select a completed
+scan-step `.h5` file when prompted. Set `axisName` to `'x'` or `'y'`, set
+`orthogonalRange` to `[first last]` to restrict the perpendicular pixel band,
+and set `binWidth` to the number of adjacent axis pixels per bin (default 8).
+The script plots `g2Axis` and `g2Matrix` and leaves them, `axisPixels`, and
+`meanIntensity` in the MATLAB workspace. It reads one frame at a time. These
+are normalized zero-lag **ADU intensity** correlations across frames; they are
+not time-delay correlations or photon-count coincidences. The matrix diagonal
+matches the Python intensity definition of g²(0).
 
 New scans use uncompressed HDF5 and a bounded writer queue so saving can overlap
 continuous camera acquisition. A simulated camera waits if storage is slower;
