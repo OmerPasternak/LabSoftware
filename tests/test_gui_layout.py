@@ -16,7 +16,7 @@ def test_full_frame_and_color_scale_fit_when_window_resizes():
     window = CameraMainWindow()
     try:
         window.show()
-        assert (window.width(), window.height()) == (1032, 600)
+        assert (window.width(), window.height()) == (864, 600)
         assert not window.grp_color_scale.isVisible()
         assert not window.spn_clim_high.isVisible()
         assert not window.spn_clim_low.isVisible()
@@ -24,7 +24,7 @@ def test_full_frame_and_color_scale_fit_when_window_resizes():
         window._update_display(frame, {"roi": (0, 0, 2560, 2160)})
         assert window.grp_color_scale.isVisible()
 
-        for width, height in ((1032, 600), (1150, 650), (1300, 750)):
+        for width, height in ((864, 600), (1032, 600), (1150, 650)):
             window.resize(width, height)
             app.processEvents()
             assert window.width() == width
@@ -32,12 +32,18 @@ def test_full_frame_and_color_scale_fit_when_window_resizes():
             assert window.lbl_intensity_metrics.width() == window.canvas.width() + window.grp_color_scale.width()
             assert window.lbl_intensity_metrics.x() == window.canvas.x()
             assert window.lbl_system_status.width() >= 60
-            if width == 1032:
-                panes = window.centralWidget().layout()
-                assert abs(panes.itemAt(0).geometry().width() - panes.itemAt(1).geometry().width()) < 50
+            assert window.control_panel.width() == 340
+            assert window.control_panel.height() == window.centralWidget().height() - 12
+            for field in (window.spn_end_val, window.spn_num_steps,
+                          window.txt_storage_dir, window.txt_file_header, window.txt_scan_param):
+                assert field.x() >= 0
+                assert field.geometry().right() < field.parentWidget().width()
             assert window.axis.get_xlim() == (0, 2560)
             assert window.axis.get_ylim() == (2160, 0)
             assert tuple(window._image_artist.get_extent()) == (0, 2560, 2160, 0)
+            sensor_aspect = 2560 / 2160
+            display_aspect = window.axis.bbox.width / window.axis.bbox.height
+            assert abs(display_aspect / sensor_aspect - 1) < 0.05
             assert abs(window._colorbar.ax.bbox.x0 - window.axis.bbox.x1) < 1
             assert abs(window._colorbar.ax.bbox.x1 - window.canvas.width()) < 1
             assert window.grp_color_scale.x() == window.canvas.geometry().right() + 1

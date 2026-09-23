@@ -117,7 +117,7 @@ class CameraMainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("HHG Attosecond Lab - pco.edge 5.5 Camera Controller & Sequencer")
-        self.resize(1032, 600)
+        self.resize(864, 600)
 
         # Instrumentation layer
         self.camera: BaseCamera = MockPcoCamera()
@@ -346,7 +346,9 @@ class CameraMainWindow(QMainWindow):
         # =========================================================================
         # Right Pane: Vertical control panel (Compact, clean spacing)
         # =========================================================================
-        right_pane = QVBoxLayout()
+        self.control_panel = QWidget()
+        self.control_panel.setFixedWidth(340)
+        right_pane = QVBoxLayout(self.control_panel)
         right_pane.setSpacing(6)
         right_pane.setContentsMargins(0, 0, 0, 0)
 
@@ -356,7 +358,7 @@ class CameraMainWindow(QMainWindow):
         lay_cam.setSpacing(4)
         lay_cam.setContentsMargins(6, 8, 6, 6)
 
-        lay_cam.addWidget(QLabel("Exp. (ms):"), 0, 0)
+        lay_cam.addWidget(QLabel("Exp (ms):"), 0, 0)
         self.spn_exposure = QDoubleSpinBox()
         self.spn_exposure.setMinimumWidth(84)
         self.spn_exposure.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
@@ -366,7 +368,7 @@ class CameraMainWindow(QMainWindow):
         self.spn_exposure.valueChanged.connect(self._on_exposure_changed)
         lay_cam.addWidget(self.spn_exposure, 0, 1)
 
-        lay_cam.addWidget(QLabel("Frames:"), 0, 2)
+        lay_cam.addWidget(QLabel("N:"), 0, 2)
         self.spn_frames = QSpinBox()
         self.spn_frames.setMinimumWidth(60)
         self.spn_frames.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
@@ -439,16 +441,22 @@ class CameraMainWindow(QMainWindow):
         roi_btn_row = QHBoxLayout()
         roi_btn_row.setSpacing(4)
         self.btn_apply_roi = QPushButton("Apply ROI")
+        self.btn_apply_roi.setMinimumWidth(70)
+        self.btn_apply_roi.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.btn_apply_roi.setStyleSheet("padding: 5px; font-weight: bold;")
         self.btn_apply_roi.clicked.connect(self._apply_roi)
         roi_btn_row.addWidget(self.btn_apply_roi)
 
         self.btn_full_sensor = QPushButton("Full Sensor")
+        self.btn_full_sensor.setMinimumWidth(80)
+        self.btn_full_sensor.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.btn_full_sensor.setStyleSheet("padding: 5px;")
         self.btn_full_sensor.clicked.connect(self._reset_full_sensor)
         roi_btn_row.addWidget(self.btn_full_sensor)
 
         self.btn_draw_roi = QPushButton("Draw ROI")
+        self.btn_draw_roi.setMinimumWidth(70)
+        self.btn_draw_roi.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.btn_draw_roi.setCheckable(True)
         self.btn_draw_roi.setStyleSheet("padding: 5px;")
         self.btn_draw_roi.setToolTip("Drag a rectangle on the image to select ROI.")
@@ -464,7 +472,7 @@ class CameraMainWindow(QMainWindow):
         lay_exp.setSpacing(4)
         lay_exp.setContentsMargins(6, 8, 6, 6)
 
-        lay_exp.addWidget(QLabel("Start:"), 0, 0)
+        lay_exp.addWidget(QLabel("Start"), 0, 0)
         self.spn_start_val = QDoubleSpinBox()
         self.spn_start_val.setMinimumWidth(95)
         self.spn_start_val.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
@@ -472,9 +480,9 @@ class CameraMainWindow(QMainWindow):
         self.spn_start_val.setDecimals(4)
         self.spn_start_val.setValue(0.0)
         self.spn_start_val.valueChanged.connect(self._on_start_val_changed)
-        lay_exp.addWidget(self.spn_start_val, 0, 1)
+        lay_exp.addWidget(self.spn_start_val, 1, 0)
 
-        lay_exp.addWidget(QLabel("End:"), 0, 2)
+        lay_exp.addWidget(QLabel("End:"), 0, 1)
         self.spn_end_val = QDoubleSpinBox()
         self.spn_end_val.setMinimumWidth(95)
         self.spn_end_val.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
@@ -482,9 +490,9 @@ class CameraMainWindow(QMainWindow):
         self.spn_end_val.setDecimals(4)
         self.spn_end_val.setValue(0.4500)
         self.spn_end_val.valueChanged.connect(self._on_end_val_changed)
-        lay_exp.addWidget(self.spn_end_val, 0, 3)
+        lay_exp.addWidget(self.spn_end_val, 1, 1)
 
-        lay_exp.addWidget(QLabel("Step:"), 1, 0)
+        lay_exp.addWidget(QLabel("Step:"), 2, 0)
         self.spn_step_size = QDoubleSpinBox()
         self.spn_step_size.setMinimumWidth(95)
         self.spn_step_size.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
@@ -492,23 +500,23 @@ class CameraMainWindow(QMainWindow):
         self.spn_step_size.setDecimals(4)
         self.spn_step_size.setValue(0.0500)
         self.spn_step_size.valueChanged.connect(self._on_step_size_changed)
-        lay_exp.addWidget(self.spn_step_size, 1, 1)
+        lay_exp.addWidget(self.spn_step_size, 3, 0)
 
-        lay_exp.addWidget(QLabel("Steps:"), 1, 2)
+        lay_exp.addWidget(QLabel("N:"), 2, 1)
         self.spn_num_steps = QSpinBox()
         self.spn_num_steps.setMinimumWidth(70)
         self.spn_num_steps.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.spn_num_steps.setRange(2, 100000)
         self.spn_num_steps.setValue(10)
         self.spn_num_steps.valueChanged.connect(self._on_num_steps_changed)
-        lay_exp.addWidget(self.spn_num_steps, 1, 3)
+        lay_exp.addWidget(self.spn_num_steps, 3, 1)
 
         self.lbl_scan_progress = QLabel("Scan Progress: Ready (0 of 10 steps) | Delay Stage (mm): 0.0000")
         self.lbl_scan_progress.setStyleSheet(
             "font-weight: bold; font-size: 10px; color: #0d6efd; padding: 2px 0px;"
         )
         self.lbl_scan_progress.setWordWrap(True)
-        lay_exp.addWidget(self.lbl_scan_progress, 2, 0, 1, 4)
+        lay_exp.addWidget(self.lbl_scan_progress, 4, 0, 1, 2)
 
         scan_btn_row = QHBoxLayout()
         scan_btn_row.setSpacing(4)
@@ -528,11 +536,11 @@ class CameraMainWindow(QMainWindow):
         self.btn_cut_measurement.clicked.connect(self._cut_measurement)
         scan_btn_row.addWidget(self.btn_cut_measurement, stretch=1)
 
-        lay_exp.addLayout(scan_btn_row, 3, 0, 1, 4)
+        lay_exp.addLayout(scan_btn_row, 5, 0, 1, 2)
         right_pane.addWidget(grp_exp)
 
         # --- Group 3: Data Storage & Log (Compact log window) -------------
-        grp_storage = QGroupBox("Data Storage & Activity Log")
+        grp_storage = QGroupBox("Storage & Log")
         lay_storage = QVBoxLayout(grp_storage)
         lay_storage.setSpacing(4)
         lay_storage.setContentsMargins(6, 8, 6, 6)
@@ -547,20 +555,23 @@ class CameraMainWindow(QMainWindow):
 
         self.btn_browse = QPushButton("Browse")
         self.btn_browse.clicked.connect(self._browse_directory)
-        store_grid.addWidget(self.btn_browse, 0, 2)
 
         self.btn_open_folder = QPushButton("Open")
         self.btn_open_folder.clicked.connect(self._open_storage_folder)
-        store_grid.addWidget(self.btn_open_folder, 0, 3)
+        folder_buttons = QHBoxLayout()
+        folder_buttons.addStretch(1)
+        folder_buttons.addWidget(self.btn_browse)
+        folder_buttons.addWidget(self.btn_open_folder)
+        store_grid.addLayout(folder_buttons, 1, 0, 1, 2)
 
-        store_grid.addWidget(QLabel("Header:"), 1, 0)
+        store_grid.addWidget(QLabel("Header:"), 2, 0)
         self.txt_file_header = QLineEdit("HHG Scan")
-        store_grid.addWidget(self.txt_file_header, 1, 1)
+        store_grid.addWidget(self.txt_file_header, 2, 1)
 
-        store_grid.addWidget(QLabel("Param:"), 1, 2)
+        store_grid.addWidget(QLabel("Param:"), 3, 0)
         self.txt_scan_param = QLineEdit("Delay Stage (mm)")
         self.txt_scan_param.textChanged.connect(lambda _: self._update_progress_display())
-        store_grid.addWidget(self.txt_scan_param, 1, 3)
+        store_grid.addWidget(self.txt_scan_param, 3, 1)
 
         lay_storage.addLayout(store_grid)
 
@@ -568,13 +579,13 @@ class CameraMainWindow(QMainWindow):
         self.txt_activity_log = QTextEdit()
         self.txt_activity_log.setReadOnly(True)
         self.txt_activity_log.setStyleSheet("font-family: Consolas, monospace; font-size: 10px;")
-        self.txt_activity_log.setFixedHeight(75)
+        self.txt_activity_log.setFixedHeight(60)
         lay_storage.addWidget(self.txt_activity_log)
 
         right_pane.addWidget(grp_storage)
         right_pane.addStretch(1)
 
-        root_layout.addLayout(right_pane, stretch=1)
+        root_layout.addWidget(self.control_panel)
 
         self._update_progress_display()
 
