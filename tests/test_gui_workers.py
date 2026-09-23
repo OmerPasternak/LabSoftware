@@ -37,7 +37,91 @@ def test_measurement_log_reports_complete_scan_duration(qtbot, tmp_path):
     log = window.txt_activity_log.toPlainText()
     assert "All 2 steps saved to disk. Measurement duration:" in log
     assert len(list(tmp_path.glob("*.h5"))) == 2
-    camera.close()
+    window.close()
+
+
+def test_live_view_resumes_after_mock_measurement(qtbot, tmp_path):
+    """A scan returns camera ownership to the live worker after saving."""
+    camera = MockPcoCamera(fast_simulation=True)
+    camera.connect()
+    camera.set_roi((800, 1052, 1056, 1108))
+    window = CameraMainWindow()
+    qtbot.addWidget(window)
+    window.camera = camera
+    window.scan_manager = CameraScanManager(camera, tmp_path)
+    window.txt_storage_dir.setText(str(tmp_path))
+    window.spn_roi_x0.setValue(800)
+    window.spn_roi_x1.setValue(1056)
+    window.spn_roi_y0.setValue(1052)
+    window.spn_roi_y1.setValue(1108)
+    window.spn_frames.setValue(2)
+    window.spn_num_steps.setValue(2)
+
+    window._start_live()
+    qtbot.waitUntil(lambda: window._frame_count >= 1, timeout=3000)
+    window._toggle_measurement_scan()
+    qtbot.waitUntil(
+        lambda: window.active_scan_task is None and window._is_live_active
+        and window.scan_manager.state == "LIVE"
+        and "[SCAN COMPLETE]" in window.txt_activity_log.toPlainText(),
+        timeout=10000,
+    )
+    assert len(list(tmp_path.glob("*.h5"))) == 2
+    assert window.scan_manager.state == "LIVE"
+    assert "[LIVE] Resuming live view after measurement." in window.txt_activity_log.toPlainText()
+
+    window._on_stop_clicked()
+    qtbot.waitUntil(lambda: window.active_live_task is None, timeout=3000)
+    assert window.scan_manager.state == "IDLE"
+    window.close()
+
+
+def test_live_view_returns_after_scan_preflight_rejection(qtbot, tmp_path, monkeypatch):
+    """Rejecting an unapplied ROI leaves the prior live view available."""
+    camera = MockPcoCamera(fast_simulation=True)
+    camera.connect()
+    window = CameraMainWindow()
+    qtbot.addWidget(window)
+    window.camera = camera
+    window.scan_manager = CameraScanManager(camera, tmp_path)
+    window.spn_roi_x0.setValue(148)
+    window.spn_roi_x1.setValue(2292)
+    warnings = []
+    monkeypatch.setattr(camera_panel.QMessageBox, "warning", lambda *args: warnings.append(args[-1]))
+
+    window._start_live()
+    qtbot.waitUntil(lambda: window._frame_count >= 1, timeout=3000)
+    window._toggle_measurement_scan()
+    qtbot.waitUntil(lambda: bool(warnings) and window._is_live_active, timeout=5000)
+    assert window.active_scan_task is None
+    assert "Click Apply ROI" in warnings[0]
+    assert window.scan_manager.state == "LIVE"
+
+    window._on_stop_clicked()
+    qtbot.waitUntil(lambda: window.active_live_task is None, timeout=3000)
+    window.close()
+
+
+def test_stop_cancels_pending_live_to_scan_handoff(qtbot, tmp_path):
+    """STOP during live shutdown must not start a queued measurement."""
+    camera = MockPcoCamera(fast_simulation=True)
+    camera.connect()
+    window = CameraMainWindow()
+    qtbot.addWidget(window)
+    window.camera = camera
+    window.scan_manager = CameraScanManager(camera, tmp_path)
+    window.txt_storage_dir.setText(str(tmp_path))
+
+    window._start_live()
+    qtbot.waitUntil(lambda: window._frame_count >= 1, timeout=3000)
+    window._toggle_measurement_scan()
+    window._on_stop_clicked()
+    qtbot.waitUntil(lambda: window.active_live_task is None, timeout=3000)
+    assert window.active_scan_task is None
+    assert window.scan_manager.state == "IDLE"
+    assert not window._resume_live_after_scan
+    assert not list(tmp_path.glob("*.h5"))
+    window.close()
 
 
 def test_measurement_rejects_unapplied_roi(qtbot, tmp_path, monkeypatch):
@@ -201,6 +285,19 @@ def test_bright_scale_endpoints_are_directly_editable_and_axis_labels_fit(qtbot)
     qtbot.keyPress(window.spn_clim_high, Qt.Key.Key_Return)
     assert window.spn_clim_high.value() == 5000
     assert window._image_artist.get_clim() == (0, 5000)
+
+
+def test_typing_upper_y_edge_in_start_field_keeps_centered_mock_roi(qtbot):
+    """A typed Y=1116 must resolve to valid centered sensor-pixel bounds."""
+    window = CameraMainWindow()
+    qtbot.addWidget(window)
+    window.spn_roi_y0.lineEdit().selectAll()
+
+    qtbot.keyClicks(window.spn_roi_y0, "1116")
+    qtbot.keyPress(window.spn_roi_y0, Qt.Key.Key_Return)
+
+    assert (window.spn_roi_y0.value(), window.spn_roi_y1.value()) == (1044, 1116)
+    window.camera.validate_roi((0, 1044, 2560, 1116))
 
 
 def test_mock_gui_live_start_stop_keeps_camera_idle(qtbot, tmp_path):

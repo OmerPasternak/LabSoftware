@@ -60,6 +60,10 @@ completed measurements.
 The GUI activity log reports each scan's active measurement duration after all
 steps are saved. A stopped scan reports elapsed active time, and a resumed scan
 adds subsequent active time without counting the pause.
+If live view was running when a measurement starts, the GUI pauses its camera
+reader for the scan and restarts live view after a successful measurement. The
+last saved frame is displayed after each scan step. STOP, scan errors, and window
+close do not restart live acquisition; GO can start it manually afterward.
 
 The current camera-file layout and MATLAB reading notes are documented in
 [docs/hdf5_camera_schema.md](docs/hdf5_camera_schema.md). The implementation uses

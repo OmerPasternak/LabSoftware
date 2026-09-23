@@ -16,6 +16,7 @@ from typing import Optional
 from datetime import datetime
 import numpy as np
 
+from PyQt6 import sip
 from PyQt6.QtCore import Qt, QPointF
 from PyQt6.QtGui import QColor, QPainter
 from PyQt6.QtWidgets import (
@@ -54,6 +55,23 @@ class CameraFigureCanvas(FigureCanvasQTAgg):
     def __init__(self, figure: Figure) -> None:
         super().__init__(figure)
         self.coordinate_axis = None
+
+    def _draw_idle(self) -> None:
+        """Discard a queued Matplotlib draw after Qt destroys this canvas."""
+        if sip.isdeleted(self):
+            self._draw_pending = False
+            return
+        super()._draw_idle()
+
+    def draw(self) -> None:
+        """Finish pending Agg work safely if the window closes mid-redraw."""
+        if sip.isdeleted(self):
+            return
+        try:
+            super().draw()
+        except RuntimeError:
+            if not sip.isdeleted(self):
+                raise
 
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
@@ -156,6 +174,8 @@ class CameraMainWindow(QMainWindow):
         self._after_live_stopped: Optional[Callable[[], None]] = None
         self._after_connect: Optional[Callable[[], None]] = None
         self._resume_live_after_mode: bool = False
+        self._resume_live_after_scan: bool = False
+        self._scan_completed_successfully: bool = False
 
         # Matplotlib display caches
         self._image_artist = None
@@ -427,9 +447,11 @@ class CameraMainWindow(QMainWindow):
         self.spn_roi_y0 = QSpinBox()
         self.spn_roi_y0.setMinimumWidth(60)
         self.spn_roi_y0.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        self.spn_roi_y0.setRange(0, 1072)
+        # Accept either sensor-side edge here. An upper-half coordinate is
+        # normalized to the matching lower edge after editing.
+        self.spn_roi_y0.setRange(0, 2160)
         self.spn_roi_y0.setValue(0)
-        self.spn_roi_y0.setToolTip("ROI Y Start — mirrored around sensor centre Y=1080")
+        self.spn_roi_y0.setToolTip("ROI Y lower edge; entering an upper edge (e.g. 1116) sets its symmetric pair.")
         self.spn_roi_y0.valueChanged.connect(self._on_roi_y0_changed)
         lay_cam.addWidget(self.spn_roi_y0, 3, 1)
 
@@ -442,7 +464,7 @@ class CameraMainWindow(QMainWindow):
         self.spn_roi_y1.valueChanged.connect(self._on_roi_y1_changed)
         lay_cam.addWidget(self.spn_roi_y1, 3, 2, 1, 2)
 
-        lbl_roi_hint = QLabel("Y centered on 1080 (pco.edge). X in 4-px steps.")
+        lbl_roi_hint = QLabel("Y edges mirror around 1080; enter either edge. X in 4-px steps.")
         lbl_roi_hint.setWordWrap(True)
         lbl_roi_hint.setStyleSheet("font-size: 9px; color: #6c757d; font-style: italic;")
         lay_cam.addWidget(lbl_roi_hint, 4, 0, 1, 4)
@@ -683,6 +705,9 @@ class CameraMainWindow(QMainWindow):
         """Global Stop: halts live view or gracefully aborts in-progress scan."""
         self._append_log("[STOP] Stop button pressed.")
         self._resume_live_after_roi = False
+        if self._resume_live_after_scan:
+            self._resume_live_after_scan = False
+            self._after_live_stopped = None
         self._after_connect = None
         if self._is_live_active:
             self._stop_live()
@@ -1287,14 +1312,15 @@ class CameraMainWindow(QMainWindow):
         self._sync_roi_patch_from_spinboxes()
 
     def _on_roi_y0_changed(self) -> None:
-        """Force symmetrical vertical constraint around y=1080 (Y1 = 2160 - Y0) and redraw ROI."""
+        """Map either typed Y edge to a centered ROI with at least 16 px height."""
         if self._is_updating_roi:
             return
         self._is_updating_roi = True
         try:
-            val = self.spn_roi_y0.value()
-            val = max(0, min(1072, val))
-            self.spn_roi_y1.setValue(2160 - val)
+            edge = self.spn_roi_y0.value()
+            lower = min(edge, 2160 - edge, 1072)
+            self.spn_roi_y0.setValue(lower)
+            self.spn_roi_y1.setValue(2160 - lower)
         finally:
             self._is_updating_roi = False
         self._sync_roi_patch_from_spinboxes()
@@ -1628,10 +1654,12 @@ class CameraMainWindow(QMainWindow):
 
         if self._roi_change_pending:
             self._append_log("[SCAN] Wait for the hardware ROI change to finish before measuring.")
+            self._resume_live_if_scan_not_started()
             return
 
         # Stop live stream cleanly before starting multi-step scan
         if self._is_live_active:
+            self._resume_live_after_scan = True
             self._stop_live(after_stop=self._toggle_measurement_scan)
             return
 
@@ -1645,6 +1673,7 @@ class CameraMainWindow(QMainWindow):
             message = f"Cannot verify the camera's active ROI: {exc}"
             self._append_log(f"[SCAN BLOCKED] {message}")
             QMessageBox.warning(self, "ROI Readback Failed", message)
+            self._resume_live_if_scan_not_started()
             return
         if selected_roi != active_roi:
             message = (
@@ -1653,6 +1682,7 @@ class CameraMainWindow(QMainWindow):
             )
             self._append_log(f"[SCAN BLOCKED] {message}")
             QMessageBox.warning(self, "ROI Not Applied", message)
+            self._resume_live_if_scan_not_started()
             return
 
         start_step = self._paused_step if self._paused_step is not None else 0
@@ -1676,6 +1706,7 @@ class CameraMainWindow(QMainWindow):
             message = f"Cannot check free space in {target_dir}: {exc}"
             self._append_log(f"[SCAN BLOCKED] {message}")
             QMessageBox.warning(self, "Storage Check Failed", message)
+            self._resume_live_if_scan_not_started()
             return
         if required_bytes > free_bytes:
             message = (
@@ -1685,9 +1716,11 @@ class CameraMainWindow(QMainWindow):
             )
             self._append_log(f"[SCAN BLOCKED] {message}")
             QMessageBox.warning(self, "Insufficient Storage", message)
+            self._resume_live_if_scan_not_started()
             return
         self.scan_manager.set_storage_dir(target_dir)
 
+        self._scan_completed_successfully = False
         self._set_ui_scanning_state(is_scanning=True)
 
         exp_name = self.txt_file_header.text().strip() or "HHG_Scan"
@@ -1736,6 +1769,12 @@ class CameraMainWindow(QMainWindow):
         self.active_scan_task.finished.connect(self._on_scan_task_finished)
         self._scan_segment_started_at = perf_counter()
         self.active_scan_task.start()
+
+    def _resume_live_if_scan_not_started(self) -> None:
+        """Restore an interrupted live view when scan preflight blocks acquisition."""
+        if self._resume_live_after_scan and not self._closing:
+            self._resume_live_after_scan = False
+            self._start_live()
 
     def _finish_scan_segment(self) -> float:
         """Return active scan seconds, excluding time spent paused between segments."""
@@ -1812,6 +1851,7 @@ class CameraMainWindow(QMainWindow):
         )
 
     def _on_scan_finished(self, total_steps: int) -> None:
+        self._scan_completed_successfully = True
         elapsed_s = self._finish_scan_segment()
         self._paused_step = None
         self._paused_run_id = None
@@ -1836,6 +1876,7 @@ class CameraMainWindow(QMainWindow):
         param_val: float,
         param_name: str
     ) -> None:
+        self._scan_completed_successfully = False
         elapsed_s = self._finish_scan_segment()
         self._paused_step = stopped_step_idx
         self._paused_run_id = self._current_run_id
@@ -1873,6 +1914,7 @@ class CameraMainWindow(QMainWindow):
         self._append_log(f"[SCAN FINALIZED] Scan cut at Step {stopped}. Next scan will start from Step 1.")
 
     def _on_scan_error(self, err_msg: str) -> None:
+        self._scan_completed_successfully = False
         elapsed_s = self._finish_scan_segment()
         self._append_log(
             f"[ERROR] Scan execution error after {elapsed_s:.2f} s active measurement: {err_msg}"
@@ -1907,6 +1949,13 @@ class CameraMainWindow(QMainWindow):
         # If user closed window while scan was aborting, finish close now
         if self._closing:
             self.close()
+        elif self._resume_live_after_scan and self._scan_completed_successfully:
+            self._resume_live_after_scan = False
+            self._append_log("[LIVE] Resuming live view after measurement.")
+            self._start_live()
+        else:
+            self._resume_live_after_scan = False
+        self._scan_completed_successfully = False
 
     def _append_log(self, message: str) -> None:
         self.txt_activity_log.append(message)
@@ -1914,6 +1963,8 @@ class CameraMainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         """Cooperatively stop workers before disconnecting the camera."""
         self._is_live_active = False
+        self._resume_live_after_scan = False
+        self._after_live_stopped = None
 
         if self.active_scan_task is not None and self.active_scan_task.isRunning():
             self._closing = True
@@ -1959,6 +2010,9 @@ class CameraMainWindow(QMainWindow):
         except Exception as exc:
             self._append_log(f"[CLOSE] Warning during camera disconnect: {exc}")
 
+        # A queued Matplotlib draw_idle callback can otherwise try to repaint
+        # this canvas after Qt deletes its native widget.
+        self.canvas._draw_pending = False
         event.accept()
 
 
