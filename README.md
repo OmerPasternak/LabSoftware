@@ -18,7 +18,9 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-Launch the GUI with `hhg-camera` or `python -m hhg_control.ui.camera_gui`.
+Launch the GUI with `run_camera_gui.vbs`, `run_camera_gui.bat`, or
+`.\.venv\Scripts\python.exe -m hhg_control.ui.camera_gui`. An unqualified
+`python` can import a different checkout if another copy is installed.
 The GUI defaults to the simulated camera. Selecting the physical camera never
 silently falls back to simulated data.
 Press GO to start live view; RUNNING is a status indicator and only STOP ends
@@ -41,7 +43,7 @@ troubleshooting: it leaves a console open when startup fails.
 Run offline tests before each lab deployment:
 
 ```powershell
-python -m pytest -q
+.\.venv\Scripts\python.exe -m pytest -q
 ```
 
 The physical driver, readout-mode switching, timing, trigger behavior, and ROI
@@ -78,7 +80,7 @@ Check available space first; the script also refuses to start if its minimum
 free-space check fails.
 
 ```powershell
-python -m scripts.stress_camera_storage --output-dir D:\camera_benchmark --frames 1000
+.\.venv\Scripts\python.exe -m scripts.stress_camera_storage --output-dir D:\camera_benchmark --frames 1000
 ```
 
 Start with `--frames 20` to check the setup. The default `--pattern noise`
