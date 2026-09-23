@@ -1,7 +1,8 @@
 """
 PyQt6 Graphical User Interface for pco.edge 5.5 sCMOS Camera Control and Scan Sequencer.
 Implements top-left Go/Stop controls, horizontal widescreen layout with side control panel,
-manual color scale controls, camera-derived timestamps, and hardware-constrained ROI.
+fixed external color scale control box (docked beside the image colorbar), camera-derived
+hardware timestamps, and hardware-constrained symmetrical ROI.
 """
 
 import sys
@@ -40,13 +41,49 @@ from .workers import (
 )
 
 
+class DraggableScaleTag(QFrame):
+    """Floating draggable tag pinned over the top-right corner of the image canvas."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._drag_start_global: Optional[QPoint] = None
+        self._widget_start_pos: Optional[QPoint] = None
+        self._user_moved: bool = False
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start_global = event.globalPosition().toPoint()
+            self._widget_start_pos = self.pos()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._drag_start_global is not None and self._widget_start_pos is not None:
+            delta = event.globalPosition().toPoint() - self._drag_start_global
+            new_pos = self._widget_start_pos + delta
+            if self.parentWidget():
+                pw = self.parentWidget().width()
+                ph = self.parentWidget().height()
+                nx = max(0, min(pw - self.width(), new_pos.x()))
+                ny = max(0, min(ph - self.height(), new_pos.y()))
+                self.move(nx, ny)
+            else:
+                self.move(new_pos)
+            self._user_moved = True
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        self._drag_start_global = None
+        self._widget_start_pos = None
+        super().mouseReleaseEvent(event)
+
+
 class CameraMainWindow(QMainWindow):
     """Primary Application Window for HHG Laboratory Camera Control."""
 
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("HHG Attosecond Lab - pco.edge 5.5 Camera Controller & Sequencer")
-        self.resize(920, 560)
         self.resize(1040, 580)
 
         # Instrumentation layer
@@ -144,65 +181,122 @@ class CameraMainWindow(QMainWindow):
         top_bar.addWidget(self.lbl_system_status)
         top_bar.addStretch()
 
-        # Compact Color Scale docked to top right of image — only applies when pressing Enter
-        lbl_clim = QLabel("Scale:")
-        lbl_clim.setStyleSheet("font-size: 11px; font-weight: bold; color: #495057;")
-        top_bar.addWidget(lbl_clim)
-
-        lbl_min = QLabel("Min")
-        lbl_min.setStyleSheet("font-size: 10px; color: #6c757d;")
-        top_bar.addWidget(lbl_min)
-
-        self.spn_clim_low = QSpinBox()
-        self.spn_clim_low.setRange(0, 65534)
-        self.spn_clim_low.setValue(0)
-        self.spn_clim_low.setFixedWidth(64)
-        self.spn_clim_low.setStyleSheet("font-size: 11px; padding: 1px 2px;")
-        self.spn_clim_low.setToolTip("Min ADU. Type value and press Enter to apply.")
-        self.spn_clim_low.setKeyboardTracking(False)
-        self.spn_clim_low.valueChanged.connect(self._on_clim_changed)
-        self.spn_clim_low.editingFinished.connect(self._on_clim_changed)
-        top_bar.addWidget(self.spn_clim_low)
-
-        lbl_max = QLabel("Max")
-        lbl_max.setStyleSheet("font-size: 10px; color: #6c757d;")
-        top_bar.addWidget(lbl_max)
-
-        self.spn_clim_high = QSpinBox()
-        self.spn_clim_high.setRange(1, 65535)
-        self.spn_clim_high.setValue(65535)
-        self.spn_clim_high.setFixedWidth(64)
-        self.spn_clim_high.setStyleSheet("font-size: 11px; padding: 1px 2px;")
-        self.spn_clim_high.setToolTip("Max ADU. Type value and press Enter to apply.")
-        self.spn_clim_high.setKeyboardTracking(False)
-        self.spn_clim_high.valueChanged.connect(self._on_clim_changed)
-        self.spn_clim_high.editingFinished.connect(self._on_clim_changed)
-        top_bar.addWidget(self.spn_clim_high)
-
-        btn_auto_clim = QPushButton("Auto")
-        btn_auto_clim.setFixedWidth(38)
-        btn_auto_clim.setStyleSheet("padding: 2px 4px; font-size: 10px; font-weight: bold;")
-        btn_auto_clim.setToolTip("Auto-scale color limits to current frame min/max")
-        btn_auto_clim.clicked.connect(self._on_clim_auto_clicked)
-        top_bar.addWidget(btn_auto_clim)
-
         left_pane.addLayout(top_bar)
 
         # Canvas — enlarged (550x450 px), tightly cropped margins
         self.figure = Figure(dpi=100)
         self.figure.subplots_adjust(left=0.07, right=0.90, top=0.97, bottom=0.07)
+        # Image row: Canvas (550x450 px) + Fixed Color Scale Control Box (outside the image)
+        image_row = QHBoxLayout()
+        image_row.setSpacing(6)
+        image_row.setContentsMargins(0, 0, 0, 0)
+
         self.canvas = FigureCanvasQTAgg(self.figure)
         self.canvas.setFixedSize(550, 450)
         self.axis = self.figure.add_subplot(111)
         self.canvas.mpl_connect("button_press_event", self._on_canvas_button_press)
         self.canvas.mpl_connect("button_release_event", self._on_canvas_button_release)
-        left_pane.addWidget(self.canvas)
+        image_row.addWidget(self.canvas)
 
-        # Intensity metrics strip below canvas — matched to image width (550 px)
+        # Fixed Color Scale Box — placed outside the image canvas right next to the colorbar
+        self.grp_color_scale = QGroupBox("Color Scale")
+        self.grp_color_scale.setFixedWidth(86)
+        self.grp_color_scale.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                font-size: 11px;
+                color: #343a40;
+                border: 1px solid #ced4da;
+                border-radius: 4px;
+                margin-top: 6px;
+                padding-top: 8px;
+                background-color: #fdfdfd;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 6px;
+                padding: 0 3px;
+            }
+            QLabel {
+                font-size: 10px;
+                font-weight: 500;
+                color: #495057;
+            }
+            QSpinBox {
+                font-size: 10px;
+                padding: 2px 2px;
+                background: #ffffff;
+                border: 1px solid #ced4da;
+                border-radius: 3px;
+            }
+            QPushButton {
+                font-size: 10px;
+                font-weight: bold;
+                padding: 3px;
+                background-color: #f1f3f5;
+                border: 1px solid #ced4da;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #e9ecef;
+            }
+        """)
+        lay_scale = QVBoxLayout(self.grp_color_scale)
+        lay_scale.setContentsMargins(6, 6, 6, 6)
+        lay_scale.setSpacing(4)
+
+        lbl_max = QLabel("Max:")
+        lay_scale.addWidget(lbl_max)
+
+        self.spn_clim_high = QSpinBox()
+        self.spn_clim_high.setRange(1, 65535)
+        self.spn_clim_high.setValue(65535)
+        self.spn_clim_high.setFixedWidth(72)
+        self.spn_clim_high.setToolTip("Max ADU. Press Enter to apply.")
+        self.spn_clim_high.setKeyboardTracking(False)
+        self.spn_clim_high.valueChanged.connect(self._on_clim_changed)
+        self.spn_clim_high.editingFinished.connect(self._on_clim_changed)
+        lay_scale.addWidget(self.spn_clim_high)
+
+        lay_scale.addSpacing(3)
+
+        lbl_min = QLabel("Min:")
+        lay_scale.addWidget(lbl_min)
+
+        self.spn_clim_low = QSpinBox()
+        self.spn_clim_low.setRange(0, 65534)
+        self.spn_clim_low.setValue(0)
+        self.spn_clim_low.setFixedWidth(72)
+        self.spn_clim_low.setToolTip("Min ADU. Press Enter to apply.")
+        self.spn_clim_low.setKeyboardTracking(False)
+        self.spn_clim_low.valueChanged.connect(self._on_clim_changed)
+        self.spn_clim_low.editingFinished.connect(self._on_clim_changed)
+        lay_scale.addWidget(self.spn_clim_low)
+
+        lay_scale.addSpacing(6)
+
+        btn_auto_clim = QPushButton("Auto")
+        btn_auto_clim.setFixedWidth(72)
+        btn_auto_clim.setToolTip("Auto-scale color limits to current frame min/max")
+        btn_auto_clim.clicked.connect(self._on_clim_auto_clicked)
+        lay_scale.addWidget(btn_auto_clim)
+
+        btn_full_clim = QPushButton("Full")
+        btn_full_clim.setFixedWidth(72)
+        btn_full_clim.setToolTip("Reset color limits to full 16-bit range (0–65535)")
+        btn_full_clim.clicked.connect(lambda: self._set_clim(0, 65535))
+        lay_scale.addWidget(btn_full_clim)
+
+        lay_scale.addStretch(1)
+        image_row.addWidget(self.grp_color_scale)
+
+        left_pane.addLayout(image_row)
+
+        # Intensity metrics strip below canvas — matched to image row width (642 px)
         self.lbl_intensity_metrics = QLabel(
             "Pixel Intensity Metrics | Minimum: -- ADU | Maximum: -- ADU | Mean: -- ADU"
         )
-        self.lbl_intensity_metrics.setFixedWidth(550)
+        self.lbl_intensity_metrics.setFixedWidth(642)
         self.lbl_intensity_metrics.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_intensity_metrics.setStyleSheet(
             "font-size: 11px; font-weight: bold; padding: 3px 6px; background: #f8f9fa; "
@@ -749,6 +843,8 @@ class CameraMainWindow(QMainWindow):
             self.spn_clim_high.blockSignals(True)
             self.spn_clim_high.setValue(high)
             self.spn_clim_high.blockSignals(False)
+        if low == self._clim_low and high == self._clim_high:
+            return
         self._clim_low = low
         self._clim_high = high
         if self._image_artist is not None:
@@ -1437,6 +1533,23 @@ class CameraMainWindow(QMainWindow):
         # If user closed window while scan was aborting, finish close now
         if self._closing:
             self.close()
+
+    def _position_scale_tag(self) -> None:
+        """Position the floating scale tag in the top-right corner of the image canvas."""
+        if hasattr(self, "scale_tag") and hasattr(self, "canvas"):
+            if not getattr(self.scale_tag, "_user_moved", False):
+                tag_w = self.scale_tag.width()
+                tag_x = max(10, 452 - tag_w)
+                self.scale_tag.move(tag_x, 16)
+            self.scale_tag.raise_()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._position_scale_tag()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._position_scale_tag()
 
     def _append_log(self, message: str) -> None:
         self.txt_activity_log.append(message)
