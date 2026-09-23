@@ -1,17 +1,20 @@
 @echo off
 setlocal
-set PYTHONIOENCODING=utf-8
+set "PYTHONIOENCODING=utf-8"
+cd /d "%~dp0"
 
-:: Prioritize Python 3.12, then Python launcher py, then python in PATH
-if exist "%LOCALAPPDATA%\Programs\Python\Python312\python.exe" (
-    "%LOCALAPPDATA%\Programs\Python\Python312\python.exe" -m hhg_control.ui.camera_gui
-) else (
-    py -m hhg_control.ui.camera_gui
+if not exist ".venv\Scripts\python.exe" (
+    echo This checkout needs its Python 3.12 virtual environment.
+    echo Create .venv and install requirements.txt before launching the GUI.
+    pause
+    exit /b 1
 )
 
-if %ERRORLEVEL% NEQ 0 (
+set "PYTHONPATH=%~dp0src"
+".venv\Scripts\python.exe" -m hhg_control.ui.camera_gui
+if errorlevel 1 (
     echo.
-    echo Application exited with an error code: %ERRORLEVEL%
+    echo Application exited with an error.
     pause
 )
 endlocal

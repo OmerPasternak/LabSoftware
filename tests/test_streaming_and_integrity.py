@@ -1,5 +1,7 @@
 """Tests for bounded analysis, atomic storage, and serialized live acquisition."""
 
+import json
+
 import h5py
 import numpy as np
 import pytest
@@ -52,6 +54,12 @@ def test_atomic_hdf5_schema_metadata_and_no_overwrite(tmp_path):
         assert len(h5f["frame_metadata/json"]) == 5
         assert np.prod(h5f["images"].chunks) * 2 <= 1024 * 1024
         assert h5f["images"].shuffle
+        assert h5f["images"].compression == "gzip"
+        assert h5f["images"].compression_opts == 1
+        assert h5f["images"].attrs["dimension_order"] == "[frame, y, x]"
+        assert h5f.attrs["frames_written"] == 5
+        first_frame_metadata = json.loads(h5f["frame_metadata/json"][0])
+        assert first_frame_metadata["timestamp_source"] == "simulated_host_clock"
 
     batches = list(iter_scan_step_frames(first, batch_size=2))
     assert [batch.shape[0] for batch in batches] == [2, 2, 1]

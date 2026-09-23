@@ -22,6 +22,9 @@ Launch the GUI with `hhg-camera` or `python -m hhg_control.ui.camera_gui`.
 The GUI defaults to the simulated camera. Selecting the physical camera never
 silently falls back to simulated data.
 
+On Windows, `run_camera_gui.bat` opens this checkout using its `.venv` and
+`src` directory. It reports a setup message if `.venv` has not been created.
+
 ## Validation
 
 Run offline tests before each lab deployment:
@@ -41,3 +44,9 @@ as `[frame, y, x]`, acquisition settings, ROI, and per-frame metadata. Files are
 first written with a `.partial` suffix and renamed only after successful close.
 Incomplete `.partial` files should be retained for diagnosis, not analyzed as
 completed measurements.
+
+The current camera-file layout and MATLAB reading notes are documented in
+[docs/hdf5_camera_schema.md](docs/hdf5_camera_schema.md). The implementation uses
+bounded frame batches, small gzip-compressed chunks, and a separate file per
+scan step; changing to a different HDF5 hierarchy would require a reader
+migration and a new schema version.
