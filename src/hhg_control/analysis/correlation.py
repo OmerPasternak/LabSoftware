@@ -9,7 +9,54 @@ from typing import Any, Dict, Optional, Tuple, Union
 import numpy as np
 
 from ..drivers.base_camera import BaseCamera
-from .hdf5_io import load_scan_step
+from .hdf5_io import get_scan_metadata, iter_scan_step_frames
+
+
+class StreamingPixelG2:
+    """Incrementally accumulate per-pixel g²(0) without retaining frame stacks."""
+
+    def __init__(
+        self,
+        epsilon: float = 0.0,
+        background: Optional[Union[float, np.ndarray]] = None,
+    ) -> None:
+        self.epsilon = float(epsilon)
+        self.background = background
+        self.sum_i: np.ndarray | None = None
+        self.sum_i2: np.ndarray | None = None
+        self.count = 0
+
+    def update(self, frames: np.ndarray) -> None:
+        """Add a `[frame, y, x]` batch of sensor counts to the accumulator."""
+        if frames.ndim != 3:
+            raise ValueError(f"Expected [frame, y, x] data, got shape {frames.shape}.")
+        if self.sum_i is None:
+            self.sum_i = np.zeros(frames.shape[1:], dtype=np.float64)
+            self.sum_i2 = np.zeros(frames.shape[1:], dtype=np.float64)
+        elif frames.shape[1:] != self.sum_i.shape:
+            raise ValueError(
+                f"Frame shape changed from {self.sum_i.shape} to {frames.shape[1:]} during accumulation."
+            )
+        assert self.sum_i2 is not None
+        for frame in frames:
+            values = frame.astype(np.float64)
+            if self.background is not None:
+                values = np.maximum(values - self.background, 0.0)
+            self.sum_i += values
+            self.sum_i2 += values * values
+            self.count += 1
+
+    def finalize(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return `(g2_map, mean_intensity)` after at least two accumulated frames."""
+        if self.count < 2 or self.sum_i is None or self.sum_i2 is None:
+            raise ValueError(f"At least 2 frames are required to compute g²(0), found {self.count}.")
+        mean_i = self.sum_i / self.count
+        mean_i2 = self.sum_i2 / self.count
+        denominator = mean_i * mean_i + self.epsilon
+        g2_map = np.full(mean_i.shape, np.nan, dtype=np.float64)
+        valid = denominator > 0.0
+        g2_map[valid] = mean_i2[valid] / denominator[valid]
+        return g2_map, mean_i
 
 
 def compute_g2_map(
@@ -57,31 +104,9 @@ def compute_g2_map(
             f"At least 2 frames are required to calculate temporal correlation g^(2), received {num_frames}."
         )
 
-    # Accumulate running sums in float64 to avoid allocating a massive full float64 3D array in memory
-    sum_i = np.zeros((height, width), dtype=np.float64)
-    sum_i2 = np.zeros((height, width), dtype=np.float64)
-
-    for i in range(num_frames):
-        frame_flt = frames[i].astype(np.float64)
-
-        if background is not None:
-            frame_flt = np.maximum(frame_flt - background, 0.0)
-
-        sum_i += frame_flt
-        sum_i2 += frame_flt * frame_flt
-
-    mean_i = sum_i / num_frames
-    mean_i2 = sum_i2 / num_frames
-
-    # Denominator with future smoothing parameter epsilon
-    denom = (mean_i ** 2) + float(epsilon)
-
-    # Safe vectorized division: avoid division by zero warnings, assign NaN where denom == 0
-    g2_map = np.full((height, width), np.nan, dtype=np.float64)
-    valid_mask = denom > 0.0
-    g2_map[valid_mask] = mean_i2[valid_mask] / denom[valid_mask]
-
-    return g2_map
+    accumulator = StreamingPixelG2(epsilon=epsilon, background=background)
+    accumulator.update(frames)
+    return accumulator.finalize()[0]
 
 
 def acquire_and_compute_g2(
@@ -169,44 +194,17 @@ def compute_g2_from_scan(
     if max_steps is not None and max_steps > 0:
         matched_files = matched_files[:max_steps]
 
-    sum_i = None
-    sum_i2 = None
-    total_frames = 0
+    accumulator = StreamingPixelG2(epsilon=epsilon, background=background)
     first_metadata = None
 
-    for f in matched_files:
-        try:
-            images, meta = load_scan_step(f)
-        except Exception:
-            continue
-
+    for filepath in matched_files:
+        metadata = get_scan_metadata(filepath)
         if first_metadata is None:
-            first_metadata = meta
-            height, width = images.shape[1], images.shape[2]
-            sum_i = np.zeros((height, width), dtype=np.float64)
-            sum_i2 = np.zeros((height, width), dtype=np.float64)
+            first_metadata = metadata
+        for batch in iter_scan_step_frames(filepath, batch_size=4):
+            accumulator.update(batch)
 
-        for frame in images:
-            frame_flt = frame.astype(np.float64)
-            if background is not None:
-                frame_flt = np.maximum(frame_flt - background, 0.0)
-
-            sum_i += frame_flt
-            sum_i2 += frame_flt * frame_flt
-            total_frames += 1
-
-    if total_frames < 2 or sum_i is None or sum_i2 is None:
-        raise ValueError(
-            f"At least 2 frames are required across the scan files to compute g^(2), found {total_frames}."
-        )
-
-    mean_i = sum_i / total_frames
-    mean_i2 = sum_i2 / total_frames
-
-    denom = (mean_i ** 2) + float(epsilon)
-    g2_map = np.full(mean_i.shape, np.nan, dtype=np.float64)
-    valid_mask = denom > 0.0
-    g2_map[valid_mask] = mean_i2[valid_mask] / denom[valid_mask]
+    g2_map, mean_i = accumulator.finalize()
 
     peak_intensity = float(mean_i.max())
     active_mask = mean_i > (0.1 * peak_intensity)
@@ -217,7 +215,7 @@ def compute_g2_from_scan(
 
     summary_stats = {
         "num_files": len(matched_files),
-        "total_frames": total_frames,
+        "total_frames": accumulator.count,
         "mean_intensity_map": mean_i,
         "peak_intensity": peak_intensity,
         "g2_center": g2_center,
@@ -226,5 +224,4 @@ def compute_g2_from_scan(
     }
 
     return g2_map, summary_stats
-
 

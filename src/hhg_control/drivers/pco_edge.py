@@ -10,11 +10,22 @@ import numpy as np
 from .base_camera import BaseCamera, ReadoutMode
 
 try:
-    import pco
+    import pco as _pco
+    pco = _pco
     PCO_AVAILABLE = True
 except (ImportError, RuntimeError) as err:
+    pco = None
     PCO_AVAILABLE = False
     PCO_IMPORT_ERROR = str(err)
+
+
+def _frame_time_fields(metadata: Dict[str, Any]) -> tuple[Any, str, str]:
+    """Preserve SDK frame time when present; otherwise label host receipt time."""
+    timestamp = metadata.get("timestamp")
+    if timestamp is not None:
+        return timestamp, str(timestamp), "pco_sdk"
+    received = datetime.now()
+    return received.timestamp(), received.strftime("%H:%M:%S.%f")[:-3], "host_fallback"
 
 
 class PcoEdgeCamera(BaseCamera):
@@ -55,6 +66,7 @@ class PcoEdgeCamera(BaseCamera):
     def close(self) -> None:
         if self._cam is not None:
             try:
+                self.stop_live()
                 if getattr(self._cam, "is_recording", False):
                     self._cam.stop()
                 self._cam.close()
@@ -118,10 +130,16 @@ class PcoEdgeCamera(BaseCamera):
         """
         if self._cam is not None:
             try:
-                # sdk.get_camera_setup() returns (setup_type, setup_flags, num_pages)
                 result = self._cam.sdk.get_camera_setup()
-                setup_type = result[0] if isinstance(result, (tuple, list)) else result
-                self._readout_mode = ReadoutMode(int(setup_type))
+                if isinstance(result, dict):
+                    setup_values = result.get("setup", ())
+                    setup_type = setup_values[0] if setup_values else result.get("type")
+                elif isinstance(result, (tuple, list)):
+                    setup_type = result[0]
+                else:
+                    setup_type = result
+                if setup_type is not None:
+                    self._readout_mode = ReadoutMode(int(setup_type))
             except Exception:
                 pass   # return cached value on any SDK error
         return self._readout_mode
@@ -164,10 +182,17 @@ class PcoEdgeCamera(BaseCamera):
             if getattr(self._cam, "is_recording", False):
                 self._cam.stop()
 
-            # ---- Step 2: write the new shutter mode to camera firmware --------
-            # PCO SDK constant: SCCMOS_FORMAT_TOP_BOTTOM      = 1 (rolling)
-            #                   SCCMOS_FORMAT_TOP_CENTER_BOTTOM_CENTER = 4 (global reset)
-            self._cam.sdk.set_camera_setup(mode.value)
+            previous_roi = self.get_roi()
+
+            # ---- Step 2: write the new shutter mode and request firmware reboot
+            setup_name = {
+                ReadoutMode.ROLLING_SHUTTER: "rolling shutter",
+                ReadoutMode.GLOBAL_RESET: "global reset",
+            }[mode]
+            if hasattr(self._cam.sdk, "set_timeouts"):
+                self._cam.sdk.set_timeouts(command_timeout=2000)
+            self._cam.sdk.set_camera_setup(setup_name)
+            self._cam.sdk.reboot_camera()
 
             # ---- Step 3: close the camera handle to trigger internal reboot ---
             self._cam.close()
@@ -189,6 +214,7 @@ class PcoEdgeCamera(BaseCamera):
         # ---- Step 5: reconnect and restore previous settings ------------------
         try:
             self.connect()
+            self.set_roi(previous_roi)
         except Exception as exc:
             raise RuntimeError(
                 f"Readout mode changed to {mode.name} but camera failed to reconnect after reboot: {exc}"
@@ -201,6 +227,8 @@ class PcoEdgeCamera(BaseCamera):
             raise RuntimeError("Camera is not connected.")
         if num_frames < 1:
             raise ValueError("num_frames must be >= 1.")
+        if getattr(self, "_live_active", False):
+            raise RuntimeError("Stop live acquisition before recording a measurement sequence.")
 
         self._cam.record(number_of_images=num_frames, mode="sequence")
         raw_images, metadata_list = self._cam.images()
@@ -208,20 +236,55 @@ class PcoEdgeCamera(BaseCamera):
         
         metas = []
         for i, meta in enumerate(metadata_list):
-            cam_time = None
-            if isinstance(meta, dict):
-                cam_time = meta.get("timestamp")
-            if not cam_time:
-                cam_time = time.time()
+            cam_time, time_text, timestamp_source = _frame_time_fields(
+                meta if isinstance(meta, dict) else {}
+            )
             metas.append({
                 "frame_id": i,
                 "camera_timestamp": cam_time,
-                "camera_time_str": datetime.now().strftime("%H:%M:%S.%f")[:-3],
+                "camera_time_str": time_text,
+                "timestamp_source": timestamp_source,
                 "raw_meta": str(meta),
                 "exposure_s": self._exposure_time_s,
                 "roi": self.get_roi()
             })
 
         return images_array, metas
+
+    def start_live(self, buffer_size: int = 4) -> None:
+        """Start a persistent PCO ring buffer for efficient live display."""
+        if not self._is_connected or self._cam is None:
+            raise RuntimeError("Camera is not connected.")
+        if buffer_size < 4:
+            raise ValueError("The PCO ring buffer requires at least 4 images.")
+        if getattr(self, "_live_active", False):
+            return
+        self._cam.record(number_of_images=buffer_size, mode="ring buffer")
+        self._live_active = True
+
+    def acquire_live_frame(self, timeout_s: float | None = None) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """Wait for and copy the newest frame from the PCO ring buffer."""
+        if not getattr(self, "_live_active", False) or self._cam is None:
+            raise RuntimeError("Live acquisition is not active.")
+        timeout = timeout_s if timeout_s is not None else self._exposure_time_s + 1.0
+        self._cam.wait_for_new_image(delay=True, timeout=timeout)
+        frame, raw_meta = self._cam.image(image_index=0xFFFFFFFF)
+        meta = raw_meta if isinstance(raw_meta, dict) else {"raw_meta": str(raw_meta)}
+        camera_timestamp, time_text, timestamp_source = _frame_time_fields(meta)
+        return np.ascontiguousarray(frame, dtype=np.uint16), {
+            "frame_id": meta.get("recorder image number", 0),
+            "camera_timestamp": camera_timestamp,
+            "camera_time_str": time_text,
+            "timestamp_source": timestamp_source,
+            "raw_meta": str(meta),
+            "exposure_s": self._exposure_time_s,
+            "roi": self.get_roi(),
+        }
+
+    def stop_live(self) -> None:
+        """Stop the PCO recorder if a live ring buffer is active."""
+        if self._cam is not None and getattr(self, "_live_active", False):
+            self._cam.stop()
+        self._live_active = False
 
 

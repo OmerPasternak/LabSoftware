@@ -7,6 +7,16 @@ description: Standardizes experimental data persistence in HDF5 with complete me
 
 This skill defines standard HDF5 dataset structures, metadata attributes, and formatting rules to guarantee complete experimental reproducibility and seamless data analysis in both Python and MATLAB.
 
+## Current camera format
+
+The implemented camera writer uses schema 2.0, documented in
+`docs/hdf5_camera_schema.md`. It saves one scan step per file with a root
+`/images` dataset ordered `[frame, y, x]`, root acquisition attributes, and
+`/frame_metadata/json`. Keep this layout for existing camera scans. The
+`/entry/...` structure below is a possible future multi-instrument design,
+not the current reader contract; adopting it requires a new schema version
+and a reader migration.
+
 ---
 
 ## 1. File Structure & Hierarchy
