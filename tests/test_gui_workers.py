@@ -10,7 +10,50 @@ pytest.importorskip("pytestqt")
 from hhg_control.drivers.mock_camera import MockPcoCamera
 from hhg_control.sequencer.scan_manager import CameraScanManager
 from hhg_control.ui.camera.camera_panel import CameraMainWindow
+import hhg_control.ui.camera.camera_panel as camera_panel
 from hhg_control.ui.camera.workers import LiveStreamTask
+
+
+def test_measurement_log_reports_complete_scan_duration(qtbot, tmp_path):
+    """A mock-camera GUI scan reports elapsed capture and save time."""
+    camera = MockPcoCamera(fast_simulation=True)
+    camera.connect()
+    camera.set_roi((0, 1052, 2560, 1108))
+    window = CameraMainWindow()
+    qtbot.addWidget(window)
+    window.camera = camera
+    window.scan_manager.camera = camera
+    window.txt_storage_dir.setText(str(tmp_path))
+    window.spn_frames.setValue(1)
+    window.spn_num_steps.setValue(2)
+
+    window._toggle_measurement_scan()
+    qtbot.waitUntil(
+        lambda: "[SCAN COMPLETE]" in window.txt_activity_log.toPlainText()
+        and window.active_scan_task is None,
+        timeout=10000,
+    )
+    log = window.txt_activity_log.toPlainText()
+    assert "All 2 steps saved to disk. Measurement duration:" in log
+    assert len(list(tmp_path.glob("*.h5"))) == 2
+    camera.close()
+
+
+def test_measurement_duration_accumulates_active_time_across_pause(qtbot, monkeypatch):
+    """Resume totals exclude time spent waiting for the user between segments."""
+    window = CameraMainWindow()
+    qtbot.addWidget(window)
+    times = iter((12.0, 25.0))
+    monkeypatch.setattr(camera_panel, "perf_counter", lambda: next(times))
+
+    window._scan_segment_started_at = 10.0
+    window._on_scan_aborted(0, 2, 0.0, "Setpoint")
+    window._scan_segment_started_at = 20.0
+    window._on_scan_finished(2)
+
+    log = window.txt_activity_log.toPlainText()
+    assert "Active measurement duration: 2.00 s" in log
+    assert "Measurement duration: 7.00 s" in log
 
 
 def test_live_worker_stops_cooperatively(qtbot, tmp_path):

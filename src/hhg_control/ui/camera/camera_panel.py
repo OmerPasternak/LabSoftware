@@ -8,6 +8,7 @@ source-labelled frame timestamps, and hardware-constrained symmetrical ROI.
 import sys
 import os
 import subprocess
+from time import perf_counter
 from collections.abc import Callable
 from pathlib import Path
 from typing import Optional
@@ -146,6 +147,8 @@ class CameraMainWindow(QMainWindow):
         self._paused_step: Optional[int] = None
         self._paused_run_id: Optional[str] = None
         self._current_run_id: Optional[str] = None
+        self._scan_active_elapsed_s: float = 0.0
+        self._scan_segment_started_at: Optional[float] = None
         self._current_executing_step: int = 0
         self._frame_count: int = 0
         self._closing: bool = False
@@ -1554,6 +1557,8 @@ class CameraMainWindow(QMainWindow):
             self._paused_step = None
             self._paused_run_id = None
             self._current_run_id = None
+            self._scan_active_elapsed_s = 0.0
+            self._scan_segment_started_at = None
             self.btn_cut_measurement.setVisible(False)
             self.btn_take_measurement.setText("Take Measurement")
             if reason:
@@ -1628,6 +1633,7 @@ class CameraMainWindow(QMainWindow):
         start_step = self._paused_step if self._paused_step is not None else 0
         if start_step == 0:
             self._current_run_id = datetime.now().strftime("%Y%m%dT%H%M%S_%f")
+            self._scan_active_elapsed_s = 0.0
         else:
             self._current_run_id = self._paused_run_id
 
@@ -1681,7 +1687,15 @@ class CameraMainWindow(QMainWindow):
         self.active_scan_task.scan_aborted.connect(self._on_scan_aborted)
         self.active_scan_task.error_occurred.connect(self._on_scan_error)
         self.active_scan_task.finished.connect(self._on_scan_task_finished)
+        self._scan_segment_started_at = perf_counter()
         self.active_scan_task.start()
+
+    def _finish_scan_segment(self) -> float:
+        """Return active scan seconds, excluding time spent paused between segments."""
+        if self._scan_segment_started_at is not None:
+            self._scan_active_elapsed_s += max(0.0, perf_counter() - self._scan_segment_started_at)
+            self._scan_segment_started_at = None
+        return self._scan_active_elapsed_s
 
     def _set_ui_scanning_state(self, is_scanning: bool) -> None:
         if is_scanning:
@@ -1751,6 +1765,7 @@ class CameraMainWindow(QMainWindow):
         )
 
     def _on_scan_finished(self, total_steps: int) -> None:
+        elapsed_s = self._finish_scan_segment()
         self._paused_step = None
         self._paused_run_id = None
         self._current_run_id = None
@@ -1761,7 +1776,11 @@ class CameraMainWindow(QMainWindow):
         )
         self.lbl_system_status.setText(f"Status: Scan Completed Successfully ({total_steps} steps saved)")
         self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #198754; padding-left: 8px;")
-        self._append_log(f"[SCAN COMPLETE] All {total_steps} steps saved to disk.")
+        self._append_log(
+            f"[SCAN COMPLETE] All {total_steps} steps saved to disk. "
+            f"Measurement duration: {elapsed_s:.2f} s."
+        )
+        self._scan_active_elapsed_s = 0.0
 
     def _on_scan_aborted(
         self,
@@ -1770,6 +1789,7 @@ class CameraMainWindow(QMainWindow):
         param_val: float,
         param_name: str
     ) -> None:
+        elapsed_s = self._finish_scan_segment()
         self._paused_step = stopped_step_idx
         self._paused_run_id = self._current_run_id
         self.lbl_scan_progress.setText(
@@ -1778,7 +1798,8 @@ class CameraMainWindow(QMainWindow):
         self.lbl_system_status.setText(f"Status: Scan Stopped at Step {stopped_step_idx + 1} of {total_steps}")
         self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #d97706; padding-left: 8px;")
         self._append_log(
-            f"[SCAN STOPPED] Stopped at Step {stopped_step_idx + 1} of {total_steps}.\n"
+            f"[SCAN STOPPED] Stopped at Step {stopped_step_idx + 1} of {total_steps}. "
+            f"Active measurement duration: {elapsed_s:.2f} s.\n"
             f"              Click 'Continue from Step {stopped_step_idx + 1}' or 'Cut Measurement'."
         )
 
@@ -1787,6 +1808,8 @@ class CameraMainWindow(QMainWindow):
         self._paused_step = None
         self._paused_run_id = None
         self._current_run_id = None
+        self._scan_active_elapsed_s = 0.0
+        self._scan_segment_started_at = None
         self.btn_cut_measurement.setVisible(False)
         self.btn_take_measurement.setText("Take Measurement")
         self.btn_take_measurement.setStyleSheet(
@@ -1803,7 +1826,10 @@ class CameraMainWindow(QMainWindow):
         self._append_log(f"[SCAN FINALIZED] Scan cut at Step {stopped}. Next scan will start from Step 1.")
 
     def _on_scan_error(self, err_msg: str) -> None:
-        self._append_log(f"[ERROR] Scan execution error: {err_msg}")
+        elapsed_s = self._finish_scan_segment()
+        self._append_log(
+            f"[ERROR] Scan execution error after {elapsed_s:.2f} s active measurement: {err_msg}"
+        )
         self.lbl_system_status.setText("Status: Scan Error")
         self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #dc3545; padding-left: 8px;")
         QMessageBox.warning(self, "Scan Execution Error", f"Scan error occurred:\n\n{err_msg}")

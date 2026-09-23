@@ -57,6 +57,9 @@ as `[frame, y, x]`, acquisition settings, ROI, and per-frame metadata. Files are
 first written with a `.partial` suffix and renamed only after successful close.
 Incomplete `.partial` files should be retained for diagnosis, not analyzed as
 completed measurements.
+The GUI activity log reports each scan's active measurement duration after all
+steps are saved. A stopped scan reports elapsed active time, and a resumed scan
+adds subsequent active time without counting the pause.
 
 The current camera-file layout and MATLAB reading notes are documented in
 [docs/hdf5_camera_schema.md](docs/hdf5_camera_schema.md). The implementation uses
