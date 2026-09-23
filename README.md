@@ -119,3 +119,36 @@ suggests waiting on storage or the OS. Windows write caching can make short
 runs look faster than sustained disk writes, so use enough frames to exceed RAM
 cache and compare repeated runs. The replay source reuses a prepared batch and
 does not model USB transfer, SDK buffers, triggers, exposure, or the GUI.
+
+## Paced capture check
+
+The paced benchmark sends prepared frames through the production scan manager
+and HDF5 writer at a requested rate. It verifies the saved frame IDs and a
+marker in every image, times close/rename and `fsync`, then removes its data
+file unless `--keep-data` is specified. It leaves a small JSON report in the
+selected output directory. Run it on the scan drive, one case at a time:
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.benchmark_capture_pipeline --output-dir data\test_data --frames 10000 --width 2560 --height 56 --fps 1000
+```
+
+`pipeline_fps` includes the paced frame supply and HDF5 finalization;
+`durable_fps` also includes an explicit file `fsync`. Both can benefit from
+Windows or drive caching. A passing result establishes that this synthetic
+software path kept up on this PC for this duration and ROI. It does not establish
+the physical camera rate, USB transfer capacity, SDK FIFO behavior, or laser
+synchronization. The benchmark produces frames in batches, so a physical SDK
+that delivers frames individually can add per-frame costs.
+
+For a saved physical-camera scan, inspect frame numbering and host read timing:
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.inspect_scan_timing path\to\scan_step.h5
+```
+
+The host read rate is measured after SDK image retrieval. It is not a sensor
+exposure rate or a laser-shot timestamp. To establish one frame per laser shot,
+also verify the camera's external-trigger configuration and hardware trigger
+counts/timestamps on the benchtop. Test the intended ROI and exposure over a
+long enough run to expose FIFO overflow, dropped frame IDs, and sustained
+storage limits before relying on unattended acquisition.

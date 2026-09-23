@@ -15,7 +15,7 @@ class FakePcoCamera:
         self.camera_name = "fake pco.edge"
         self.camera_serial = "FAKE-1"
         self.exposure_time = 0.01
-        self.configuration = {"roi": (1, 1, 2560, 2160)}
+        self.configuration = {"roi": (1, 1073, 64, 1088)}
         self.is_recording = False
         self.record_calls = []
         self.image_metadata = {"recorder image number": 9}
@@ -32,7 +32,7 @@ class FakePcoCamera:
         self.wait_args = (delay, timeout)
 
     def image(self, image_index=0):
-        return np.ones((6, 8), dtype=np.uint16), dict(self.image_metadata)
+        return np.ones((16, 64), dtype=np.uint16), dict(self.image_metadata)
 
     def stop(self):
         self.is_recording = False
@@ -75,7 +75,7 @@ def test_pco_live_uses_persistent_ring_buffer(monkeypatch):
     frame, metadata = camera.acquire_live_frame(timeout_s=0.25)
     assert fake.record_calls == [(4, "ring buffer")]
     assert fake.wait_args == (True, 0.25)
-    assert frame.shape == (6, 8)
+    assert frame.shape == (16, 64)
     assert metadata["frame_id"] == 9
     camera.stop_live()
     assert not fake.is_recording
@@ -177,7 +177,7 @@ def test_pco_saved_scan_uses_one_fifo_and_preserves_recorder_numbers(monkeypatch
     numbers = iter(range(10, 15))
     fake.rec = SimpleNamespace(get_status=lambda: {"bFIFOOverflow": False, "dwLastError": 0})
     fake.image = lambda image_index=0: (
-        np.ones((6, 8), dtype=np.uint16), {"recorder image number": next(numbers)}
+        np.ones((16, 64), dtype=np.uint16), {"recorder image number": next(numbers)}
     )
     monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface: fake))
     monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
@@ -186,8 +186,37 @@ def test_pco_saved_scan_uses_one_fifo_and_preserves_recorder_numbers(monkeypatch
     batches = list(camera.iter_frames(5, batch_size=2))
     assert [len(images) for images, _ in batches] == [2, 2, 1]
     assert [meta["frame_id"] for _, metas in batches for meta in metas] == list(range(10, 15))
+    assert all(
+        isinstance(meta["host_frame_read_monotonic_ns"], int)
+        for _, metas in batches for meta in metas
+    )
     assert fake.record_calls == [(8, "fifo")]
     assert not fake.is_recording
+    camera.close()
+
+
+def test_pco_saved_scan_reads_roi_only_once(monkeypatch):
+    """Avoid repeated multi-call SDK configuration reads at high frame rates."""
+    fake = FakePcoCamera("USB 3.0")
+    numbers = iter(range(20, 25))
+    fake.rec = SimpleNamespace(get_status=lambda: {"bFIFOOverflow": False, "dwLastError": 0})
+    fake.image = lambda image_index=0: (
+        np.ones((16, 64), dtype=np.uint16), {"recorder image number": next(numbers)}
+    )
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface: fake))
+    monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
+    camera = pco_edge.PcoEdgeCamera()
+    camera.connect()
+    roi_reads = []
+
+    def get_roi():
+        roi_reads.append(1)
+        return (0, 0, 64, 16)
+
+    monkeypatch.setattr(camera, "get_roi", get_roi)
+    batches = list(camera.iter_frames(5, batch_size=2))
+    assert len(roi_reads) == 1
+    assert all(meta["roi"] == (0, 0, 64, 16) for _, metas in batches for meta in metas)
     camera.close()
 
 
@@ -197,7 +226,7 @@ def test_pco_fifo_fails_on_a_missing_recorder_frame(monkeypatch):
     numbers = iter((10, 12))
     fake.rec = SimpleNamespace(get_status=lambda: {"bFIFOOverflow": False, "dwLastError": 0})
     fake.image = lambda image_index=0: (
-        np.ones((6, 8), dtype=np.uint16), {"recorder image number": next(numbers)}
+        np.ones((16, 64), dtype=np.uint16), {"recorder image number": next(numbers)}
     )
     monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface: fake))
     monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
@@ -218,6 +247,23 @@ def test_pco_fifo_fails_on_sdk_overflow(monkeypatch):
     camera = pco_edge.PcoEdgeCamera()
     camera.connect()
     with pytest.raises(RuntimeError, match="FIFO overflow"):
+        list(camera.iter_frames(1))
+    assert not fake.is_recording
+    camera.close()
+
+
+def test_pco_fifo_rejects_frame_shape_that_disagrees_with_roi(monkeypatch):
+    """Never save a frame while labeling it with the wrong hardware ROI."""
+    fake = FakePcoCamera("USB 3.0")
+    fake.rec = SimpleNamespace(get_status=lambda: {"bFIFOOverflow": False, "dwLastError": 0})
+    fake.image = lambda image_index=0: (
+        np.ones((5, 8), dtype=np.uint16), {"recorder image number": 1}
+    )
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface: fake))
+    monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
+    camera = pco_edge.PcoEdgeCamera()
+    camera.connect()
+    with pytest.raises(RuntimeError, match="expected \\(16, 64\\) and uint16"):
         list(camera.iter_frames(1))
     assert not fake.is_recording
     camera.close()

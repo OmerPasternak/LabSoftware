@@ -246,6 +246,7 @@ class PcoEdgeCamera(BaseCamera):
         self._cam.record(number_of_images=num_frames, mode="sequence")
         raw_images, metadata_list = self._cam.images()
         images_array = np.ascontiguousarray(np.stack(raw_images, axis=0), dtype=np.uint16)
+        roi = self.get_roi()
         
         metas = []
         for i, meta in enumerate(metadata_list):
@@ -259,7 +260,7 @@ class PcoEdgeCamera(BaseCamera):
                 "timestamp_source": timestamp_source,
                 "raw_meta": str(meta),
                 "exposure_s": self._exposure_time_s,
-                "roi": self.get_roi()
+                "roi": roi
             })
 
         return images_array, metas
@@ -289,6 +290,9 @@ class PcoEdgeCamera(BaseCamera):
         metas: list[Dict[str, Any]] = []
         try:
             self._cam.record(number_of_images=fifo_size, mode="fifo")
+            # pco.Camera.configuration queries several SDK settings. Read the
+            # ROI once for the sequence rather than doing those calls per frame.
+            roi = self.get_roi()
             for _ in range(num_frames):
                 if stop_check is not None and stop_check():
                     return
@@ -299,6 +303,14 @@ class PcoEdgeCamera(BaseCamera):
                 if status.get("bFIFOOverflow") or status.get("dwLastError"):
                     raise RuntimeError(f"PCO FIFO overflow or recorder error: {status}")
                 frame, raw_meta = self._cam.image(image_index=0)
+                host_frame_read_ns = time.perf_counter_ns()
+                frame = np.asarray(frame)
+                expected_shape = (roi[3] - roi[1], roi[2] - roi[0])
+                if frame.dtype != np.uint16 or frame.shape != expected_shape:
+                    raise RuntimeError(
+                        f"PCO FIFO frame has shape {frame.shape} and dtype {frame.dtype}; "
+                        f"expected {expected_shape} and uint16 for ROI {roi}."
+                    )
                 if not isinstance(raw_meta, dict) or "recorder image number" not in raw_meta:
                     raise RuntimeError("PCO FIFO image lacks a recorder frame number.")
                 frame_id = int(raw_meta["recorder image number"])
@@ -308,15 +320,16 @@ class PcoEdgeCamera(BaseCamera):
                     )
                 previous_id = frame_id
                 cam_time, time_text, timestamp_source = _frame_time_fields(raw_meta)
-                images.append(np.ascontiguousarray(frame, dtype=np.uint16))
+                images.append(np.ascontiguousarray(frame))
                 metas.append({
                     "frame_id": frame_id,
                     "camera_timestamp": cam_time,
                     "camera_time_str": time_text,
                     "timestamp_source": timestamp_source,
+                    "host_frame_read_monotonic_ns": host_frame_read_ns,
                     "raw_meta": str(raw_meta),
                     "exposure_s": self._exposure_time_s,
-                    "roi": self.get_roi(),
+                    "roi": roi,
                 })
                 if len(images) == batch_size:
                     yield np.stack(images, axis=0), metas
