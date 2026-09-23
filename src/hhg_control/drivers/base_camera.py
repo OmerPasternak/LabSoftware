@@ -4,7 +4,7 @@ All camera drivers (real hardware or mocks) must conform strictly to this contra
 """
 
 from abc import ABC, abstractmethod
-from enum import IntEnum
+from enum import Enum, IntEnum
 from collections.abc import Iterator
 from typing import Tuple, List, Dict, Any, Callable
 import numpy as np
@@ -40,6 +40,17 @@ class ReadoutMode(IntEnum):
     GLOBAL_RESET    = 4
 
 
+class TriggerMode(str, Enum):
+    """Supported camera acquisition triggers from the PCO SDK.
+
+    External Exposure Start takes one fixed-duration exposure per accepted
+    input pulse; the exposure duration remains in seconds on the camera.
+    """
+
+    AUTO_SEQUENCE = "auto sequence"
+    EXTERNAL_EXPOSURE_START = "external exposure start & software trigger"
+
+
 class BaseCamera(ABC):
     """Universal Camera Interface."""
 
@@ -50,6 +61,7 @@ class BaseCamera(ABC):
         self._is_connected: bool = False
         self._exposure_time_s: float = 0.010  # default 10 ms
         self._readout_mode: ReadoutMode = ReadoutMode.ROLLING_SHUTTER
+        self._trigger_mode: TriggerMode = TriggerMode.AUTO_SEQUENCE
 
     @property
     def is_connected(self) -> bool:
@@ -87,6 +99,16 @@ class BaseCamera(ABC):
     @abstractmethod
     def get_exposure_time(self) -> float:
         """Get exposure time in seconds."""
+        pass
+
+    @abstractmethod
+    def set_trigger_mode(self, mode: TriggerMode) -> None:
+        """Select free-running or one fixed exposure per external trigger."""
+        pass
+
+    @abstractmethod
+    def get_trigger_mode(self) -> TriggerMode:
+        """Read the active hardware trigger mode, not only a cached request."""
         pass
 
     @abstractmethod

@@ -8,7 +8,7 @@ from collections.abc import Callable, Iterator
 from datetime import datetime
 from typing import Tuple, List, Dict, Any
 import numpy as np
-from .base_camera import BaseCamera, CameraSafetyError, ReadoutMode
+from .base_camera import BaseCamera, CameraSafetyError, ReadoutMode, TriggerMode
 
 try:
     import pco as _pco
@@ -58,6 +58,7 @@ class PcoEdgeCamera(BaseCamera):
                 "bit_depth": 16
             }
             self.get_readout_mode()
+            self.get_trigger_mode()
             self.set_exposure_time(self._exposure_time_s)
             self._is_connected = True
         except Exception as exc:
@@ -95,6 +96,41 @@ class PcoEdgeCamera(BaseCamera):
         if self._cam is not None and hasattr(self._cam, "exposure_time"):
             return float(self._cam.exposure_time)
         return self._exposure_time_s
+
+    def get_trigger_mode(self) -> TriggerMode:
+        """Read PCO trigger mode from the SDK; reject modes outside this GUI's contract."""
+        if self._cam is None:
+            raise RuntimeError("Camera is not connected; trigger mode cannot be verified.")
+        raw_mode = self._cam.sdk.get_trigger_mode()["trigger mode"]
+        try:
+            mode = TriggerMode(raw_mode)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Unsupported PCO trigger mode {raw_mode!r}; select Auto Sequence or "
+                "External Exposure Start in camera settings before using this GUI."
+            ) from exc
+        self._trigger_mode = mode
+        return mode
+
+    def set_trigger_mode(self, mode: TriggerMode) -> None:
+        """Select Auto Sequence or fixed-duration external exposure starts.
+
+        The PCO SDK's External Exposure Start mode accepts external frame
+        pulses; exposure duration remains the separately configured seconds.
+        Recording must be idle, and hardware readback must match the request.
+        """
+        if not isinstance(mode, TriggerMode):
+            raise ValueError("mode must be a TriggerMode value.")
+        if self._cam is None or not self._is_connected:
+            raise RuntimeError("Camera is not connected; cannot change trigger mode.")
+        if getattr(self._cam, "is_recording", False) or getattr(self, "_live_active", False):
+            raise RuntimeError("Stop camera recording before changing trigger mode.")
+        if self.get_trigger_mode() != mode:
+            self._cam.sdk.set_trigger_mode(mode.value)
+            # pco.Camera.configuration performs this arm after changing trigger.
+            self._cam.sdk.arm_camera()
+        if self.get_trigger_mode() != mode:
+            raise RuntimeError(f"PCO trigger mode readback did not match {mode.value!r}.")
 
     def get_sensor_info(self) -> Dict[str, Any]:
         return self._info
@@ -190,6 +226,7 @@ class PcoEdgeCamera(BaseCamera):
                 self._cam.stop()
 
             previous_roi = self.get_roi()
+            previous_trigger = self.get_trigger_mode()
 
             # ---- Step 2: write the new shutter mode and request firmware reboot
             setup_name = {
@@ -223,6 +260,7 @@ class PcoEdgeCamera(BaseCamera):
         try:
             self.connect()
             self.set_roi(previous_roi)
+            self.set_trigger_mode(previous_trigger)
             actual_setup = self._cam.sdk.get_camera_setup()["setup"][0]
             if int(actual_setup) != mode.value:
                 raise RuntimeError(

@@ -8,6 +8,7 @@ from PyQt6.QtCore import Qt
 pytest.importorskip("pytestqt")
 
 from hhg_control.drivers.mock_camera import MockPcoCamera
+from hhg_control.drivers.base_camera import TriggerMode
 from hhg_control.sequencer.scan_manager import CameraScanManager
 from hhg_control.ui.camera.camera_panel import CameraMainWindow
 import hhg_control.ui.camera.camera_panel as camera_panel
@@ -39,6 +40,63 @@ def test_measurement_log_reports_complete_scan_duration(qtbot, tmp_path):
     assert "[SCAN COMPLETE][SIMULATED]" in log
     assert "All 2 steps saved to disk. Measurement duration:" in log
     assert len(list(tmp_path.glob("*.h5"))) == 2
+    window.close()
+
+
+def test_external_trigger_checkbox_applies_and_reads_back_mock_mode(qtbot, tmp_path):
+    """The checkbox changes an idle camera in a worker and saves the mode."""
+    camera = MockPcoCamera(fast_simulation=True)
+    camera.connect()
+    camera.set_roi((800, 1052, 1056, 1108))
+    window = CameraMainWindow()
+    qtbot.addWidget(window)
+    window.scan_manager.set_storage_dir(tmp_path)
+    window.txt_storage_dir.setText(str(tmp_path))
+    window._on_camera_connected(camera, True, 0.0)
+    window.spn_roi_x0.setValue(800)
+    window.spn_roi_x1.setValue(1056)
+    window.spn_roi_y0.setValue(1052)
+    window.spn_roi_y1.setValue(1108)
+    window.spn_frames.setValue(1)
+    window.spn_num_steps.setValue(2)
+
+    assert window.chk_external_trigger.isEnabled()
+    window.chk_external_trigger.setChecked(True)
+    qtbot.waitUntil(
+        lambda: window.active_trigger_task is None
+        and camera.get_trigger_mode() == TriggerMode.EXTERNAL_EXPOSURE_START,
+        timeout=3000,
+    )
+    window._toggle_measurement_scan()
+    qtbot.waitUntil(lambda: window.active_scan_task is None and len(list(tmp_path.glob("*.h5"))) == 2,
+                    timeout=10000)
+    import h5py
+    with h5py.File(sorted(tmp_path.glob("*.h5"))[0], "r") as h5f:
+        assert h5f.attrs["trigger_mode"] == TriggerMode.EXTERNAL_EXPOSURE_START.value
+    window.close()
+
+
+def test_external_trigger_change_pauses_and_resumes_mock_live_view(qtbot, tmp_path):
+    """A live camera is never reconfigured while its reader owns the buffer."""
+    camera = MockPcoCamera(fast_simulation=True)
+    camera.connect()
+    camera.set_roi((800, 1052, 1056, 1108))
+    window = CameraMainWindow()
+    qtbot.addWidget(window)
+    window._on_camera_connected(camera, True, 0.0)
+    window.scan_manager.set_storage_dir(tmp_path)
+    window._start_live()
+    qtbot.waitUntil(lambda: window._frame_count >= 1, timeout=3000)
+
+    window.chk_external_trigger.setChecked(True)
+    qtbot.waitUntil(
+        lambda: window.active_trigger_task is None
+        and window.scan_manager.state == "LIVE"
+        and camera.get_trigger_mode() == TriggerMode.EXTERNAL_EXPOSURE_START,
+        timeout=5000,
+    )
+    window._on_stop_clicked()
+    qtbot.waitUntil(lambda: window.active_live_task is None, timeout=3000)
     window.close()
 
 
@@ -94,7 +152,11 @@ def test_live_view_returns_after_scan_preflight_rejection(qtbot, tmp_path, monke
     window._start_live()
     qtbot.waitUntil(lambda: window._frame_count >= 1, timeout=3000)
     window._toggle_measurement_scan()
-    qtbot.waitUntil(lambda: bool(warnings) and window._is_live_active, timeout=5000)
+    qtbot.waitUntil(
+        lambda: bool(warnings) and window._is_live_active
+        and window.scan_manager.state == "LIVE",
+        timeout=5000,
+    )
     assert window.active_scan_task is None
     assert "Click Apply ROI" in warnings[0]
     assert window.scan_manager.state == "LIVE"
@@ -146,6 +208,28 @@ def test_measurement_rejects_unapplied_roi(qtbot, tmp_path, monkeypatch):
     assert window.active_scan_task is None
     assert "Click Apply ROI" in warnings[0]
     assert "[SCAN BLOCKED]" in window.txt_activity_log.toPlainText()
+    assert not list(tmp_path.glob("*.h5"))
+    camera.close()
+
+
+def test_measurement_rejects_trigger_checkbox_hardware_mismatch(qtbot, tmp_path, monkeypatch):
+    """Never start a scan when the selected trigger differs from camera readback."""
+    camera = MockPcoCamera(fast_simulation=True)
+    camera.connect()
+    window = CameraMainWindow()
+    qtbot.addWidget(window)
+    window.camera = camera
+    window.scan_manager.camera = camera
+    window.txt_storage_dir.setText(str(tmp_path))
+    warnings = []
+    monkeypatch.setattr(camera_panel.QMessageBox, "warning", lambda *args: warnings.append(args[-1]))
+
+    # Simulate an out-of-band trigger mode change after GUI selection.
+    camera.set_trigger_mode(TriggerMode.EXTERNAL_EXPOSURE_START)
+    window._toggle_measurement_scan()
+
+    assert window.active_scan_task is None
+    assert "Trigger checkbox requests" in warnings[0]
     assert not list(tmp_path.glob("*.h5"))
     camera.close()
 

@@ -2,6 +2,7 @@ import pytest
 import h5py
 import numpy as np
 from hhg_control.drivers.mock_camera import MockPcoCamera
+from hhg_control.drivers.base_camera import TriggerMode
 from hhg_control.sequencer.scan_manager import CameraScanManager
 
 
@@ -9,6 +10,7 @@ def test_scan_step_hdf5_output(tmp_path):
     cam = MockPcoCamera(fast_simulation=True)
     cam.connect()
     cam.set_exposure_time(0.005)
+    cam.set_trigger_mode(TriggerMode.EXTERNAL_EXPOSURE_START)
 
     scan_mgr = CameraScanManager(camera=cam, storage_dir=tmp_path)
     h5_path, latest_frame = scan_mgr.acquire_and_save_step(
@@ -38,6 +40,7 @@ def test_scan_step_hdf5_output(tmp_path):
         assert h5f.attrs["scan_parameter_name"] == "delay_ps"
         assert pytest.approx(h5f.attrs["scan_parameter_value"], 1e-4) == 1.525
         assert pytest.approx(h5f.attrs["exposure_time_s"], 1e-4) == 0.005
+        assert h5f.attrs["trigger_mode"] == TriggerMode.EXTERNAL_EXPOSURE_START.value
 
         # Verify expanded descriptive metadata
         assert h5f.attrs["experiment_identifier"] == "hhg_test"
@@ -114,4 +117,3 @@ def test_execute_scan_resume_and_callbacks(tmp_path):
         assert filepath.exists()
 
     cam.close()
-

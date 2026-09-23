@@ -44,11 +44,22 @@ class FakePcoCamera:
 class FakeSdk:
     def __init__(self):
         self.setup = 1
+        self.trigger_mode = "auto sequence"
+        self.armed = False
         self.timeout = None
         self.rebooted = False
 
     def get_camera_setup(self):
         return {"type": 0, "setup": (self.setup, 0, 0, 0), "length": 4}
+
+    def get_trigger_mode(self):
+        return {"trigger mode": self.trigger_mode}
+
+    def set_trigger_mode(self, mode):
+        self.trigger_mode = mode
+
+    def arm_camera(self):
+        self.armed = True
 
     def set_timeouts(self, command_timeout=200, image_timeout=3000, transfer_timeout=200):
         self.timeout = command_timeout
@@ -63,6 +74,38 @@ class FakeSdk:
 def test_pco_sdk_symbol_is_always_defined():
     """Keep the optional SDK patchable when the vendor package is absent."""
     assert hasattr(pco_edge, "pco")
+
+
+def test_pco_external_trigger_uses_sdk_and_checks_readback(monkeypatch):
+    """External Exposure Start is confirmed by the PCO SDK before use."""
+    fake = FakePcoCamera("USB 3.0")
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface: fake))
+    monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
+    camera = pco_edge.PcoEdgeCamera()
+    camera.connect()
+    mode = pco_edge.TriggerMode.EXTERNAL_EXPOSURE_START
+    camera.set_trigger_mode(mode)
+    assert fake.sdk.trigger_mode == mode.value
+    assert fake.sdk.armed
+    assert camera.get_trigger_mode() == mode
+    fake.is_recording = True
+    with pytest.raises(RuntimeError, match="Stop camera recording"):
+        camera.set_trigger_mode(pco_edge.TriggerMode.AUTO_SEQUENCE)
+    fake.is_recording = False
+    camera.close()
+
+
+def test_pco_external_trigger_rejects_failed_sdk_readback(monkeypatch):
+    """Never treat an unconfirmed trigger command as a successful change."""
+    fake = FakePcoCamera("USB 3.0")
+    fake.sdk.set_trigger_mode = lambda mode: None
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface: fake))
+    monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
+    camera = pco_edge.PcoEdgeCamera()
+    camera.connect()
+    with pytest.raises(RuntimeError, match="readback did not match"):
+        camera.set_trigger_mode(pco_edge.TriggerMode.EXTERNAL_EXPOSURE_START)
+    camera.close()
 
 
 def test_pco_live_uses_persistent_ring_buffer(monkeypatch):
@@ -112,10 +155,12 @@ def test_pco_readout_mode_adapts_to_sdk_dictionary(monkeypatch):
     monkeypatch.setattr(pco_edge.time, "sleep", lambda _: None)
     camera = pco_edge.PcoEdgeCamera()
     camera.connect()
+    camera.set_trigger_mode(pco_edge.TriggerMode.EXTERNAL_EXPOSURE_START)
     camera.set_readout_mode(pco_edge.ReadoutMode.GLOBAL_SHUTTER)
     assert created[0].sdk.timeout == 2000
     assert created[0].sdk.rebooted
     assert camera.get_readout_mode() is pco_edge.ReadoutMode.GLOBAL_SHUTTER
+    assert camera.get_trigger_mode() is pco_edge.TriggerMode.EXTERNAL_EXPOSURE_START
     camera.close()
 
 

@@ -15,7 +15,7 @@ from typing import Any, Optional
 
 import numpy as np
 
-from ..drivers.base_camera import BaseCamera
+from ..drivers.base_camera import BaseCamera, TriggerMode
 
 
 HDF5_SCHEMA_VERSION = "2.0"
@@ -121,6 +121,16 @@ class CameraScanManager:
         """Get zero-based, upper-exclusive hardware ROI bounds in pixels."""
         with self._camera_lock:
             return self.camera.get_roi()
+
+    def set_trigger_mode(self, mode: TriggerMode) -> None:
+        """Change camera triggering only while live and scan acquisition are idle."""
+        with self._operation("CONFIGURING"), self._camera_lock:
+            self.camera.set_trigger_mode(mode)
+
+    def get_trigger_mode(self) -> TriggerMode:
+        """Read the active camera trigger mode under the camera access lock."""
+        with self._camera_lock:
+            return self.camera.get_trigger_mode()
 
     def start_live(self, buffer_size: int = 4) -> None:
         """Enter LIVE state and start the camera's persistent preview buffer."""
@@ -256,6 +266,7 @@ class CameraScanManager:
                 "sensor_pixel_height": int(sensor_info.get("height", roi[3] - roi[1])),
                 "roi_bounds": roi,
                 "storage_compression": self.compression or "none",
+                "trigger_mode": self.camera.get_trigger_mode().value,
         }
         mode = self.camera.get_readout_mode()
         attrs["readout_mode"] = mode.name

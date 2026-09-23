@@ -8,7 +8,7 @@ import numpy as np
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from hhg_control.sequencer.scan_manager import CameraScanManager
-from hhg_control.drivers.base_camera import BaseCamera, ReadoutMode
+from hhg_control.drivers.base_camera import BaseCamera, ReadoutMode, TriggerMode
 from hhg_control.drivers.mock_camera import MockPcoCamera
 
 
@@ -87,6 +87,28 @@ class CameraModeTask(QThread):
             self.error_occurred.emit(str(exc))
 
 
+class CameraTriggerTask(QThread):
+    """Change camera trigger mode after acquisition stops, then verify readback."""
+
+    trigger_applied = pyqtSignal(object)
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self, scan_manager: CameraScanManager, mode: TriggerMode) -> None:
+        super().__init__()
+        self.scan_manager = scan_manager
+        self.mode = mode
+
+    def run(self) -> None:
+        try:
+            self.scan_manager.set_trigger_mode(self.mode)
+            actual = self.scan_manager.get_trigger_mode()
+            if actual != self.mode:
+                raise RuntimeError(f"Camera reported trigger mode {actual.value!r} after setting {self.mode.value!r}.")
+            self.trigger_applied.emit(actual)
+        except Exception as exc:
+            self.error_occurred.emit(str(exc))
+
+
 class CameraRoiTask(QThread):
     """Apply sensor-pixel ROI after live acquisition has stopped."""
 
@@ -153,6 +175,9 @@ class LiveStreamTask(QThread):
             return
         min_interval = 1.0 / self.target_fps
         try:
+            externally_triggered = (
+                self.scan_manager.get_trigger_mode() == TriggerMode.EXTERNAL_EXPOSURE_START
+            )
             self.scan_manager.start_live(buffer_size=4)
             while self._running:
                 if not self._gui_ready.wait(timeout=0.1):
@@ -161,8 +186,14 @@ class LiveStreamTask(QThread):
                     break
                 self._gui_ready.clear()
                 started = time.perf_counter()
-                timeout_s = self.scan_manager.camera.get_exposure_time() + 1.0
-                frame, metadata = self.scan_manager.acquire_live_frame(timeout_s=timeout_s)
+                timeout_s = 0.25 if externally_triggered else self.scan_manager.camera.get_exposure_time() + 1.0
+                try:
+                    frame, metadata = self.scan_manager.acquire_live_frame(timeout_s=timeout_s)
+                except TimeoutError:
+                    if externally_triggered:
+                        self._gui_ready.set()
+                        continue  # Waiting for a trigger pulse is normal in live view.
+                    raise
                 if self._running:
                     self.frame_ready.emit(frame, metadata)
                 remaining = min_interval - (time.perf_counter() - started)

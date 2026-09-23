@@ -34,6 +34,21 @@ def test_mock_camera_acquisition():
     assert not cam.is_connected
 
 
+def test_mock_external_trigger_selection_is_recorded_without_hardware():
+    """The mock carries trigger settings through the same camera contract."""
+    from hhg_control.drivers.base_camera import TriggerMode
+
+    cam = MockPcoCamera(fast_simulation=True)
+    cam.connect()
+    cam.set_trigger_mode(TriggerMode.EXTERNAL_EXPOSURE_START)
+    assert cam.get_trigger_mode() == TriggerMode.EXTERNAL_EXPOSURE_START
+    _, metadata = cam.acquire_frames(1)
+    assert metadata[0]["trigger_mode"] == TriggerMode.EXTERNAL_EXPOSURE_START.value
+    with pytest.raises(ValueError, match="TriggerMode"):
+        cam.set_trigger_mode("external exposure control")
+    cam.close()
+
+
 def test_mock_camera_safety_limits():
     cam = MockPcoCamera(fast_simulation=True)
     with pytest.raises(CameraSafetyError):

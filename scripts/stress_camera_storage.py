@@ -23,7 +23,7 @@ import numpy as np
 # the interpreter used to launch the script.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from hhg_control.drivers.base_camera import BaseCamera
+from hhg_control.drivers.base_camera import BaseCamera, TriggerMode
 from hhg_control.sequencer.scan_manager import CameraScanManager
 
 
@@ -67,6 +67,16 @@ class ReplayCamera(BaseCamera):
     def get_exposure_time(self) -> float:
         """Return simulated exposure in seconds."""
         return self._exposure_time_s
+
+    def set_trigger_mode(self, mode: TriggerMode) -> None:
+        """Store a synthetic trigger selection without waiting for pulses."""
+        if not isinstance(mode, TriggerMode):
+            raise ValueError("mode must be a TriggerMode value.")
+        self._trigger_mode = mode
+
+    def get_trigger_mode(self) -> TriggerMode:
+        """Return the synthetic trigger selection."""
+        return self._trigger_mode
 
     def get_sensor_info(self) -> dict[str, Any]:
         """Return synthetic sensor identity and dimensions in pixels."""

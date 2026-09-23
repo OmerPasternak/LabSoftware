@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 from typing import Tuple, List, Dict, Any
 import numpy as np
-from .base_camera import BaseCamera, CameraSafetyError, ReadoutMode
+from .base_camera import BaseCamera, CameraSafetyError, ReadoutMode, TriggerMode
 
 
 class MockPcoCamera(BaseCamera):
@@ -100,6 +100,20 @@ class MockPcoCamera(BaseCamera):
 
     def get_exposure_time(self) -> float:
         return self._exposure_time_s
+
+    def set_trigger_mode(self, mode: TriggerMode) -> None:
+        """Select simulated auto or external triggering without controlling hardware.
+
+        The mock records the setting but does not wait for physical pulses.
+        Exposure remains in seconds.
+        """
+        if not isinstance(mode, TriggerMode):
+            raise ValueError("mode must be a TriggerMode value.")
+        self._trigger_mode = mode
+
+    def get_trigger_mode(self) -> TriggerMode:
+        """Return the simulated acquisition trigger selection."""
+        return self._trigger_mode
 
     # ------------------------------------------------------------------
     # Sensor information & ROI
@@ -212,6 +226,7 @@ class MockPcoCamera(BaseCamera):
                 "exposure_s":        self._exposure_time_s,
                 "roi":               (x0, y0, x1, y1),
                 "readout_mode":      self._readout_mode.name,
+                "trigger_mode":      self._trigger_mode.value,
                 "data_type":         "Synthetic 2D Gaussian + Poisson shot noise + dark pedestal",
                 "simulated":         True,
             })

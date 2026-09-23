@@ -102,6 +102,8 @@ def test_camera_controls_name_counts_and_show_exposure_range():
         assert "Steps:" in labels
         assert "N:" not in labels
         assert window.lbl_exposure.geometry().right() < window.spn_exposure.geometry().left()
+        assert window.chk_external_trigger.geometry().left() > window.spn_exposure.geometry().right()
+        assert not window.chk_external_trigger.isEnabled()
 
         window._set_exposure_mode_limit(ReadoutMode.GLOBAL_SHUTTER)
         assert window.lbl_exposure.text() == "Exposure (ms, 0.5–100):"
