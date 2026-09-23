@@ -1,7 +1,8 @@
 """
 PyQt6 Graphical User Interface for pco.edge 5.5 sCMOS Camera Control and Scan Sequencer.
 Implements top-left Go/Stop controls, horizontal widescreen layout with side control panel,
-manual color scale controls, camera-derived timestamps, and hardware-constrained ROI.
+fixed external color scale control box (docked beside the image colorbar), camera-derived
+hardware timestamps, and hardware-constrained symmetrical ROI.
 """
 
 import sys
