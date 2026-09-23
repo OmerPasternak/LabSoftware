@@ -68,8 +68,12 @@ scan step; changing to a different HDF5 hierarchy would require a reader
 migration and a new schema version.
 
 New scans use uncompressed HDF5 and a bounded writer queue so saving can overlap
-continuous camera acquisition. The writer stops with a `.partial` file if the
-queue fills or frame integrity fails. Gzip remains available for slower scans.
+continuous camera acquisition. A simulated camera waits if storage is slower;
+a physical camera stops with a `.partial` file if the queue fills or frame
+integrity fails. Gzip remains available for slower scans. Before a GUI scan,
+click **Apply ROI** if the ROI controls have changed. The GUI blocks a scan if
+the controls differ from the camera's active ROI or if estimated storage for
+the remaining steps exceeds free space.
 The Global Shutter setting is the camera's true global exposure mode, with a
 100 ms maximum exposure; the GUI reads the current sensor mode on connection.
 

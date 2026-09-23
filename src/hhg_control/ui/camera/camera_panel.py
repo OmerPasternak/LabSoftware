@@ -7,6 +7,7 @@ source-labelled frame timestamps, and hardware-constrained symmetrical ROI.
 
 import sys
 import os
+import shutil
 import subprocess
 from time import perf_counter
 from collections.abc import Callable
@@ -1625,9 +1626,33 @@ class CameraMainWindow(QMainWindow):
             self._on_stop_clicked()
             return
 
+        if self._roi_change_pending:
+            self._append_log("[SCAN] Wait for the hardware ROI change to finish before measuring.")
+            return
+
         # Stop live stream cleanly before starting multi-step scan
         if self._is_live_active:
             self._stop_live(after_stop=self._toggle_measurement_scan)
+            return
+
+        selected_roi = (
+            self.spn_roi_x0.value(), self.spn_roi_y0.value(),
+            self.spn_roi_x1.value(), self.spn_roi_y1.value(),
+        )
+        try:
+            active_roi = tuple(self.scan_manager.get_roi())
+        except Exception as exc:
+            message = f"Cannot verify the camera's active ROI: {exc}"
+            self._append_log(f"[SCAN BLOCKED] {message}")
+            QMessageBox.warning(self, "ROI Readback Failed", message)
+            return
+        if selected_roi != active_roi:
+            message = (
+                f"ROI controls show {selected_roi}, but the camera is using {active_roi}. "
+                "Click Apply ROI before measuring, or set the controls to the active full sensor."
+            )
+            self._append_log(f"[SCAN BLOCKED] {message}")
+            QMessageBox.warning(self, "ROI Not Applied", message)
             return
 
         start_step = self._paused_step if self._paused_step is not None else 0
@@ -1639,6 +1664,28 @@ class CameraMainWindow(QMainWindow):
 
         target_dir = Path(self.txt_storage_dir.text().strip()).expanduser().resolve()
         target_dir.mkdir(parents=True, exist_ok=True)
+        remaining_steps = self.spn_num_steps.value() - start_step
+        raw_bytes = (
+            (active_roi[2] - active_roi[0]) * (active_roi[3] - active_roi[1])
+            * 2 * self.spn_frames.value() * remaining_steps
+        )
+        required_bytes = int(raw_bytes * 1.1) + 100_000_000
+        try:
+            free_bytes = shutil.disk_usage(target_dir).free
+        except OSError as exc:
+            message = f"Cannot check free space in {target_dir}: {exc}"
+            self._append_log(f"[SCAN BLOCKED] {message}")
+            QMessageBox.warning(self, "Storage Check Failed", message)
+            return
+        if required_bytes > free_bytes:
+            message = (
+                f"This measurement needs about {required_bytes / 1024**3:.1f} GiB "
+                f"for {remaining_steps} remaining steps; only {free_bytes / 1024**3:.1f} GiB "
+                "is free. Reduce ROI, frames, or steps, or choose a drive with more space."
+            )
+            self._append_log(f"[SCAN BLOCKED] {message}")
+            QMessageBox.warning(self, "Insufficient Storage", message)
+            return
         self.scan_manager.set_storage_dir(target_dir)
 
         self._set_ui_scanning_state(is_scanning=True)

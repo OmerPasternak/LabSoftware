@@ -24,6 +24,7 @@ def test_measurement_log_reports_complete_scan_duration(qtbot, tmp_path):
     window.camera = camera
     window.scan_manager.camera = camera
     window.txt_storage_dir.setText(str(tmp_path))
+    window.spn_roi_y0.setValue(1052)
     window.spn_frames.setValue(1)
     window.spn_num_steps.setValue(2)
 
@@ -36,6 +37,53 @@ def test_measurement_log_reports_complete_scan_duration(qtbot, tmp_path):
     log = window.txt_activity_log.toPlainText()
     assert "All 2 steps saved to disk. Measurement duration:" in log
     assert len(list(tmp_path.glob("*.h5"))) == 2
+    camera.close()
+
+
+def test_measurement_rejects_unapplied_roi(qtbot, tmp_path, monkeypatch):
+    """A drawn ROI cannot silently produce full-sensor measurement files."""
+    camera = MockPcoCamera(fast_simulation=True)
+    camera.connect()
+    window = CameraMainWindow()
+    qtbot.addWidget(window)
+    window.camera = camera
+    window.scan_manager.camera = camera
+    window.txt_storage_dir.setText(str(tmp_path))
+    warnings = []
+    monkeypatch.setattr(camera_panel.QMessageBox, "warning", lambda *args: warnings.append(args[-1]))
+    window.spn_roi_x0.setValue(148)
+    window.spn_roi_x1.setValue(2292)
+    window.spn_roi_y0.setValue(544)
+
+    window._toggle_measurement_scan()
+
+    assert window.active_scan_task is None
+    assert "Click Apply ROI" in warnings[0]
+    assert "[SCAN BLOCKED]" in window.txt_activity_log.toPlainText()
+    assert not list(tmp_path.glob("*.h5"))
+    camera.close()
+
+
+def test_measurement_rejects_run_larger_than_free_space(qtbot, tmp_path, monkeypatch):
+    """Check the full remaining scan size before opening its first HDF5 file."""
+    camera = MockPcoCamera(fast_simulation=True)
+    camera.connect()
+    window = CameraMainWindow()
+    qtbot.addWidget(window)
+    window.camera = camera
+    window.scan_manager.camera = camera
+    window.txt_storage_dir.setText(str(tmp_path))
+    window.spn_frames.setValue(1000)
+    window.spn_num_steps.setValue(10)
+    warnings = []
+    monkeypatch.setattr(camera_panel.QMessageBox, "warning", lambda *args: warnings.append(args[-1]))
+    monkeypatch.setattr(camera_panel.shutil, "disk_usage", lambda path: SimpleNamespace(free=1_000_000_000))
+
+    window._toggle_measurement_scan()
+
+    assert window.active_scan_task is None
+    assert "only 0.9 GiB is free" in warnings[0]
+    assert not list(tmp_path.glob("*.h5"))
     camera.close()
 
 
