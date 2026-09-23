@@ -98,7 +98,7 @@ def test_bright_scale_endpoints_are_directly_editable_and_axis_labels_fit(qtbot)
     assert window.canvas.coordinate_axis is window.axis
     assert not window.axis.get_xticklabels()
     assert not window.axis.get_yticklabels()
-    assert window.axis.bbox.x0 > 60  # enough room for native four-digit Y labels
+    assert window.axis.bbox.x0 >= 0.1 * window.canvas.width()
     assert not window.canvas.grab().isNull()
     assert window.spn_clim_high.isVisible()
     assert window.spn_clim_low.isVisible()

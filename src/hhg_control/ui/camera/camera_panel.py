@@ -174,6 +174,7 @@ class CameraMainWindow(QMainWindow):
         top_bar.setSpacing(8)
 
         self.cmb_camera_source = QComboBox()
+        self.cmb_camera_source.setFixedWidth(165)
         self.cmb_camera_source.addItem("Simulated", userData="simulated")
         self.cmb_camera_source.addItem("Physical pco.edge", userData="physical")
         self.cmb_camera_source.setToolTip(
@@ -205,36 +206,40 @@ class CameraMainWindow(QMainWindow):
         top_bar.addWidget(sep)
 
         self.lbl_system_status = QLabel("Status: Idle / Ready")
+        self.lbl_system_status.setMinimumWidth(0)
+        self.lbl_system_status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.lbl_system_status.setWordWrap(True)
         self.lbl_system_status.setStyleSheet(
             "font-weight: bold; font-size: 11px; color: #198754; padding-left: 2px;"
         )
         top_bar.addWidget(self.lbl_system_status)
-        top_bar.addStretch()
 
         left_pane.addLayout(top_bar)
 
-        # Reserve enough space for four-digit Y ticks and a flush color bar.
-        self.figure = Figure(dpi=120)
-        self.figure.subplots_adjust(left=0.14, right=1.0, top=0.91, bottom=0.11)
+        # Keep the image and its color bar in one canvas. The bar occupies the
+        # right edge, immediately before the editable limit controls.
+        self.figure = Figure(figsize=(3.5, 3), dpi=120)
         image_row = QHBoxLayout()
         image_row.setContentsMargins(0, 0, 0, 0)
         image_row.setSpacing(0)
 
         self.canvas = CameraFigureCanvas(self.figure)
-        self.canvas.setFixedSize(570, 450)
-        self.axis = self.figure.add_subplot(111)
+        self.canvas.setMinimumSize(350, 300)
+        self.canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.axis = self.figure.add_axes((0.12, 0.11, 0.83, 0.80))
         self.canvas.coordinate_axis = self.axis
         self.axis.tick_params(axis="both", labelbottom=False, labelleft=False, colors="#263542")
         self.canvas.mpl_connect("button_press_event", self._on_canvas_button_press)
         self.canvas.mpl_connect("button_release_event", self._on_canvas_button_release)
         self.canvas.mpl_connect("motion_notify_event", self._on_canvas_motion)
         self.canvas.mpl_connect("draw_event", self._on_canvas_draw)
-        image_row.addWidget(self.canvas)
+        image_row.addWidget(self.canvas, stretch=1)
 
         # The numbers themselves are editable and align with the bar endpoints.
         self.grp_color_scale = QFrame()
         self.grp_color_scale.setObjectName("colorScaleControls")
-        self.grp_color_scale.setFixedSize(84, 450)
+        self.grp_color_scale.setFixedWidth(84)
+        self.grp_color_scale.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         self.grp_color_scale.setStyleSheet("""
             QFrame#colorScaleControls {
                 background-color: #ffffff;
@@ -304,22 +309,21 @@ class CameraMainWindow(QMainWindow):
         lay_scale.addStretch(1)
         lay_scale.addWidget(self.spn_clim_low)
         image_row.addWidget(self.grp_color_scale)
-        left_pane.addLayout(image_row)
+        left_pane.addLayout(image_row, stretch=1)
 
         # Intensity metrics strip below canvas
         self.lbl_intensity_metrics = QLabel(
             "Pixel Intensity Metrics | Minimum: -- ADU | Maximum: -- ADU | Mean: -- ADU"
         )
-        self.lbl_intensity_metrics.setFixedWidth(654)
+        self.lbl_intensity_metrics.setMinimumWidth(0)
+        self.lbl_intensity_metrics.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.lbl_intensity_metrics.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_intensity_metrics.setStyleSheet(
             "font-size: 11px; font-weight: bold; padding: 3px 6px; background: #f8f9fa; "
             "border: 1px solid #dee2e6; border-radius: 3px; color: #212529;"
         )
         left_pane.addWidget(self.lbl_intensity_metrics)
-        left_pane.addStretch(1)
-
-        root_layout.addLayout(left_pane, stretch=0)
+        root_layout.addLayout(left_pane, stretch=1)
 
         # =========================================================================
         # Right Pane: Vertical control panel (Compact, clean spacing)
@@ -746,8 +750,7 @@ class CameraMainWindow(QMainWindow):
         self.camera = MockPcoCamera()
         self.scan_manager.camera = self.camera
         self.figure.clear()
-        self.figure.subplots_adjust(left=0.14, right=1.0, top=0.91, bottom=0.11)
-        self.axis = self.figure.add_subplot(111)
+        self.axis = self.figure.add_axes((0.12, 0.11, 0.83, 0.80))
         self.canvas.coordinate_axis = self.axis
         self.axis.tick_params(axis="both", labelbottom=False, labelleft=False, colors="#263542")
         self._image_artist = None
@@ -1102,7 +1105,8 @@ class CameraMainWindow(QMainWindow):
                 extent=[x0, x1, y1, y0]
             )
             self._image_artist.set_animated(True)
-            self._colorbar = self.figure.colorbar(self._image_artist, ax=self.axis, fraction=0.046, pad=0.0)
+            color_axis = self.figure.add_axes((0.95, 0.11, 0.05, 0.80))
+            self._colorbar = self.figure.colorbar(self._image_artist, cax=color_axis)
             # The scale endpoints are the adjacent editable spinboxes, not raster labels.
             self._colorbar.set_ticks([])
             self.axis.tick_params(axis="both", labelbottom=False, labelleft=False, colors="#263542")
