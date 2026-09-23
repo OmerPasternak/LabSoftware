@@ -50,7 +50,7 @@ def test_mock_camera_readout_modes():
     # Default mode is rolling shutter
     assert cam.get_readout_mode() == ReadoutMode.ROLLING_SHUTTER
 
-    # Switch to global reset (recommended for HHG)
+    # Global reset remains a distinct mode for compatibility with old scans.
     cam.set_readout_mode(ReadoutMode.GLOBAL_RESET)
     assert cam.get_readout_mode() == ReadoutMode.GLOBAL_RESET
 
@@ -62,3 +62,19 @@ def test_mock_camera_readout_modes():
     assert metas[0]["readout_mode"] == "GLOBAL_SHUTTER"
 
     cam.close()
+
+
+def test_mock_global_shutter_enforces_mode_specific_exposure_limit():
+    from hhg_control.drivers.base_camera import ReadoutMode
+
+    cam = MockPcoCamera(fast_simulation=True)
+    cam.set_exposure_time(0.2)
+    with pytest.raises(CameraSafetyError, match="Reduce exposure"):
+        cam.set_readout_mode(ReadoutMode.GLOBAL_SHUTTER)
+    assert cam.get_readout_mode() == ReadoutMode.ROLLING_SHUTTER
+
+    cam.set_exposure_time(0.1)
+    cam.set_readout_mode(ReadoutMode.GLOBAL_SHUTTER)
+    with pytest.raises(CameraSafetyError, match="at most 0.1 s"):
+        cam.set_exposure_time(0.101)
+    assert cam.get_exposure_time() == 0.1

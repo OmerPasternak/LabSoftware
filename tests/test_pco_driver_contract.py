@@ -137,3 +137,87 @@ def test_pco_mode_switch_rejects_mismatched_hardware_readback(monkeypatch):
         camera.set_readout_mode(pco_edge.ReadoutMode.GLOBAL_SHUTTER)
     assert len(created) == 2
     camera.close()
+
+
+def test_pco_global_shutter_rejects_long_exposure_before_sdk_command(monkeypatch):
+    fake = FakePcoCamera("USB 3.0")
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface: fake))
+    monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
+    camera = pco_edge.PcoEdgeCamera()
+    camera.connect()
+    camera.set_exposure_time(0.2)
+    with pytest.raises(pco_edge.CameraSafetyError, match="Reduce exposure"):
+        camera.set_readout_mode(pco_edge.ReadoutMode.GLOBAL_SHUTTER)
+    assert fake.sdk.setup == 1
+    assert not fake.sdk.rebooted
+    camera.close()
+
+
+def test_pco_connect_requires_shutter_readback_and_closes_failed_handle(monkeypatch):
+    fake = FakePcoCamera("USB 3.0")
+    fake.closed = False
+    fake.close = lambda: setattr(fake, "closed", True)
+
+    def fail_readback():
+        raise RuntimeError("readback failed")
+
+    fake.sdk.get_camera_setup = fail_readback
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface: fake))
+    monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
+    camera = pco_edge.PcoEdgeCamera()
+    with pytest.raises(ConnectionError, match="Could not verify PCO shutter mode"):
+        camera.connect()
+    assert fake.closed
+    assert not camera.is_connected
+
+
+def test_pco_saved_scan_uses_one_fifo_and_preserves_recorder_numbers(monkeypatch):
+    """Read a complete sequence without restarting recording at each batch."""
+    fake = FakePcoCamera("USB 3.0")
+    numbers = iter(range(10, 15))
+    fake.rec = SimpleNamespace(get_status=lambda: {"bFIFOOverflow": False, "dwLastError": 0})
+    fake.image = lambda image_index=0: (
+        np.ones((6, 8), dtype=np.uint16), {"recorder image number": next(numbers)}
+    )
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface: fake))
+    monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
+    camera = pco_edge.PcoEdgeCamera()
+    camera.connect()
+    batches = list(camera.iter_frames(5, batch_size=2))
+    assert [len(images) for images, _ in batches] == [2, 2, 1]
+    assert [meta["frame_id"] for _, metas in batches for meta in metas] == list(range(10, 15))
+    assert fake.record_calls == [(8, "fifo")]
+    assert not fake.is_recording
+    camera.close()
+
+
+def test_pco_fifo_fails_on_a_missing_recorder_frame(monkeypatch):
+    """A numbering gap must leave the scan incomplete rather than shift data."""
+    fake = FakePcoCamera("USB 3.0")
+    numbers = iter((10, 12))
+    fake.rec = SimpleNamespace(get_status=lambda: {"bFIFOOverflow": False, "dwLastError": 0})
+    fake.image = lambda image_index=0: (
+        np.ones((6, 8), dtype=np.uint16), {"recorder image number": next(numbers)}
+    )
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface: fake))
+    monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
+    camera = pco_edge.PcoEdgeCamera()
+    camera.connect()
+    with pytest.raises(RuntimeError, match="frame gap"):
+        list(camera.iter_frames(2, batch_size=1))
+    assert not fake.is_recording
+    camera.close()
+
+
+def test_pco_fifo_fails_on_sdk_overflow(monkeypatch):
+    """The SDK overflow flag is an acquisition failure even before copying."""
+    fake = FakePcoCamera("USB 3.0")
+    fake.rec = SimpleNamespace(get_status=lambda: {"bFIFOOverflow": True, "dwLastError": 0})
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface: fake))
+    monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
+    camera = pco_edge.PcoEdgeCamera()
+    camera.connect()
+    with pytest.raises(RuntimeError, match="FIFO overflow"):
+        list(camera.iter_frames(1))
+    assert not fake.is_recording
+    camera.close()

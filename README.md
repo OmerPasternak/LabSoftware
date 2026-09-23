@@ -58,9 +58,15 @@ completed measurements.
 
 The current camera-file layout and MATLAB reading notes are documented in
 [docs/hdf5_camera_schema.md](docs/hdf5_camera_schema.md). The implementation uses
-bounded frame batches, small gzip-compressed chunks, and a separate file per
+bounded frame batches, per-frame HDF5 chunks, and a separate file per
 scan step; changing to a different HDF5 hierarchy would require a reader
 migration and a new schema version.
+
+New scans use uncompressed HDF5 and a bounded writer queue so saving can overlap
+continuous camera acquisition. The writer stops with a `.partial` file if the
+queue fills or frame integrity fails. Gzip remains available for slower scans.
+The Global Shutter setting is the camera's true global exposure mode, with a
+100 ms maximum exposure; the GUI reads the current sensor mode on connection.
 
 ## Offline storage stress test
 
@@ -84,9 +90,9 @@ CPU time, bytes written, file count, and effective raw MB/s for six cases:
 - `discard`: replay the same frame batches without writing; measures loop and
   synthetic-source overhead.
 - `application`: call `CameraScanManager.acquire_and_save_step`, including its
-  current gzip HDF5 writer, metadata, close, and rename.
-- `hdf5_gzip`: write the same chunks with the application's gzip level and
-  shuffle settings, without scan metadata or final rename.
+  current uncompressed HDF5 writer, metadata, close, and rename.
+- `hdf5_gzip`: write the same chunks with the earlier application's gzip level
+  and shuffle settings, without scan metadata or final rename.
 - `hdf5_plain`: write the same batches to uncompressed HDF5; isolates much of
   the compression cost compared with `hdf5_gzip`.
 - `raw_single` and `raw_per_frame`: compare one binary file with a file per frame
@@ -98,7 +104,7 @@ overhead. If `raw_per_frame` is slower than `raw_single`, per-file overhead is
 real on that PC, but it does not explain the current application path because
 the application writes one file per scan step. Compare `hdf5_gzip` with
 `hdf5_plain` to estimate compression cost; compare `application` with
-`hdf5_gzip` to investigate metadata and file-finalization work.
+`hdf5_plain` to investigate queue, metadata, and file-finalization work.
 High process CPU time relative to wall time suggests CPU work; low CPU time
 suggests waiting on storage or the OS. Windows write caching can make short
 runs look faster than sustained disk writes, so use enough frames to exceed RAM

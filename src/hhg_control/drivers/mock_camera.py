@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 from typing import Tuple, List, Dict, Any
 import numpy as np
-from .base_camera import BaseCamera, ReadoutMode
+from .base_camera import BaseCamera, CameraSafetyError, ReadoutMode
 
 
 class MockPcoCamera(BaseCamera):
@@ -89,6 +89,8 @@ class MockPcoCamera(BaseCamera):
 
     def set_exposure_time(self, exposure_s: float) -> None:
         self.validate_exposure_time(exposure_s)
+        if self._readout_mode == ReadoutMode.GLOBAL_SHUTTER and exposure_s > 0.1:
+            raise CameraSafetyError("Global Shutter exposure must be at most 0.1 s (100 ms).")
         self._exposure_time_s = float(exposure_s)
 
     def get_exposure_time(self) -> float:
@@ -131,6 +133,8 @@ class MockPcoCamera(BaseCamera):
         """Switch the simulated shutter mode without a hardware reboot."""
         if not isinstance(mode, ReadoutMode):
             raise ValueError("mode must be a ReadoutMode value.")
+        if mode == ReadoutMode.GLOBAL_SHUTTER and self._exposure_time_s > 0.1:
+            raise CameraSafetyError("Reduce exposure to at most 0.1 s before Global Shutter.")
         self._readout_mode = mode
 
     # ------------------------------------------------------------------
@@ -195,7 +199,7 @@ class MockPcoCamera(BaseCamera):
 
             t_now = time.time()
             metadata.append({
-                "frame_id":          i,
+                "frame_id":          self._frame_count,
                 "timestamp":         t_now,
                 "camera_timestamp":  t_now,
                 "camera_time_str":   datetime.now().strftime("%H:%M:%S.%f")[:-3],

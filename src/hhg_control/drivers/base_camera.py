@@ -6,7 +6,7 @@ All camera drivers (real hardware or mocks) must conform strictly to this contra
 from abc import ABC, abstractmethod
 from enum import IntEnum
 from collections.abc import Iterator
-from typing import Tuple, List, Dict, Any
+from typing import Tuple, List, Dict, Any, Callable
 import numpy as np
 
 
@@ -98,12 +98,14 @@ class BaseCamera(ABC):
         self,
         num_frames: int,
         batch_size: int = 4,
+        stop_check: Callable[[], bool] | None = None,
     ) -> Iterator[Tuple[np.ndarray, List[Dict[str, Any]]]]:
         """Yield bounded frame batches for memory-safe storage.
 
         Args:
             num_frames: Total number of frames to acquire.
             batch_size: Maximum frames returned per batch. Units are frames.
+            stop_check: Return true to stop before starting another batch.
         """
         if num_frames < 1:
             raise ValueError("num_frames must be >= 1.")
@@ -111,6 +113,8 @@ class BaseCamera(ABC):
             raise ValueError("batch_size must be >= 1.")
         remaining = num_frames
         while remaining:
+            if stop_check is not None and stop_check():
+                return
             count = min(batch_size, remaining)
             yield self.acquire_frames(count)
             remaining -= count

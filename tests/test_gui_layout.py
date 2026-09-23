@@ -8,6 +8,7 @@ import numpy as np
 from PyQt6.QtWidgets import QApplication
 
 from hhg_control.drivers.base_camera import ReadoutMode
+from hhg_control.drivers.mock_camera import MockPcoCamera
 from hhg_control.ui.camera.camera_panel import CameraMainWindow
 
 
@@ -85,4 +86,38 @@ def test_gui_offers_actual_global_shutter_mode():
         assert modes == [ReadoutMode.ROLLING_SHUTTER, ReadoutMode.GLOBAL_SHUTTER]
         assert window.cmb_readout_mode.itemText(1) == "Global Shutter"
     finally:
+        window.close()
+
+
+def test_gui_connection_reflects_actual_mode_without_implicit_reboot(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    window = CameraMainWindow()
+    camera = MockPcoCamera(fast_simulation=True)
+    camera.set_readout_mode(ReadoutMode.GLOBAL_SHUTTER)
+    camera.connect()
+    started = []
+    monkeypatch.setattr(window, "_start_mode_change", lambda *args, **kwargs: started.append(args))
+    try:
+        window._on_camera_connected(camera, True, 0.0)
+        assert window.cmb_readout_mode.currentData() == ReadoutMode.GLOBAL_SHUTTER
+        assert window.spn_exposure.maximum() == 100.0
+        assert not started
+    finally:
+        camera.close()
+        window.close()
+
+
+def test_gui_applies_mode_explicitly_selected_before_connection(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    window = CameraMainWindow()
+    camera = MockPcoCamera(fast_simulation=True)
+    camera.connect()
+    started = []
+    monkeypatch.setattr(window, "_start_mode_change", lambda *args, **kwargs: started.append(args))
+    try:
+        window.cmb_readout_mode.setCurrentIndex(1)
+        window._on_camera_connected(camera, True, 0.0)
+        assert started == [(ReadoutMode.GLOBAL_SHUTTER,)]
+    finally:
+        camera.close()
         window.close()

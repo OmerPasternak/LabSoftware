@@ -165,6 +165,7 @@ class CameraMainWindow(QMainWindow):
         self._resume_live_after_roi = False
         self._roi_change_full_sensor = False
         self._connected_source: Optional[str] = None
+        self._mode_requested_before_connect = False
         self._source_switch_pending = False
         self._clim_low: int = 0          # current lower color limit (ADU)
         self._clim_high: int = 65535     # current upper color limit (ADU)
@@ -720,11 +721,22 @@ class CameraMainWindow(QMainWindow):
             self._append_log(f"[CONNECT] Connected to physical {model_name} on USB 3.0 in {connection_time:.2f} s.")
             self.lbl_system_status.setText(f"Status: Connected ({model_name} USB 3.0)")
         self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #198754; padding-left: 8px;")
-        desired_mode = self.cmb_readout_mode.itemData(self.cmb_readout_mode.currentIndex())
-        if desired_mode is not None and self.camera.get_readout_mode() != desired_mode:
+        actual_mode = self.camera.get_readout_mode()
+        desired_mode = self.cmb_readout_mode.currentData()
+        requested = self._mode_requested_before_connect
+        self._mode_requested_before_connect = False
+        if requested and desired_mode is not None and actual_mode != desired_mode:
             callback = self._after_connect
             self._after_connect = None
             self._start_mode_change(desired_mode, resume_live=False, after_mode=callback)
+        else:
+            index = self.cmb_readout_mode.findData(actual_mode)
+            self.cmb_readout_mode.blockSignals(True)
+            if index < 0:
+                self.cmb_readout_mode.setPlaceholderText(f"{actual_mode.name.replace('_', ' ').title()} (current)")
+            self.cmb_readout_mode.setCurrentIndex(index)
+            self.cmb_readout_mode.blockSignals(False)
+            self.spn_exposure.setMaximum(100.0 if actual_mode == ReadoutMode.GLOBAL_SHUTTER else 10000.0)
 
     def _on_camera_connection_error(self, error: str) -> None:
         source_name = self.cmb_camera_source.currentText()
@@ -869,6 +881,7 @@ class CameraMainWindow(QMainWindow):
             return
 
         if not self.camera.is_connected:
+            self._mode_requested_before_connect = True
             return
 
         if hasattr(self.camera, "get_readout_mode") and self.camera.get_readout_mode() == mode:
@@ -902,6 +915,7 @@ class CameraMainWindow(QMainWindow):
         self.active_mode_task.start()
 
     def _on_mode_applied(self, mode: ReadoutMode) -> None:
+        self.spn_exposure.setMaximum(100.0 if mode == ReadoutMode.GLOBAL_SHUTTER else 10000.0)
         self._append_log(f"[READOUT MODE] Camera successfully configured to {mode.name}.")
         self.lbl_system_status.setText(f"Status: Mode Active ({mode.name})")
         self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #198754; padding-left: 8px;")

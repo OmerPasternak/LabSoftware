@@ -14,9 +14,12 @@ readers should only treat completed `.h5` files as scan inputs.
 
 `/images` contains raw camera counts (ADU), without display color scaling. The
 dataset attributes `dimension_order` and `data_dimension_ordering` describe the
-Python axis order. Its chunks contain one frame and at most 512 × 512 pixels;
-gzip level 1 with shuffle keeps standard HDF5 compression while limiting CPU
-time during acquisition. Frames are acquired and written in bounded batches.
+Python axis order. Its chunks contain one frame and at most 512 × 512 pixels.
+New scans default to uncompressed HDF5 to avoid a CPU bottleneck; optional gzip
+level 1 with shuffle remains available for slower scans. Both use schema 2.0,
+and the `storage_compression` root attribute records the chosen setting. Frames
+are acquired in bounded batches and passed to a bounded writer queue. A full
+queue fails the step and retains a `.partial` file rather than dropping frames.
 
 Root attributes include `schema_version`, `complete`, `frames_written`,
 `experiment_name`, `run_id`, `scan_step_index`, `scan_parameter_name`,

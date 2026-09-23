@@ -1,6 +1,8 @@
 """Tests for bounded analysis, atomic storage, and serialized live acquisition."""
 
 import json
+import threading
+import time
 
 import h5py
 import numpy as np
@@ -11,6 +13,7 @@ from hhg_control.analysis.hdf5_io import iter_scan_step_frames
 from hhg_control.drivers.mock_camera import MockPcoCamera
 from hhg_control.sequencer.scan_manager import (
     AcquisitionAborted,
+    AcquisitionBackpressure,
     CameraScanManager,
     sanitize_filename_component,
 )
@@ -53,9 +56,8 @@ def test_atomic_hdf5_schema_metadata_and_no_overwrite(tmp_path):
         assert bool(h5f.attrs["complete"])
         assert len(h5f["frame_metadata/json"]) == 5
         assert np.prod(h5f["images"].chunks) * 2 <= 1024 * 1024
-        assert h5f["images"].shuffle
-        assert h5f["images"].compression == "gzip"
-        assert h5f["images"].compression_opts == 1
+        assert h5f["images"].compression is None
+        assert h5f.attrs["storage_compression"] == "none"
         assert h5f["images"].attrs["dimension_order"] == "[frame, y, x]"
         assert h5f.attrs["frames_written"] == 5
         first_frame_metadata = json.loads(h5f["frame_metadata/json"][0])
@@ -63,6 +65,9 @@ def test_atomic_hdf5_schema_metadata_and_no_overwrite(tmp_path):
 
     batches = list(iter_scan_step_frames(first, batch_size=2))
     assert [batch.shape[0] for batch in batches] == [2, 2, 1]
+    with h5py.File(first, "r") as h5f:
+        ids = [json.loads(item)["frame_id"] for item in h5f["frame_metadata/json"]]
+    assert ids == sorted(set(ids))
     camera.close()
 
 
@@ -91,4 +96,104 @@ def test_serialized_mock_live_lifecycle(tmp_path):
         manager.acquire_and_save_step("busy", 0, "x", 0.0, 1)
     manager.stop_live()
     assert manager.state == "IDLE"
+    camera.close()
+
+
+def test_bounded_writer_queue_fails_instead_of_silently_losing_frames(tmp_path):
+    """A slow disk must stop capture and leave a visible partial step."""
+    class SlowWriter(CameraScanManager):
+        def _write_batch(self, image_dset, metadata_dset, start, images, metadata):
+            time.sleep(0.2)
+            super()._write_batch(image_dset, metadata_dset, start, images, metadata)
+
+    camera = _small_camera()
+    manager = SlowWriter(camera, tmp_path)
+    with pytest.raises(AcquisitionBackpressure, match="queue filled"):
+        manager.acquire_and_save_step(
+            "backpressure", 0, "delay_mm", 0.0, 20,
+            batch_size=1, queue_batches=1,
+        )
+    partials = list(tmp_path.glob("*.partial"))
+    assert len(partials) == 1
+    with h5py.File(partials[0], "r") as h5f:
+        assert not h5f.attrs["complete"]
+        assert h5f.attrs["frames_written"] < 20
+    assert manager.state == "IDLE"
+    camera.close()
+
+
+def test_camera_can_capture_while_writer_is_busy(tmp_path):
+    """The camera producer advances before a blocked HDF5 write completes."""
+    writing = threading.Event()
+    release = threading.Event()
+
+    class GatedWriter(CameraScanManager):
+        def _write_batch(self, image_dset, metadata_dset, start, images, metadata):
+            if start == 0:
+                writing.set()
+                if not release.wait(timeout=3):
+                    raise TimeoutError("Test writer was not released.")
+            super()._write_batch(image_dset, metadata_dset, start, images, metadata)
+
+    class CountedCamera(MockPcoCamera):
+        def __init__(self):
+            super().__init__(fast_simulation=True)
+            self.calls = 0
+
+        def acquire_frames(self, num_frames):
+            self.calls += 1
+            return super().acquire_frames(num_frames)
+
+    camera = CountedCamera()
+    camera.connect()
+    camera.set_roi((800, 980, 1056, 1180))
+    manager = GatedWriter(camera, tmp_path)
+    errors = []
+
+    def run():
+        try:
+            manager.acquire_and_save_step(
+                "overlap", 0, "x", 0.0, 4, batch_size=1, queue_batches=4
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    try:
+        assert writing.wait(timeout=3)
+        assert camera.calls > 1
+    finally:
+        release.set()
+        thread.join(timeout=5)
+        camera.close()
+    assert not thread.is_alive()
+    assert errors == []
+
+
+def test_writer_error_retains_incomplete_step(tmp_path):
+    """Disk write errors must not produce a completed scan file."""
+    class BrokenWriter(CameraScanManager):
+        def _write_batch(self, image_dset, metadata_dset, start, images, metadata):
+            raise OSError("simulated disk failure")
+
+    camera = _small_camera()
+    manager = BrokenWriter(camera, tmp_path)
+    with pytest.raises(RuntimeError, match="writer failed"):
+        manager.acquire_and_save_step("disk_error", 0, "x", 0.0, 3)
+    assert not list(tmp_path.glob("*.h5"))
+    assert len(list(tmp_path.glob("*.partial"))) == 1
+    assert manager.state == "IDLE"
+    camera.close()
+
+
+def test_optional_gzip_remains_matlab_readable(tmp_path):
+    """Existing gzip files and new uncompressed files share one HDF5 schema."""
+    camera = _small_camera()
+    manager = CameraScanManager(camera, tmp_path, compression="gzip")
+    path, _ = manager.acquire_and_save_step("compressed", 0, "x", 0.0, 2)
+    with h5py.File(path, "r") as h5f:
+        assert h5f["images"].compression == "gzip"
+        assert h5f.attrs["storage_compression"] == "gzip"
+        assert h5f["images"].shape == (2, 200, 256)
     camera.close()
