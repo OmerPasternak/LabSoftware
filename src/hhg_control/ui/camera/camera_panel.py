@@ -1653,6 +1653,14 @@ class CameraMainWindow(QMainWindow):
     # =========================================================================
     # Automated Scan Execution & Pause / Resume Coordination
     # =========================================================================
+    def _scan_source_label(self) -> str:
+        """Label scan logs by the selected physical or simulated camera source."""
+        if isinstance(self.camera, MockPcoCamera):
+            return "SIMULATED"
+        if self._connected_source == "physical":
+            return "PHYSICAL"
+        return "CAMERA"
+
     def _toggle_measurement_scan(self) -> None:
         """Start scan, stop in-progress scan, or continue paused scan."""
         if not self.camera.is_connected:
@@ -1758,7 +1766,8 @@ class CameraMainWindow(QMainWindow):
             )
         else:
             self._append_log(
-                f"[SCAN START] Initiating scan: {num_steps} steps from {start_val:.4f} to "
+                f"[SCAN START][{self._scan_source_label()}] Initiating scan: "
+                f"{num_steps} steps from {start_val:.4f} to "
                 f"{self.spn_end_val.value():.4f} | Param: '{param_name}' | Frames/step: {num_frames}"
             )
 
@@ -1855,7 +1864,8 @@ class CameraMainWindow(QMainWindow):
     ) -> None:
         file_size_mb = h5_path.stat().st_size / (1024 * 1024)
         self._append_log(
-            f"[SAVED] Step {step_idx + 1}/{total_steps} -> {h5_path.name} ({file_size_mb:.2f} MB, {param_name}={param_val:.4f})"
+            f"[SAVED][{self._scan_source_label()}] Step {step_idx + 1}/{total_steps} -> "
+            f"{h5_path.name} ({file_size_mb:.2f} MB, {param_name}={param_val:.4f})"
         )
         self._update_display(latest_frame)
         self.lbl_scan_progress.setText(
@@ -1876,7 +1886,7 @@ class CameraMainWindow(QMainWindow):
         self.lbl_system_status.setText(f"Status: Scan Completed Successfully ({total_steps} steps saved)")
         self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #198754; padding-left: 8px;")
         self._append_log(
-            f"[SCAN COMPLETE] All {total_steps} steps saved to disk. "
+            f"[SCAN COMPLETE][{self._scan_source_label()}] All {total_steps} steps saved to disk. "
             f"Measurement duration: {elapsed_s:.2f} s."
         )
         self._scan_active_elapsed_s = 0.0

@@ -35,6 +35,8 @@ def test_measurement_log_reports_complete_scan_duration(qtbot, tmp_path):
         timeout=10000,
     )
     log = window.txt_activity_log.toPlainText()
+    assert "[SCAN START][SIMULATED]" in log
+    assert "[SCAN COMPLETE][SIMULATED]" in log
     assert "All 2 steps saved to disk. Measurement duration:" in log
     assert len(list(tmp_path.glob("*.h5"))) == 2
     window.close()
