@@ -3,6 +3,7 @@
 import pytest
 import numpy as np
 from types import SimpleNamespace
+from PyQt6.QtCore import Qt
 
 pytest.importorskip("pytestqt")
 
@@ -61,11 +62,9 @@ def test_gui_reuses_plot_artists_and_frame_metadata_roi(qtbot, monkeypatch):
     image_artist = window._image_artist
     colorbar = window._colorbar
 
-    assert window.grp_color_scale.objectName() == "imageColorScale"
-    assert window.grp_color_scale.parent() is window.canvas
-    overlay = window.grp_color_scale.geometry()
-    assert overlay.left() >= window.axis.bbox.x0
-    assert overlay.right() <= window.axis.bbox.x1
+    assert window.grp_color_scale.objectName() == "colorScaleControls"
+    assert window.grp_color_scale.parent() is not window.canvas
+    assert window.figure.dpi >= 120
     assert not hasattr(window, "scale_tag")
     assert window._plot_background is not None
     assert tuple(image_artist.get_extent()) == (800, 1056, 1180, 980)
@@ -79,6 +78,33 @@ def test_gui_reuses_plot_artists_and_frame_metadata_roi(qtbot, monkeypatch):
     window._set_clim(10, 200)
     window._update_display(frame, meta)
     assert image_artist.get_clim() == (10, 200)
+
+
+def test_bright_scale_endpoints_are_directly_editable_and_axis_labels_fit(qtbot):
+    """Scale numbers sit outside the image and four-digit Y ticks stay visible."""
+    window = CameraMainWindow()
+    qtbot.addWidget(window)
+    window.show()
+    window._update_display(
+        np.zeros((216, 256), dtype=np.uint16),
+        {"roi": (0, 0, 2560, 2160)},
+    )
+    qtbot.wait(20)
+
+    scale_left = window.grp_color_scale.mapToGlobal(window.grp_color_scale.rect().topLeft()).x()
+    canvas_right = window.canvas.mapToGlobal(window.canvas.rect().topRight()).x()
+    assert scale_left >= canvas_right
+    assert min(label.get_window_extent().x0 for label in window.axis.get_yticklabels()) >= 0
+    assert window.spn_clim_high.isVisible()
+    assert window.spn_clim_low.isVisible()
+    assert len(window._colorbar.get_ticks()) == 0
+
+    qtbot.mouseClick(window.spn_clim_high, Qt.MouseButton.LeftButton)
+    window.spn_clim_high.lineEdit().selectAll()
+    qtbot.keyClicks(window.spn_clim_high, "5000")
+    qtbot.keyPress(window.spn_clim_high, Qt.Key.Key_Return)
+    assert window.spn_clim_high.value() == 5000
+    assert window._image_artist.get_clim() == (0, 5000)
 
 
 def test_mock_gui_live_start_stop_keeps_camera_idle(qtbot, tmp_path):

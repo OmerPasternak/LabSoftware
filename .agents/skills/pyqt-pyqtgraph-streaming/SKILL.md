@@ -9,8 +9,8 @@ This skill provides design patterns for building high-speed, non-blocking instru
 
 ## Current camera GUI
 
-The camera GUI places compact color-scale controls over the image's top-right
-corner and uses a custom Matplotlib ROI outline. GO starts live acquisition,
+The camera GUI puts bright, directly editable color-scale endpoint numbers
+beside the image and uses a custom Matplotlib ROI outline. GO starts live acquisition,
 RUNNING is status-only, and STOP ends live acquisition. A camera source may be
 changed only while idle; the previous source is closed in a worker before the
 next GO connects the new selection. Its acquisition worker owns a persistent

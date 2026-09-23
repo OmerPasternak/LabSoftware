@@ -1,7 +1,7 @@
 """
 PyQt6 Graphical User Interface for pco.edge 5.5 sCMOS Camera Control and Scan Sequencer.
 Implements top-left Go/Stop controls, horizontal widescreen layout with side control panel,
-compact color-scale controls over the image's top-right corner,
+bright, directly editable color-scale limits beside the image,
 source-labelled frame timestamps, and hardware-constrained symmetrical ROI.
 """
 
@@ -18,7 +18,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGroupBox, QLabel, QLineEdit, QDoubleSpinBox, QSpinBox,
-    QPushButton, QFileDialog, QTextEdit, QMessageBox,
+    QAbstractSpinBox, QPushButton, QFileDialog, QTextEdit, QMessageBox,
     QGridLayout, QFrame, QSizePolicy, QComboBox
 )
 
@@ -159,102 +159,103 @@ class CameraMainWindow(QMainWindow):
 
         left_pane.addLayout(top_bar)
 
-        # Canvas — enlarged (550x450 px), tightly cropped margins
-        self.figure = Figure(dpi=100)
-        self.figure.subplots_adjust(left=0.07, right=0.90, top=0.97, bottom=0.07)
+        # Reserve enough space for four-digit Y ticks and render labels sharply.
+        self.figure = Figure(dpi=120)
+        self.figure.subplots_adjust(left=0.14, right=0.98, top=0.91, bottom=0.11)
+        image_row = QHBoxLayout()
+        image_row.setContentsMargins(0, 0, 0, 0)
+        image_row.setSpacing(0)
 
         self.canvas = FigureCanvasQTAgg(self.figure)
-        self.canvas.setFixedSize(550, 450)
+        self.canvas.setFixedSize(570, 450)
         self.axis = self.figure.add_subplot(111)
+        self.axis.tick_params(axis="both", labelsize=10, colors="#263542", pad=5)
         self.canvas.mpl_connect("button_press_event", self._on_canvas_button_press)
         self.canvas.mpl_connect("button_release_event", self._on_canvas_button_release)
         self.canvas.mpl_connect("motion_notify_event", self._on_canvas_motion)
         self.canvas.mpl_connect("draw_event", self._on_canvas_draw)
-        left_pane.addWidget(self.canvas)
+        image_row.addWidget(self.canvas)
 
-        # Compact canvas child: stays over the image rather than taking layout space.
-        self.grp_color_scale = QFrame(self.canvas)
-        self.grp_color_scale.setObjectName("imageColorScale")
-        self.grp_color_scale.setFixedWidth(138)
+        # The numbers themselves are editable and align with the bar endpoints.
+        self.grp_color_scale = QFrame()
+        self.grp_color_scale.setObjectName("colorScaleControls")
+        self.grp_color_scale.setFixedSize(84, 450)
         self.grp_color_scale.setStyleSheet("""
-            QFrame#imageColorScale {
-                background-color: rgba(27, 35, 44, 210);
-                border: 1px solid rgba(235, 241, 245, 100);
-                border-radius: 6px;
-            }
-            QLabel {
-                font-size: 10px;
-                color: #f4f7fa;
+            QFrame#colorScaleControls {
+                background-color: #ffffff;
+                border: none;
             }
             QSpinBox {
-                font-size: 10px;
-                padding: 1px 2px;
-                background: #f4f7fa;
-                border: 1px solid #aab5bf;
+                font-size: 11px;
+                font-weight: bold;
+                color: #213547;
+                padding: 2px 3px;
+                background: #f8fbff;
+                border: 1px solid #b8cad9;
                 border-radius: 3px;
             }
             QPushButton {
                 font-size: 10px;
+                color: #28445a;
                 padding: 2px;
-                background-color: #e3e8ed;
-                border: 1px solid #aab5bf;
+                background-color: #eef4f8;
+                border: 1px solid #c6d5df;
                 border-radius: 3px;
             }
             QPushButton:hover {
-                background-color: #ffffff;
+                background-color: #dcecf7;
             }
         """)
-        lay_scale = QGridLayout(self.grp_color_scale)
-        lay_scale.setContentsMargins(5, 4, 5, 4)
-        lay_scale.setHorizontalSpacing(3)
-        lay_scale.setVerticalSpacing(2)
-
-        lbl_scale = QLabel("Scale · ADU")
-        lbl_scale.setStyleSheet("font-size: 10px; font-weight: bold; color: #f4f7fa;")
-        lay_scale.addWidget(lbl_scale, 0, 0, 1, 2)
-        lay_scale.addWidget(QLabel("Max"), 1, 0)
+        lay_scale = QVBoxLayout(self.grp_color_scale)
+        lay_scale.setContentsMargins(2, 25, 2, 32)
+        lay_scale.setSpacing(5)
 
         self.spn_clim_high = QSpinBox()
         self.spn_clim_high.setRange(1, 65535)
         self.spn_clim_high.setValue(65535)
-        self.spn_clim_high.setFixedWidth(79)
-        self.spn_clim_high.setToolTip("Max ADU. Press Enter to apply.")
+        self.spn_clim_high.setFixedSize(80, 26)
+        self.spn_clim_high.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.spn_clim_high.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.spn_clim_high.setToolTip("Color scale maximum (ADU). Click this number to edit it.")
         self.spn_clim_high.setKeyboardTracking(False)
         self.spn_clim_high.valueChanged.connect(self._on_clim_changed)
         self.spn_clim_high.editingFinished.connect(self._on_clim_changed)
-        lay_scale.addWidget(self.spn_clim_high, 1, 1)
-        lay_scale.addWidget(QLabel("Min"), 2, 0)
+        lay_scale.addWidget(self.spn_clim_high)
+        lay_scale.addStretch(1)
 
         self.spn_clim_low = QSpinBox()
         self.spn_clim_low.setRange(0, 65534)
         self.spn_clim_low.setValue(0)
-        self.spn_clim_low.setFixedWidth(79)
-        self.spn_clim_low.setToolTip("Min ADU. Press Enter to apply.")
+        self.spn_clim_low.setFixedSize(80, 26)
+        self.spn_clim_low.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.spn_clim_low.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.spn_clim_low.setToolTip("Color scale minimum (ADU). Click this number to edit it.")
         self.spn_clim_low.setKeyboardTracking(False)
         self.spn_clim_low.valueChanged.connect(self._on_clim_changed)
         self.spn_clim_low.editingFinished.connect(self._on_clim_changed)
-        lay_scale.addWidget(self.spn_clim_low, 2, 1)
+
 
         btn_auto_clim = QPushButton("Auto")
-        btn_auto_clim.setFixedWidth(60)
+        btn_auto_clim.setFixedWidth(80)
         btn_auto_clim.setToolTip("Auto-scale color limits to current frame min/max")
         btn_auto_clim.clicked.connect(self._on_clim_auto_clicked)
-        lay_scale.addWidget(btn_auto_clim, 3, 0)
+        lay_scale.addWidget(btn_auto_clim)
 
         btn_full_clim = QPushButton("Full")
-        btn_full_clim.setFixedWidth(60)
+        btn_full_clim.setFixedWidth(80)
         btn_full_clim.setToolTip("Reset color limits to full 16-bit range (0–65535)")
         btn_full_clim.clicked.connect(lambda: self._set_clim(0, 65535))
-        lay_scale.addWidget(btn_full_clim, 3, 1)
-        self.grp_color_scale.adjustSize()
-        self._position_color_scale_overlay()
-        self.grp_color_scale.raise_()
+        lay_scale.addWidget(btn_full_clim)
+        lay_scale.addStretch(1)
+        lay_scale.addWidget(self.spn_clim_low)
+        image_row.addWidget(self.grp_color_scale)
+        left_pane.addLayout(image_row)
 
         # Intensity metrics strip below canvas
         self.lbl_intensity_metrics = QLabel(
             "Pixel Intensity Metrics | Minimum: -- ADU | Maximum: -- ADU | Mean: -- ADU"
         )
-        self.lbl_intensity_metrics.setFixedWidth(550)
+        self.lbl_intensity_metrics.setFixedWidth(654)
         self.lbl_intensity_metrics.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_intensity_metrics.setStyleSheet(
             "font-size: 11px; font-weight: bold; padding: 3px 6px; background: #f8f9fa; "
@@ -690,8 +691,9 @@ class CameraMainWindow(QMainWindow):
         self.camera = MockPcoCamera()
         self.scan_manager.camera = self.camera
         self.figure.clear()
-        self.figure.subplots_adjust(left=0.07, right=0.90, top=0.97, bottom=0.07)
+        self.figure.subplots_adjust(left=0.14, right=0.98, top=0.91, bottom=0.11)
         self.axis = self.figure.add_subplot(111)
+        self.axis.tick_params(axis="both", labelsize=10, colors="#263542", pad=5)
         self._image_artist = None
         self._colorbar = None
         self._timestamp_artist = None
@@ -893,6 +895,7 @@ class CameraMainWindow(QMainWindow):
         self.spn_clim_high.blockSignals(False)
         if self._image_artist is not None:
             self._image_artist.set_clim(self._clim_low, self._clim_high)
+            self._colorbar.set_ticks([])
             self._plot_background = None
             self.canvas.draw_idle()
 
@@ -911,6 +914,7 @@ class CameraMainWindow(QMainWindow):
         self._clim_high = high
         if self._image_artist is not None:
             self._image_artist.set_clim(self._clim_low, self._clim_high)
+            self._colorbar.set_ticks([])
             self._plot_background = None
             self.canvas.draw_idle()
 
@@ -976,18 +980,6 @@ class CameraMainWindow(QMainWindow):
         if event.canvas is self.canvas:
             self._plot_background = self.canvas.copy_from_bbox(self.axis.bbox)
             self._blit_frame()
-            self._position_color_scale_overlay()
-
-    def _position_color_scale_overlay(self) -> None:
-        """Keep the compact color controls inside the image's top-right corner."""
-        if not hasattr(self, "grp_color_scale"):
-            return
-        bounds = self.axis.bbox
-        x = max(6, min(self.canvas.width() - self.grp_color_scale.width() - 6,
-                       round(bounds.x1) - self.grp_color_scale.width() - 7))
-        y = max(6, round(self.canvas.height() - bounds.y1) + 7)
-        self.grp_color_scale.move(x, y)
-        self.grp_color_scale.raise_()
 
     def _blit_frame(self) -> None:
         """Redraw only the image and timestamp over the cached plot background."""
@@ -1055,7 +1047,9 @@ class CameraMainWindow(QMainWindow):
             )
             self._image_artist.set_animated(True)
             self._colorbar = self.figure.colorbar(self._image_artist, ax=self.axis, fraction=0.046, pad=0.04)
-            self._colorbar.ax.tick_params(labelsize=8)
+            # The scale endpoints are the adjacent editable spinboxes, not raster labels.
+            self._colorbar.set_ticks([])
+            self.axis.tick_params(axis="both", labelsize=10, colors="#263542", pad=5)
 
             if self._roi_patch is not None:
                 self._roi_patch = None
