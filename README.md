@@ -24,7 +24,7 @@ silently falls back to simulated data.
 Press GO to start live view; RUNNING is a status indicator and only STOP ends
 live view. After STOP, choose another camera source; the previous camera is
 disconnected before the next GO connects the selected one.
-The bright color-scale numbers beside the image are editable: click the top
+The bright color bar touches the image, and its adjacent endpoint numbers are editable: click the top
 number for maximum ADU or the bottom number for minimum ADU, then press Enter.
 
 On Windows, double-click `run_camera_gui.vbs` to open this checkout without a

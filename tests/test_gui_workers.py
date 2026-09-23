@@ -81,7 +81,7 @@ def test_gui_reuses_plot_artists_and_frame_metadata_roi(qtbot, monkeypatch):
 
 
 def test_bright_scale_endpoints_are_directly_editable_and_axis_labels_fit(qtbot):
-    """Scale numbers sit outside the image and four-digit Y ticks stay visible."""
+    """The color bar touches the image; screen-native coordinate labels fit."""
     window = CameraMainWindow()
     qtbot.addWidget(window)
     window.show()
@@ -93,8 +93,13 @@ def test_bright_scale_endpoints_are_directly_editable_and_axis_labels_fit(qtbot)
 
     scale_left = window.grp_color_scale.mapToGlobal(window.grp_color_scale.rect().topLeft()).x()
     canvas_right = window.canvas.mapToGlobal(window.canvas.rect().topRight()).x()
-    assert scale_left >= canvas_right
-    assert min(label.get_window_extent().x0 for label in window.axis.get_yticklabels()) >= 0
+    assert 0 <= scale_left - canvas_right <= 1
+    assert abs(window._colorbar.ax.bbox.x0 - window.axis.bbox.x1) < 1
+    assert window.canvas.coordinate_axis is window.axis
+    assert not window.axis.get_xticklabels()
+    assert not window.axis.get_yticklabels()
+    assert window.axis.bbox.x0 > 60  # enough room for native four-digit Y labels
+    assert not window.canvas.grab().isNull()
     assert window.spn_clim_high.isVisible()
     assert window.spn_clim_low.isVisible()
     assert len(window._colorbar.get_ticks()) == 0

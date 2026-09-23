@@ -14,7 +14,8 @@ from typing import Optional
 from datetime import datetime
 import numpy as np
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QPointF
+from PyQt6.QtGui import QColor, QPainter
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGroupBox, QLabel, QLineEdit, QDoubleSpinBox, QSpinBox,
@@ -40,6 +41,59 @@ from .workers import (
     PreviewTask,
     ScanSequenceTask,
 )
+
+
+class CameraFigureCanvas(FigureCanvasQTAgg):
+    """Paint coordinate numbers as native Qt text over the fast Agg image canvas."""
+
+    def __init__(self, figure: Figure) -> None:
+        super().__init__(figure)
+        self.coordinate_axis = None
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        axis = self.coordinate_axis
+        if axis is None or not hasattr(self, "renderer"):
+            return
+
+        # Agg rasterizes plot text at the canvas resolution. Qt draws these
+        # labels at the screen's actual pixel density (including HiDPI screens).
+        ratio = self.device_pixel_ratio
+        bounds = axis.bbox
+        left = bounds.x0 / ratio
+        right = bounds.x1 / ratio
+        top = self.height() - bounds.y1 / ratio
+        bottom = self.height() - bounds.y0 / ratio
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            painter.setPen(QColor("#263542"))
+            font = painter.font()
+            font.setPointSizeF(9)
+            painter.setFont(font)
+            metrics = painter.fontMetrics()
+
+            x_formatter = axis.xaxis.get_major_formatter()
+            for value in axis.get_xticks():
+                x = axis.transData.transform((value, axis.get_ylim()[0]))[0] / ratio
+                if left - 0.5 <= x <= right + 0.5:
+                    label = x_formatter(value)
+                    painter.drawText(
+                        QPointF(x - metrics.horizontalAdvance(label) / 2, bottom + 5 + metrics.ascent()),
+                        label,
+                    )
+
+            y_formatter = axis.yaxis.get_major_formatter()
+            for value in axis.get_yticks():
+                y = self.height() - axis.transData.transform((axis.get_xlim()[0], value))[1] / ratio
+                if top - 0.5 <= y <= bottom + 0.5:
+                    label = y_formatter(value)
+                    painter.drawText(
+                        QPointF(left - 7 - metrics.horizontalAdvance(label), y + metrics.ascent() / 2),
+                        label,
+                    )
+        finally:
+            painter.end()
 
 
 class CameraMainWindow(QMainWindow):
@@ -159,17 +213,18 @@ class CameraMainWindow(QMainWindow):
 
         left_pane.addLayout(top_bar)
 
-        # Reserve enough space for four-digit Y ticks and render labels sharply.
+        # Reserve enough space for four-digit Y ticks and a flush color bar.
         self.figure = Figure(dpi=120)
-        self.figure.subplots_adjust(left=0.14, right=0.98, top=0.91, bottom=0.11)
+        self.figure.subplots_adjust(left=0.14, right=1.0, top=0.91, bottom=0.11)
         image_row = QHBoxLayout()
         image_row.setContentsMargins(0, 0, 0, 0)
         image_row.setSpacing(0)
 
-        self.canvas = FigureCanvasQTAgg(self.figure)
+        self.canvas = CameraFigureCanvas(self.figure)
         self.canvas.setFixedSize(570, 450)
         self.axis = self.figure.add_subplot(111)
-        self.axis.tick_params(axis="both", labelsize=10, colors="#263542", pad=5)
+        self.canvas.coordinate_axis = self.axis
+        self.axis.tick_params(axis="both", labelbottom=False, labelleft=False, colors="#263542")
         self.canvas.mpl_connect("button_press_event", self._on_canvas_button_press)
         self.canvas.mpl_connect("button_release_event", self._on_canvas_button_release)
         self.canvas.mpl_connect("motion_notify_event", self._on_canvas_motion)
@@ -691,9 +746,10 @@ class CameraMainWindow(QMainWindow):
         self.camera = MockPcoCamera()
         self.scan_manager.camera = self.camera
         self.figure.clear()
-        self.figure.subplots_adjust(left=0.14, right=0.98, top=0.91, bottom=0.11)
+        self.figure.subplots_adjust(left=0.14, right=1.0, top=0.91, bottom=0.11)
         self.axis = self.figure.add_subplot(111)
-        self.axis.tick_params(axis="both", labelsize=10, colors="#263542", pad=5)
+        self.canvas.coordinate_axis = self.axis
+        self.axis.tick_params(axis="both", labelbottom=False, labelleft=False, colors="#263542")
         self._image_artist = None
         self._colorbar = None
         self._timestamp_artist = None
@@ -1046,10 +1102,10 @@ class CameraMainWindow(QMainWindow):
                 extent=[x0, x1, y1, y0]
             )
             self._image_artist.set_animated(True)
-            self._colorbar = self.figure.colorbar(self._image_artist, ax=self.axis, fraction=0.046, pad=0.04)
+            self._colorbar = self.figure.colorbar(self._image_artist, ax=self.axis, fraction=0.046, pad=0.0)
             # The scale endpoints are the adjacent editable spinboxes, not raster labels.
             self._colorbar.set_ticks([])
-            self.axis.tick_params(axis="both", labelsize=10, colors="#263542", pad=5)
+            self.axis.tick_params(axis="both", labelbottom=False, labelleft=False, colors="#263542")
 
             if self._roi_patch is not None:
                 self._roi_patch = None
