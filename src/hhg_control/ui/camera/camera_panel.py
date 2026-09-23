@@ -117,7 +117,7 @@ class CameraMainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("HHG Attosecond Lab - pco.edge 5.5 Camera Controller & Sequencer")
-        self.resize(860, 500)
+        self.resize(1032, 600)
 
         # Instrumentation layer
         self.camera: BaseCamera = MockPcoCamera()
@@ -239,7 +239,7 @@ class CameraMainWindow(QMainWindow):
         image_row.setSpacing(0)
 
         self.canvas = CameraFigureCanvas(self.figure)
-        self.canvas.setFixedSize(350, 300)
+        self.canvas.setFixedSize(420, 360)
         self.axis = self.figure.add_axes((0.12, 0.11, 0.83, 0.80))
         self.canvas.coordinate_axis = self.axis
         self.axis.tick_params(axis="both", labelbottom=False, labelleft=False, colors="#263542")
@@ -252,7 +252,7 @@ class CameraMainWindow(QMainWindow):
         # The numbers themselves are editable and align with the bar endpoints.
         self.grp_color_scale = ColorScaleControls()
         self.grp_color_scale.setObjectName("colorScaleControls")
-        self.grp_color_scale.setFixedSize(84, 300)
+        self.grp_color_scale.setFixedSize(84, 360)
         self.grp_color_scale.setStyleSheet("""
             QFrame#colorScaleControls {
                 background-color: #ffffff;
@@ -325,13 +325,15 @@ class CameraMainWindow(QMainWindow):
         image_row.addWidget(self.grp_color_scale)
         left_pane.addLayout(image_row)
         left_pane.setAlignment(image_row, Qt.AlignmentFlag.AlignLeft)
+        self.grp_color_scale.hide()
 
         # Intensity metrics strip below canvas
         self.lbl_intensity_metrics = QLabel(
             "Pixel Intensity Metrics | Minimum: -- ADU | Maximum: -- ADU | Mean: -- ADU"
         )
-        self.lbl_intensity_metrics.setMinimumWidth(0)
-        self.lbl_intensity_metrics.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.lbl_intensity_metrics.setFixedWidth(504)
+        self.lbl_intensity_metrics.setWordWrap(True)
+        self.lbl_intensity_metrics.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
         self.lbl_intensity_metrics.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_intensity_metrics.setStyleSheet(
             "font-size: 11px; font-weight: bold; padding: 3px 6px; background: #f8f9fa; "
@@ -794,6 +796,7 @@ class CameraMainWindow(QMainWindow):
         self.axis.tick_params(axis="both", labelbottom=False, labelleft=False, colors="#263542")
         self._image_artist = None
         self._colorbar = None
+        self.grp_color_scale.hide()
         self._timestamp_artist = None
         self._roi_patch = None
         self._roi_drag_patch = None
@@ -1119,10 +1122,12 @@ class CameraMainWindow(QMainWindow):
                 f"Pixel Intensity Metrics | Minimum: {c_min:,} ADU | Maximum: {c_max:,} ADU | Mean: {c_mean:,.1f} ADU{sat_warning}"
             )
 
-        # Adaptive downsampling to match 550x450 canvas, avoiding wasting CPU rendering millions of invisible pixels
+        # Downsample to the current image axes so display work tracks the viewer size.
         h, w = frame.shape
-        step_y = max(1, h // 450)
-        step_x = max(1, w // 550)
+        target_height = max(1, int(self.axis.bbox.height))
+        target_width = max(1, int(self.axis.bbox.width))
+        step_y = max(1, (h + target_height - 1) // target_height)
+        step_x = max(1, (w + target_width - 1) // target_width)
         downsample_factor = max(step_y, step_x)
         display_frame = frame[::downsample_factor, ::downsample_factor] if downsample_factor > 1 else frame
         reported_roi = meta.get("roi") if meta else None
@@ -1148,6 +1153,7 @@ class CameraMainWindow(QMainWindow):
             self._colorbar = self.figure.colorbar(self._image_artist, cax=color_axis)
             # The scale endpoints are the adjacent editable spinboxes, not raster labels.
             self._colorbar.set_ticks([])
+            self.grp_color_scale.show()
             self.axis.tick_params(axis="both", labelbottom=False, labelleft=False, colors="#263542")
 
             if self._roi_patch is not None:

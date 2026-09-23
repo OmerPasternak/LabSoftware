@@ -16,19 +16,25 @@ def test_full_frame_and_color_scale_fit_when_window_resizes():
     window = CameraMainWindow()
     try:
         window.show()
-        assert (window.width(), window.height()) == (860, 500)
+        assert (window.width(), window.height()) == (1032, 600)
+        assert not window.grp_color_scale.isVisible()
+        assert not window.spn_clim_high.isVisible()
+        assert not window.spn_clim_low.isVisible()
         frame = np.arange(216 * 256, dtype=np.uint16).reshape(216, 256)
         window._update_display(frame, {"roi": (0, 0, 2560, 2160)})
+        assert window.grp_color_scale.isVisible()
 
-        for width, height in ((900, 520), (1040, 580), (1250, 700)):
+        for width, height in ((1032, 600), (1150, 650), (1300, 750)):
             window.resize(width, height)
             app.processEvents()
             assert window.width() == width
-            assert (window.canvas.width(), window.canvas.height()) == (350, 300)
+            assert (window.canvas.width(), window.canvas.height()) == (420, 360)
+            assert window.lbl_intensity_metrics.width() == window.canvas.width() + window.grp_color_scale.width()
+            assert window.lbl_intensity_metrics.x() == window.canvas.x()
             assert window.lbl_system_status.width() >= 60
-            if width == 1040:
+            if width == 1032:
                 panes = window.centralWidget().layout()
-                assert panes.itemAt(0).geometry().width() > panes.itemAt(1).geometry().width()
+                assert abs(panes.itemAt(0).geometry().width() - panes.itemAt(1).geometry().width()) < 50
             assert window.axis.get_xlim() == (0, 2560)
             assert window.axis.get_ylim() == (2160, 0)
             assert tuple(window._image_artist.get_extent()) == (0, 2560, 2160, 0)
@@ -53,5 +59,11 @@ def test_full_frame_and_color_scale_fit_when_window_resizes():
         assert window._image_artist.get_clim() == (10, 100)
         window.btn_auto_clim.click()
         assert window._image_artist.get_clim() == (int(frame.min()), int(frame.max()))
+        window._on_camera_disconnected()
+        app.processEvents()
+        assert not window.grp_color_scale.isVisible()
+        window._update_display(frame, {"roi": (0, 0, 2560, 2160)})
+        app.processEvents()
+        assert window.grp_color_scale.isVisible()
     finally:
         window.close()
