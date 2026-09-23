@@ -386,11 +386,11 @@ class CameraMainWindow(QMainWindow):
         self.cmb_readout_mode.setMinimumWidth(180)
         self.cmb_readout_mode.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.cmb_readout_mode.addItem("Rolling Shutter", userData=ReadoutMode.ROLLING_SHUTTER)
-        self.cmb_readout_mode.addItem("Global Reset (HHG)", userData=ReadoutMode.GLOBAL_RESET)
+        self.cmb_readout_mode.addItem("Global Shutter", userData=ReadoutMode.GLOBAL_SHUTTER)
         self.cmb_readout_mode.setCurrentIndex(0)
         self.cmb_readout_mode.setToolTip(
             "Rolling Shutter: rows exposed sequentially.\n\n"
-            "Global Reset: all rows start exposure simultaneously — recommended for HHG.\n"
+            "Global Shutter: all rows start and stop exposure together.\n"
             "Switching triggers camera reboot (~5 s)."
         )
         self.cmb_readout_mode.currentIndexChanged.connect(self._on_readout_mode_changed)
@@ -847,7 +847,7 @@ class CameraMainWindow(QMainWindow):
         self.cmb_camera_source.setEnabled(True)
 
     def _on_readout_mode_changed(self, index: int) -> None:
-        """Handle user toggling camera sensor readout mode (Rolling Shutter vs Global Reset)."""
+        """Handle switching between rolling and global shutter modes."""
         mode = self.cmb_readout_mode.itemData(index)
         if mode is None:
             return

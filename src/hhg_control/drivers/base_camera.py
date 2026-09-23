@@ -27,17 +27,17 @@ class ReadoutMode(IntEnum):
             different times.  Gives the highest frame rate but produces a
             **light-sheet artefact** with pulsed laser sources (HHG) where
             only the rows open during the laser pulse receive signal.
-        GLOBAL_SHUTTER:  True global shutter — all pixels expose and read out
-            simultaneously.  Not available on the pco.edge 5.5 (sCMOS
-            architecture); listed here for completeness and future cameras.
+        GLOBAL_SHUTTER: All pixels start and stop exposure together. Available
+            on the pco.edge 5.5 USB, at a lower maximum rate than rolling mode.
         GLOBAL_RESET:    All rows reset (start of exposure) simultaneously so
             every pixel integrates the same laser pulse.  Readout is still
             sequential (rolling), but there is no light-sheet artefact.
-            **Recommended mode for HHG / pulsed-laser experiments.**
+            This mode remains available for existing scripts, but differs from
+            true global shutter because exposure ends row by row.
     """
     ROLLING_SHUTTER = 1
-    GLOBAL_SHUTTER  = 2   # Not supported on pco.edge 5.5 sCMOS
-    GLOBAL_RESET    = 4   # Recommended for pulsed laser / HHG
+    GLOBAL_SHUTTER  = 2
+    GLOBAL_RESET    = 4
 
 
 class BaseCamera(ABC):

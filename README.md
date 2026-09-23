@@ -24,6 +24,10 @@ silently falls back to simulated data.
 Press GO to start live view; RUNNING is a status indicator and only STOP ends
 live view. After STOP, choose another camera source; the previous camera is
 disconnected before the next GO connects the selected one.
+The mode selector offers Rolling Shutter and true Global Shutter on the
+pco.edge 5.5 USB. Changing the physical sensor mode reboots the camera; verify
+the selected mode on the camera before an experiment. Global Reset is a distinct
+legacy API mode and is not the GUI's Global Shutter selection.
 The bright color bar touches the image, and its adjacent endpoint numbers are editable: click the top
 number for maximum ADU or the bottom number for minimum ADU, then press Enter.
 

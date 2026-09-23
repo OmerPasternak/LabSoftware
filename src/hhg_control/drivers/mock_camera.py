@@ -128,18 +128,9 @@ class MockPcoCamera(BaseCamera):
         return self._readout_mode
 
     def set_readout_mode(self, mode: ReadoutMode) -> None:
-        """Switch the simulated readout mode immediately (no reboot required in the mock).
-
-        Args:
-            mode: ReadoutMode.ROLLING_SHUTTER or ReadoutMode.GLOBAL_RESET.
-                  ReadoutMode.GLOBAL_SHUTTER is not supported by the pco.edge 5.5
-                  sCMOS sensor and will raise ValueError.
-        """
-        if mode == ReadoutMode.GLOBAL_SHUTTER:
-            raise ValueError(
-                "ReadoutMode.GLOBAL_SHUTTER is not supported by the pco.edge 5.5 sCMOS sensor. "
-                "Use ROLLING_SHUTTER or GLOBAL_RESET."
-            )
+        """Switch the simulated shutter mode without a hardware reboot."""
+        if not isinstance(mode, ReadoutMode):
+            raise ValueError("mode must be a ReadoutMode value.")
         self._readout_mode = mode
 
     # ------------------------------------------------------------------

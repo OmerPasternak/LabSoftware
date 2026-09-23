@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 import hhg_control.drivers.pco_edge as pco_edge
 
@@ -53,7 +54,7 @@ class FakeSdk:
         self.timeout = command_timeout
 
     def set_camera_setup(self, setup):
-        self.setup = {"rolling shutter": 1, "global reset": 4}[setup]
+        self.setup = {"rolling shutter": 1, "global shutter": 2, "global reset": 4}[setup]
 
     def reboot_camera(self):
         self.rebooted = True
@@ -111,8 +112,28 @@ def test_pco_readout_mode_adapts_to_sdk_dictionary(monkeypatch):
     monkeypatch.setattr(pco_edge.time, "sleep", lambda _: None)
     camera = pco_edge.PcoEdgeCamera()
     camera.connect()
-    camera.set_readout_mode(pco_edge.ReadoutMode.GLOBAL_RESET)
+    camera.set_readout_mode(pco_edge.ReadoutMode.GLOBAL_SHUTTER)
     assert created[0].sdk.timeout == 2000
     assert created[0].sdk.rebooted
-    assert camera.get_readout_mode() is pco_edge.ReadoutMode.GLOBAL_RESET
+    assert camera.get_readout_mode() is pco_edge.ReadoutMode.GLOBAL_SHUTTER
+    camera.close()
+
+
+def test_pco_mode_switch_rejects_mismatched_hardware_readback(monkeypatch):
+    """A completed reboot is not success unless the SDK reports the new mode."""
+    created = []
+
+    def make_camera(interface):
+        camera = FakePcoCamera(interface)
+        created.append(camera)
+        return camera
+
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=make_camera))
+    monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
+    monkeypatch.setattr(pco_edge.time, "sleep", lambda _: None)
+    camera = pco_edge.PcoEdgeCamera()
+    camera.connect()
+    with pytest.raises(RuntimeError, match="not verified"):
+        camera.set_readout_mode(pco_edge.ReadoutMode.GLOBAL_SHUTTER)
+    assert len(created) == 2
     camera.close()

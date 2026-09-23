@@ -54,12 +54,11 @@ def test_mock_camera_readout_modes():
     cam.set_readout_mode(ReadoutMode.GLOBAL_RESET)
     assert cam.get_readout_mode() == ReadoutMode.GLOBAL_RESET
 
-    # Global shutter should raise ValueError on pco.edge 5.5 sCMOS
-    with pytest.raises(ValueError, match="not supported"):
-        cam.set_readout_mode(ReadoutMode.GLOBAL_SHUTTER)
+    cam.set_readout_mode(ReadoutMode.GLOBAL_SHUTTER)
+    assert cam.get_readout_mode() == ReadoutMode.GLOBAL_SHUTTER
 
     # Metadata should record readout mode
     frames, metas = cam.acquire_frames(2)
-    assert metas[0]["readout_mode"] == "GLOBAL_RESET"
+    assert metas[0]["readout_mode"] == "GLOBAL_SHUTTER"
 
     cam.close()

@@ -7,6 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 from PyQt6.QtWidgets import QApplication
 
+from hhg_control.drivers.base_camera import ReadoutMode
 from hhg_control.ui.camera.camera_panel import CameraMainWindow
 
 
@@ -71,5 +72,17 @@ def test_full_frame_and_color_scale_fit_when_window_resizes():
         window._update_display(frame, {"roi": (0, 0, 2560, 2160)})
         app.processEvents()
         assert window.grp_color_scale.isVisible()
+    finally:
+        window.close()
+
+
+def test_gui_offers_actual_global_shutter_mode():
+    """The mode selector must not present global reset as global shutter."""
+    app = QApplication.instance() or QApplication([])
+    window = CameraMainWindow()
+    try:
+        modes = [window.cmb_readout_mode.itemData(i) for i in range(window.cmb_readout_mode.count())]
+        assert modes == [ReadoutMode.ROLLING_SHUTTER, ReadoutMode.GLOBAL_SHUTTER]
+        assert window.cmb_readout_mode.itemText(1) == "Global Shutter"
     finally:
         window.close()

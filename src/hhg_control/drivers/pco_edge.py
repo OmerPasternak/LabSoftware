@@ -157,19 +157,15 @@ class PcoEdgeCamera(BaseCamera):
         After this returns the camera is fully operational in the new mode.
 
         Args:
-            mode: ReadoutMode.ROLLING_SHUTTER (1) or ReadoutMode.GLOBAL_RESET (4).
-                  ReadoutMode.GLOBAL_SHUTTER (2) is not available on pco.edge 5.5.
+            mode: ROLLING_SHUTTER (1), GLOBAL_SHUTTER (2), or GLOBAL_RESET (4).
 
         Raises:
             RuntimeError: Camera not connected, mode switch SDK call failed,
                           or reconnect after reboot failed.
-            ValueError:   If ``mode`` is ReadoutMode.GLOBAL_SHUTTER.
+            ValueError:   If ``mode`` is not a ReadoutMode value.
         """
-        if mode == ReadoutMode.GLOBAL_SHUTTER:
-            raise ValueError(
-                "ReadoutMode.GLOBAL_SHUTTER is not available on the pco.edge 5.5 sCMOS sensor. "
-                "Supported modes: ROLLING_SHUTTER (1), GLOBAL_RESET (4)."
-            )
+        if not isinstance(mode, ReadoutMode):
+            raise ValueError("mode must be a ReadoutMode value.")
         if self._cam is None:
             raise RuntimeError("Camera is not connected — cannot change readout mode.")
 
@@ -187,6 +183,7 @@ class PcoEdgeCamera(BaseCamera):
             # ---- Step 2: write the new shutter mode and request firmware reboot
             setup_name = {
                 ReadoutMode.ROLLING_SHUTTER: "rolling shutter",
+                ReadoutMode.GLOBAL_SHUTTER: "global shutter",
                 ReadoutMode.GLOBAL_RESET: "global reset",
             }[mode]
             if hasattr(self._cam.sdk, "set_timeouts"):
@@ -215,9 +212,14 @@ class PcoEdgeCamera(BaseCamera):
         try:
             self.connect()
             self.set_roi(previous_roi)
+            actual_setup = self._cam.sdk.get_camera_setup()["setup"][0]
+            if int(actual_setup) != mode.value:
+                raise RuntimeError(
+                    f"Camera reported setup {actual_setup} after reboot; expected {mode.value}."
+                )
         except Exception as exc:
             raise RuntimeError(
-                f"Readout mode changed to {mode.name} but camera failed to reconnect after reboot: {exc}"
+                f"Camera mode switch to {mode.name} was not verified after reboot: {exc}"
             ) from exc
 
         self._readout_mode = mode
