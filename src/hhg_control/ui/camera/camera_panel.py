@@ -1,8 +1,8 @@
 """
 PyQt6 Graphical User Interface for pco.edge 5.5 sCMOS Camera Control and Scan Sequencer.
 Implements top-left Go/Stop controls, horizontal widescreen layout with side control panel,
-fixed external color scale control box (docked beside the image colorbar), camera-derived
-hardware timestamps, and hardware-constrained symmetrical ROI.
+fixed external color scale control box (docked beside the image colorbar),
+source-labelled frame timestamps, and hardware-constrained symmetrical ROI.
 """
 
 import sys
@@ -39,43 +39,6 @@ from .workers import (
     PreviewTask,
     ScanSequenceTask,
 )
-
-
-class DraggableScaleTag(QFrame):
-    """Floating draggable tag pinned over the top-right corner of the image canvas."""
-
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
-        self._drag_start_global: Optional[QPoint] = None
-        self._widget_start_pos: Optional[QPoint] = None
-        self._user_moved: bool = False
-
-    def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_start_global = event.globalPosition().toPoint()
-            self._widget_start_pos = self.pos()
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event) -> None:
-        if self._drag_start_global is not None and self._widget_start_pos is not None:
-            delta = event.globalPosition().toPoint() - self._drag_start_global
-            new_pos = self._widget_start_pos + delta
-            if self.parentWidget():
-                pw = self.parentWidget().width()
-                ph = self.parentWidget().height()
-                nx = max(0, min(pw - self.width(), new_pos.x()))
-                ny = max(0, min(ph - self.height(), new_pos.y()))
-                self.move(nx, ny)
-            else:
-                self.move(new_pos)
-            self._user_moved = True
-        else:
-            super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event) -> None:
-        self._drag_start_global = None
-        self._widget_start_pos = None
-        super().mouseReleaseEvent(event)
 
 
 class CameraMainWindow(QMainWindow):
@@ -118,6 +81,7 @@ class CameraMainWindow(QMainWindow):
         self._image_artist = None
         self._colorbar = None
         self._timestamp_artist = None
+        self._plot_background = None
         self._roi_selector: Optional[RectangleSelector] = None
         self._roi_patch = None           # persistent Rectangle patch drawn when ROI is applied or edited
         self._clim_low: int = 0          # current lower color limit (ADU)
@@ -196,6 +160,7 @@ class CameraMainWindow(QMainWindow):
         self.axis = self.figure.add_subplot(111)
         self.canvas.mpl_connect("button_press_event", self._on_canvas_button_press)
         self.canvas.mpl_connect("button_release_event", self._on_canvas_button_release)
+        self.canvas.mpl_connect("draw_event", self._on_canvas_draw)
         image_row.addWidget(self.canvas)
 
         # Fixed Color Scale Box — placed outside the image canvas right next to the colorbar
@@ -787,15 +752,13 @@ class CameraMainWindow(QMainWindow):
     def _on_live_frame_ready(self, frame: np.ndarray, meta: dict) -> None:
         """Handle incoming live stream frame from persistent LiveStreamTask."""
         if not self._is_live_active or self._is_dragging_roi:
-            if self.active_live_task is not None:
-                self.active_live_task.gui_ready = True
             return
 
         try:
             self._update_display(frame, meta=meta)
         finally:
             if self.active_live_task is not None:
-                self.active_live_task.gui_ready = True
+                self.active_live_task.acknowledge_frame()
 
     def _on_preview_frame_ready(self, frame: np.ndarray, meta: dict) -> None:
         self._update_display(frame, meta=meta)
@@ -832,6 +795,7 @@ class CameraMainWindow(QMainWindow):
         self.spn_clim_high.blockSignals(False)
         if self._image_artist is not None:
             self._image_artist.set_clim(self._clim_low, self._clim_high)
+            self._plot_background = None
             self.canvas.draw_idle()
 
     def _on_clim_changed(self) -> None:
@@ -849,6 +813,7 @@ class CameraMainWindow(QMainWindow):
         self._clim_high = high
         if self._image_artist is not None:
             self._image_artist.set_clim(self._clim_low, self._clim_high)
+            self._plot_background = None
             self.canvas.draw_idle()
 
     def _on_clim_apply_clicked(self) -> None:
@@ -867,12 +832,30 @@ class CameraMainWindow(QMainWindow):
     def _on_canvas_button_release(self, event) -> None:
         """Resume live frame blitting after user finishes dragging an ROI."""
         self._is_dragging_roi = False
+        if self.active_live_task is not None:
+            self.active_live_task.acknowledge_frame()
 
     def _on_canvas_click(self, event) -> None:
         pass
 
+    def _on_canvas_draw(self, event) -> None:
+        """Cache the static plot after a full draw, then paint the current frame."""
+        if event.canvas is self.canvas and self._image_artist is not None:
+            self._plot_background = self.canvas.copy_from_bbox(self.axis.bbox)
+            self._blit_frame()
+
+    def _blit_frame(self) -> None:
+        """Redraw only the image and timestamp over the cached plot background."""
+        if self._plot_background is None or self._image_artist is None:
+            return
+        self.canvas.restore_region(self._plot_background)
+        self.axis.draw_artist(self._image_artist)
+        if self._timestamp_artist is not None:
+            self.axis.draw_artist(self._timestamp_artist)
+        self.canvas.blit(self.axis.bbox)
+
     def _update_display(self, frame: np.ndarray, meta: Optional[dict] = None) -> None:
-        """Update canvas display with adaptive downsampling, zooming to active ROI with zero dead space."""
+        """Display one sensor frame using bounded downsampling and cached plot blitting."""
         # Never interrupt canvas while the user is actively dragging the ROI rectangle
         if self._is_dragging_roi:
             return
@@ -902,7 +885,13 @@ class CameraMainWindow(QMainWindow):
         step_x = max(1, w // 550)
         downsample_factor = max(step_y, step_x)
         display_frame = frame[::downsample_factor, ::downsample_factor] if downsample_factor > 1 else frame
-        x0, y0, x1, y1 = self.camera.get_roi()
+        reported_roi = meta.get("roi") if meta else None
+        if isinstance(reported_roi, (tuple, list)) and len(reported_roi) == 4:
+            x0, y0, x1, y1 = map(int, reported_roi)
+        else:
+            x0, y0, x1, y1 = self.camera.get_roi()
+
+        full_draw_needed = self._plot_background is None
 
         if self._image_artist is None:
             self.axis.clear()
@@ -914,6 +903,7 @@ class CameraMainWindow(QMainWindow):
                 aspect="auto",
                 extent=[x0, x1, y1, y0]
             )
+            self._image_artist.set_animated(True)
             self._colorbar = self.figure.colorbar(self._image_artist, ax=self.axis, fraction=0.046, pad=0.04)
             self._colorbar.ax.tick_params(labelsize=8)
 
@@ -937,6 +927,7 @@ class CameraMainWindow(QMainWindow):
             self.axis.set_xlim(x0, x1)
             self.axis.set_ylim(y1, y0)
             self._image_artist.set_clim(self._clim_low, self._clim_high)
+            full_draw_needed = True
         else:
             self._image_artist.set_data(display_frame)
             if self._current_displayed_roi != (x0, y0, x1, y1):
@@ -945,27 +936,38 @@ class CameraMainWindow(QMainWindow):
                 self.axis.set_aspect("auto")
                 self.axis.set_xlim(x0, x1)
                 self.axis.set_ylim(y1, y0)
+                full_draw_needed = True
 
-        # Display timestamp overlay. Per-frame metadata records whether it came from the SDK or host.
-        cam_time = ""
-        if meta:
-            cam_time = meta.get("camera_time_str") or ""
+        # The SDK may omit sensor time; label the source instead of implying it.
+        cam_time = meta.get("camera_time_str") if meta else None
+        timestamp_source = meta.get("timestamp_source") if meta else None
         if not cam_time:
             cam_time = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            timestamp_source = "host_fallback"
+        source_label = {
+            "pco_sdk": "SDK",
+            "simulated_host_clock": "Sim",
+            "host_fallback": "Host",
+        }.get(timestamp_source, "Time")
+        display_time = f"{source_label} {cam_time}"
 
         if self._timestamp_artist is None:
             self._timestamp_artist = self.axis.text(
-                0.01, 0.98, cam_time,
+                0.01, 0.98, display_time,
                 transform=self.axis.transAxes,
                 fontsize=7, color="#aaaaaa",
                 fontweight="normal",
                 va="top", ha="left",
                 bbox={"facecolor": "black", "alpha": 0.25, "edgecolor": "none", "boxstyle": "round,pad=0.2"}
             )
+            self._timestamp_artist.set_animated(True)
         else:
-            self._timestamp_artist.set_text(cam_time)
+            self._timestamp_artist.set_text(display_time)
 
-        self.canvas.draw_idle()
+        if full_draw_needed:
+            self.canvas.draw()
+        else:
+            self._blit_frame()
 
     # =========================================================================
     # Hardware ROI Symmetrical Constraints & Dynamic Redraw
@@ -1095,6 +1097,8 @@ class CameraMainWindow(QMainWindow):
     def _deactivate_draw_roi(self) -> None:
         """Deactivate draw-ROI mode and uncheck the button."""
         self._is_dragging_roi = False
+        if self.active_live_task is not None:
+            self.active_live_task.acknowledge_frame()
         if self._roi_selector is not None:
             self._roi_selector.clear()
             self._roi_selector.set_active(False)
@@ -1119,6 +1123,7 @@ class CameraMainWindow(QMainWindow):
             linestyle="-", zorder=5, fill=False
         )
         self.axis.add_patch(self._roi_patch)
+        self._plot_background = None
         if self._image_artist is None:
             self.axis.set_xlim(0, 2560)
             self.axis.set_ylim(2160, 0)
@@ -1533,23 +1538,6 @@ class CameraMainWindow(QMainWindow):
         # If user closed window while scan was aborting, finish close now
         if self._closing:
             self.close()
-
-    def _position_scale_tag(self) -> None:
-        """Position the floating scale tag in the top-right corner of the image canvas."""
-        if hasattr(self, "scale_tag") and hasattr(self, "canvas"):
-            if not getattr(self.scale_tag, "_user_moved", False):
-                tag_w = self.scale_tag.width()
-                tag_x = max(10, 452 - tag_w)
-                self.scale_tag.move(tag_x, 16)
-            self.scale_tag.raise_()
-
-    def showEvent(self, event) -> None:
-        super().showEvent(event)
-        self._position_scale_tag()
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        self._position_scale_tag()
 
     def _append_log(self, message: str) -> None:
         self.txt_activity_log.append(message)

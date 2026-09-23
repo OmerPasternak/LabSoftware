@@ -17,6 +17,7 @@ class FakePcoCamera:
         self.configuration = {"roi": (1, 1, 2560, 2160)}
         self.is_recording = False
         self.record_calls = []
+        self.image_metadata = {"recorder image number": 9}
         self.sdk = FakeSdk()
 
     def set_exposure_time(self, value):
@@ -30,7 +31,7 @@ class FakePcoCamera:
         self.wait_args = (delay, timeout)
 
     def image(self, image_index=0):
-        return np.ones((6, 8), dtype=np.uint16), {"recorder image number": 9}
+        return np.ones((6, 8), dtype=np.uint16), dict(self.image_metadata)
 
     def stop(self):
         self.is_recording = False
@@ -77,6 +78,21 @@ def test_pco_live_uses_persistent_ring_buffer(monkeypatch):
     assert metadata["frame_id"] == 9
     camera.stop_live()
     assert not fake.is_recording
+    camera.close()
+
+
+def test_pco_live_preserves_sdk_timestamp(monkeypatch):
+    fake = FakePcoCamera("USB 3.0")
+    fake.image_metadata["timestamp"] = "2026-09-23T12:34:56.789Z"
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface: fake))
+    monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
+    camera = pco_edge.PcoEdgeCamera()
+    camera.connect()
+    camera.start_live()
+
+    _, metadata = camera.acquire_live_frame()
+    assert metadata["camera_time_str"] == fake.image_metadata["timestamp"]
+    assert metadata["timestamp_source"] == "pco_sdk"
     camera.close()
 
 

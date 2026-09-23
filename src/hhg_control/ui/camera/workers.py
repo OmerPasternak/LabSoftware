@@ -1,6 +1,7 @@
 """Background Qt workers for serialized camera operations."""
 
 from pathlib import Path
+from threading import Event
 import time
 
 import numpy as np
@@ -95,11 +96,17 @@ class LiveStreamTask(QThread):
         self.scan_manager = scan_manager
         self.target_fps = target_fps
         self._running = False
-        self.gui_ready = True
+        self._gui_ready = Event()
+        self._gui_ready.set()
+
+    def acknowledge_frame(self) -> None:
+        """Allow the next frame after the GUI handles the current one."""
+        self._gui_ready.set()
 
     def stop(self) -> None:
         """Request a cooperative stop after the active camera read returns."""
         self._running = False
+        self._gui_ready.set()
 
     def run(self) -> None:
         self._running = True
@@ -107,14 +114,15 @@ class LiveStreamTask(QThread):
         try:
             self.scan_manager.start_live(buffer_size=4)
             while self._running:
-                started = time.perf_counter()
-                if not self.gui_ready:
-                    time.sleep(0.005)
+                if not self._gui_ready.wait(timeout=0.1):
                     continue
+                if not self._running:
+                    break
+                self._gui_ready.clear()
+                started = time.perf_counter()
                 timeout_s = self.scan_manager.camera.get_exposure_time() + 1.0
                 frame, metadata = self.scan_manager.acquire_live_frame(timeout_s=timeout_s)
-                if self._running and self.gui_ready:
-                    self.gui_ready = False
+                if self._running:
                     self.frame_ready.emit(frame, metadata)
                 remaining = min_interval - (time.perf_counter() - started)
                 if remaining > 0 and self._running:

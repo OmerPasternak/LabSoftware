@@ -7,6 +7,18 @@ description: Designs high-performance, non-blocking lab GUIs with PyQt/PySide an
 
 This skill provides design patterns for building high-speed, non-blocking instrumentation GUIs capable of streaming camera feeds at 50–100 fps and running long scans without UI lag.
 
+## Current camera GUI
+
+The camera GUI keeps the fixed external color-scale panel and Matplotlib ROI
+interaction established on `main`. Its acquisition worker owns a persistent
+ring buffer and waits on a thread event for each GUI repaint before offering
+another frame. The canvas reuses its image and timestamp artists, downsamples to display size,
+and blits only the changing plot area. A local offscreen render-only check on
+full-sensor arrays measured about 24 fps; this is not a physical-camera or
+end-to-end throughput guarantee. Benchmark the complete mock and hardware
+paths before raising the target rate, and use pyqtgraph if the required rate
+exceeds what this display can sustain.
+
 ---
 
 ## 1. Thread Separation Architecture

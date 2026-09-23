@@ -19,6 +19,15 @@ except (ImportError, RuntimeError) as err:
     PCO_IMPORT_ERROR = str(err)
 
 
+def _frame_time_fields(metadata: Dict[str, Any]) -> tuple[Any, str, str]:
+    """Preserve SDK frame time when present; otherwise label host receipt time."""
+    timestamp = metadata.get("timestamp")
+    if timestamp is not None:
+        return timestamp, str(timestamp), "pco_sdk"
+    received = datetime.now()
+    return received.timestamp(), received.strftime("%H:%M:%S.%f")[:-3], "host_fallback"
+
+
 class PcoEdgeCamera(BaseCamera):
     """Driver for pco.edge 5.5 sCMOS using the official Excelitas `pco` SDK."""
 
@@ -227,18 +236,13 @@ class PcoEdgeCamera(BaseCamera):
         
         metas = []
         for i, meta in enumerate(metadata_list):
-            cam_time = None
-            if isinstance(meta, dict):
-                cam_time = meta.get("timestamp")
-            if not cam_time:
-                cam_time = time.time()
-                timestamp_source = "host_fallback"
-            else:
-                timestamp_source = "pco_sdk"
+            cam_time, time_text, timestamp_source = _frame_time_fields(
+                meta if isinstance(meta, dict) else {}
+            )
             metas.append({
                 "frame_id": i,
                 "camera_timestamp": cam_time,
-                "camera_time_str": datetime.now().strftime("%H:%M:%S.%f")[:-3],
+                "camera_time_str": time_text,
                 "timestamp_source": timestamp_source,
                 "raw_meta": str(meta),
                 "exposure_s": self._exposure_time_s,
@@ -265,14 +269,13 @@ class PcoEdgeCamera(BaseCamera):
         timeout = timeout_s if timeout_s is not None else self._exposure_time_s + 1.0
         self._cam.wait_for_new_image(delay=True, timeout=timeout)
         frame, raw_meta = self._cam.image(image_index=0xFFFFFFFF)
-        now = time.time()
         meta = raw_meta if isinstance(raw_meta, dict) else {"raw_meta": str(raw_meta)}
-        camera_timestamp = meta.get("timestamp")
+        camera_timestamp, time_text, timestamp_source = _frame_time_fields(meta)
         return np.ascontiguousarray(frame, dtype=np.uint16), {
             "frame_id": meta.get("recorder image number", 0),
-            "camera_timestamp": camera_timestamp if camera_timestamp is not None else now,
-            "camera_time_str": datetime.now().strftime("%H:%M:%S.%f")[:-3],
-            "timestamp_source": "pco_sdk" if camera_timestamp is not None else "host_fallback",
+            "camera_timestamp": camera_timestamp,
+            "camera_time_str": time_text,
+            "timestamp_source": timestamp_source,
             "raw_meta": str(meta),
             "exposure_s": self._exposure_time_s,
             "roi": self.get_roi(),
