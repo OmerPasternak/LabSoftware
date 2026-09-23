@@ -102,10 +102,11 @@ class ColorScaleControls(QFrame):
     def resizeEvent(self, event) -> None:
         """Reposition the limit fields whenever the image row changes height."""
         # The gradient spans 11% to 91% of the canvas height. Keep each
-        # spinbox centered on its end as the image row changes height.
+        # limit three quarters of a text height inside the corresponding end.
         if self.layout() is not None and hasattr(self, "high_spin"):
-            top = max(0, round(self.height() * 0.09 - self.high_spin.height() / 2))
-            bottom = max(0, round(self.height() * 0.11 - self.low_spin.height() / 2))
+            inset = round(0.75 * self.high_spin.fontMetrics().height())
+            top = max(0, round(self.height() * 0.09 + inset - self.high_spin.height() / 2))
+            bottom = max(0, round(self.height() * 0.11 + inset - self.low_spin.height() / 2))
             self.layout().setContentsMargins(2, top, 2, bottom)
         super().resizeEvent(event)
 
@@ -116,7 +117,7 @@ class CameraMainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("HHG Attosecond Lab - pco.edge 5.5 Camera Controller & Sequencer")
-        self.resize(1040, 580)
+        self.resize(860, 500)
 
         # Instrumentation layer
         self.camera: BaseCamera = MockPcoCamera()
@@ -238,8 +239,7 @@ class CameraMainWindow(QMainWindow):
         image_row.setSpacing(0)
 
         self.canvas = CameraFigureCanvas(self.figure)
-        self.canvas.setMinimumSize(350, 300)
-        self.canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.canvas.setFixedSize(350, 300)
         self.axis = self.figure.add_axes((0.12, 0.11, 0.83, 0.80))
         self.canvas.coordinate_axis = self.axis
         self.axis.tick_params(axis="both", labelbottom=False, labelleft=False, colors="#263542")
@@ -247,13 +247,12 @@ class CameraMainWindow(QMainWindow):
         self.canvas.mpl_connect("button_release_event", self._on_canvas_button_release)
         self.canvas.mpl_connect("motion_notify_event", self._on_canvas_motion)
         self.canvas.mpl_connect("draw_event", self._on_canvas_draw)
-        image_row.addWidget(self.canvas, stretch=1)
+        image_row.addWidget(self.canvas)
 
         # The numbers themselves are editable and align with the bar endpoints.
         self.grp_color_scale = ColorScaleControls()
         self.grp_color_scale.setObjectName("colorScaleControls")
-        self.grp_color_scale.setFixedWidth(84)
-        self.grp_color_scale.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        self.grp_color_scale.setFixedSize(84, 300)
         self.grp_color_scale.setStyleSheet("""
             QFrame#colorScaleControls {
                 background-color: #ffffff;
@@ -295,7 +294,6 @@ class CameraMainWindow(QMainWindow):
         self.spn_clim_high.valueChanged.connect(self._on_clim_changed)
         self.spn_clim_high.editingFinished.connect(self._on_clim_changed)
         lay_scale.addWidget(self.spn_clim_high)
-        lay_scale.addStretch(1)
 
         self.spn_clim_low = QSpinBox()
         self.spn_clim_low.setRange(0, 65534)
@@ -311,21 +309,22 @@ class CameraMainWindow(QMainWindow):
         self.grp_color_scale.low_spin = self.spn_clim_low
 
 
-        btn_auto_clim = QPushButton("Auto")
-        btn_auto_clim.setFixedWidth(80)
-        btn_auto_clim.setToolTip("Auto-scale color limits to current frame min/max")
-        btn_auto_clim.clicked.connect(self._on_clim_auto_clicked)
-        lay_scale.addWidget(btn_auto_clim)
+        self.btn_auto_clim = QPushButton("Auto")
+        self.btn_auto_clim.setFixedWidth(80)
+        self.btn_auto_clim.setToolTip("Auto-scale color limits to current frame min/max")
+        self.btn_auto_clim.clicked.connect(self._on_clim_auto_clicked)
+        lay_scale.addWidget(self.btn_auto_clim)
 
-        btn_full_clim = QPushButton("Full")
-        btn_full_clim.setFixedWidth(80)
-        btn_full_clim.setToolTip("Reset color limits to full 16-bit range (0–65535)")
-        btn_full_clim.clicked.connect(lambda: self._set_clim(0, 65535))
-        lay_scale.addWidget(btn_full_clim)
+        self.btn_set_clim = QPushButton("Set")
+        self.btn_set_clim.setFixedWidth(80)
+        self.btn_set_clim.setToolTip("Apply the edited color limits")
+        self.btn_set_clim.clicked.connect(self._on_clim_apply_clicked)
+        lay_scale.addWidget(self.btn_set_clim)
         lay_scale.addStretch(1)
         lay_scale.addWidget(self.spn_clim_low)
         image_row.addWidget(self.grp_color_scale)
-        left_pane.addLayout(image_row, stretch=1)
+        left_pane.addLayout(image_row)
+        left_pane.setAlignment(image_row, Qt.AlignmentFlag.AlignLeft)
 
         # Intensity metrics strip below canvas
         self.lbl_intensity_metrics = QLabel(
@@ -339,6 +338,7 @@ class CameraMainWindow(QMainWindow):
             "border: 1px solid #dee2e6; border-radius: 3px; color: #212529;"
         )
         left_pane.addWidget(self.lbl_intensity_metrics)
+        left_pane.addStretch(1)
         root_layout.addLayout(left_pane, stretch=2)
 
         # =========================================================================
