@@ -16,7 +16,7 @@ def test_full_frame_and_color_scale_fit_when_window_resizes():
     window = CameraMainWindow()
     try:
         window.show()
-        assert (window.width(), window.height()) == (864, 600)
+        assert (window.width(), window.height()) == (1254, 580)
         assert not window.grp_color_scale.isVisible()
         assert not window.spn_clim_high.isVisible()
         assert not window.spn_clim_low.isVisible()
@@ -24,15 +24,15 @@ def test_full_frame_and_color_scale_fit_when_window_resizes():
         window._update_display(frame, {"roi": (0, 0, 2560, 2160)})
         assert window.grp_color_scale.isVisible()
 
-        for width, height in ((864, 600), (1032, 600), (1150, 650)):
+        for width, height in ((1254, 580), (1400, 650), (1600, 750)):
             window.resize(width, height)
             app.processEvents()
             assert window.width() == width
-            assert (window.canvas.width(), window.canvas.height()) == (420, 360)
+            assert (window.canvas.width(), window.canvas.height()) == (550, 450)
             assert window.lbl_intensity_metrics.width() == window.canvas.width() + window.grp_color_scale.width()
             assert window.lbl_intensity_metrics.x() == window.canvas.x()
             assert window.lbl_system_status.width() >= 60
-            assert window.control_panel.width() == 340
+            assert window.control_panel.width() == 582
             assert window.control_panel.height() == window.centralWidget().height() - 12
             for field in (window.spn_end_val, window.spn_num_steps,
                           window.txt_storage_dir, window.txt_file_header, window.txt_scan_param):

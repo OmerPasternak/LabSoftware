@@ -42,6 +42,9 @@ from .workers import (
     ScanSequenceTask,
 )
 
+IMAGE_AXIS_RECT = (0.12, 0.08, 0.83, 0.86)
+COLOR_AXIS_RECT = (0.95, 0.08, 0.05, 0.86)
+
 
 class CameraFigureCanvas(FigureCanvasQTAgg):
     """Paint coordinate numbers as native Qt text over the fast Agg image canvas."""
@@ -101,12 +104,13 @@ class ColorScaleControls(QFrame):
 
     def resizeEvent(self, event) -> None:
         """Reposition the limit fields whenever the image row changes height."""
-        # The gradient spans 11% to 91% of the canvas height. Keep each
-        # limit three quarters of a text height inside the corresponding end.
+        # Keep each limit three quarters of a text height inside the gradient.
         if self.layout() is not None and hasattr(self, "high_spin"):
             inset = round(0.75 * self.high_spin.fontMetrics().height())
-            top = max(0, round(self.height() * 0.09 + inset - self.high_spin.height() / 2))
-            bottom = max(0, round(self.height() * 0.11 + inset - self.low_spin.height() / 2))
+            top_fraction = 1 - COLOR_AXIS_RECT[1] - COLOR_AXIS_RECT[3]
+            bottom_fraction = COLOR_AXIS_RECT[1]
+            top = max(0, round(self.height() * top_fraction + inset - self.high_spin.height() / 2))
+            bottom = max(0, round(self.height() * bottom_fraction + inset - self.low_spin.height() / 2))
             self.layout().setContentsMargins(2, top, 2, bottom)
         super().resizeEvent(event)
 
@@ -117,7 +121,7 @@ class CameraMainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("HHG Attosecond Lab - pco.edge 5.5 Camera Controller & Sequencer")
-        self.resize(864, 600)
+        self.resize(1254, 580)
 
         # Instrumentation layer
         self.camera: BaseCamera = MockPcoCamera()
@@ -239,8 +243,8 @@ class CameraMainWindow(QMainWindow):
         image_row.setSpacing(0)
 
         self.canvas = CameraFigureCanvas(self.figure)
-        self.canvas.setFixedSize(420, 360)
-        self.axis = self.figure.add_axes((0.12, 0.11, 0.83, 0.80))
+        self.canvas.setFixedSize(550, 450)
+        self.axis = self.figure.add_axes(IMAGE_AXIS_RECT)
         self.canvas.coordinate_axis = self.axis
         self.axis.tick_params(axis="both", labelbottom=False, labelleft=False, colors="#263542")
         self.canvas.mpl_connect("button_press_event", self._on_canvas_button_press)
@@ -252,7 +256,7 @@ class CameraMainWindow(QMainWindow):
         # The numbers themselves are editable and align with the bar endpoints.
         self.grp_color_scale = ColorScaleControls()
         self.grp_color_scale.setObjectName("colorScaleControls")
-        self.grp_color_scale.setFixedSize(84, 360)
+        self.grp_color_scale.setFixedSize(86, 450)
         self.grp_color_scale.setStyleSheet("""
             QFrame#colorScaleControls {
                 background-color: #ffffff;
@@ -331,7 +335,7 @@ class CameraMainWindow(QMainWindow):
         self.lbl_intensity_metrics = QLabel(
             "Pixel Intensity Metrics | Minimum: -- ADU | Maximum: -- ADU | Mean: -- ADU"
         )
-        self.lbl_intensity_metrics.setFixedWidth(504)
+        self.lbl_intensity_metrics.setFixedWidth(636)
         self.lbl_intensity_metrics.setWordWrap(True)
         self.lbl_intensity_metrics.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
         self.lbl_intensity_metrics.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -347,7 +351,7 @@ class CameraMainWindow(QMainWindow):
         # Right Pane: Vertical control panel (Compact, clean spacing)
         # =========================================================================
         self.control_panel = QWidget()
-        self.control_panel.setFixedWidth(340)
+        self.control_panel.setFixedWidth(582)
         right_pane = QVBoxLayout(self.control_panel)
         right_pane.setSpacing(6)
         right_pane.setContentsMargins(0, 0, 0, 0)
@@ -802,7 +806,7 @@ class CameraMainWindow(QMainWindow):
         self.camera = MockPcoCamera()
         self.scan_manager.camera = self.camera
         self.figure.clear()
-        self.axis = self.figure.add_axes((0.12, 0.11, 0.83, 0.80))
+        self.axis = self.figure.add_axes(IMAGE_AXIS_RECT)
         self.canvas.coordinate_axis = self.axis
         self.axis.tick_params(axis="both", labelbottom=False, labelleft=False, colors="#263542")
         self._image_artist = None
@@ -1160,7 +1164,7 @@ class CameraMainWindow(QMainWindow):
                 extent=[x0, x1, y1, y0]
             )
             self._image_artist.set_animated(True)
-            color_axis = self.figure.add_axes((0.95, 0.11, 0.05, 0.80))
+            color_axis = self.figure.add_axes(COLOR_AXIS_RECT)
             self._colorbar = self.figure.colorbar(self._image_artist, cax=color_axis)
             # The scale endpoints are the adjacent editable spinboxes, not raster labels.
             self._colorbar.set_ticks([])
