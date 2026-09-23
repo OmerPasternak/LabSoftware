@@ -387,7 +387,8 @@ class CameraMainWindow(QMainWindow):
         lay_cam.setSpacing(4)
         lay_cam.setContentsMargins(6, 8, 6, 6)
 
-        lay_cam.addWidget(QLabel("Exp (ms):"), 0, 0)
+        self.lbl_exposure = QLabel("Exposure (ms, 0.5–10,000):")
+        lay_cam.addWidget(self.lbl_exposure, 0, 0)
         self.spn_exposure = QDoubleSpinBox()
         self.spn_exposure.setMinimumWidth(84)
         self.spn_exposure.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
@@ -397,7 +398,7 @@ class CameraMainWindow(QMainWindow):
         self.spn_exposure.valueChanged.connect(self._on_exposure_changed)
         lay_cam.addWidget(self.spn_exposure, 0, 1)
 
-        lay_cam.addWidget(QLabel("N:"), 0, 2)
+        lay_cam.addWidget(QLabel("Frames/step:"), 0, 2)
         self.spn_frames = QSpinBox()
         self.spn_frames.setMinimumWidth(60)
         self.spn_frames.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
@@ -537,7 +538,7 @@ class CameraMainWindow(QMainWindow):
         self.spn_step_size.valueChanged.connect(self._on_step_size_changed)
         lay_exp.addWidget(self.spn_step_size, 3, 0)
 
-        lay_exp.addWidget(QLabel("N:"), 2, 1)
+        lay_exp.addWidget(QLabel("Steps:"), 2, 1)
         self.spn_num_steps = QSpinBox()
         self.spn_num_steps.setMinimumWidth(70)
         self.spn_num_steps.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
@@ -769,7 +770,7 @@ class CameraMainWindow(QMainWindow):
                 self.cmb_readout_mode.setPlaceholderText(f"{actual_mode.name.replace('_', ' ').title()} (current)")
             self.cmb_readout_mode.setCurrentIndex(index)
             self.cmb_readout_mode.blockSignals(False)
-            self.spn_exposure.setMaximum(100.0 if actual_mode == ReadoutMode.GLOBAL_SHUTTER else 10000.0)
+            self._set_exposure_mode_limit(actual_mode)
 
     def _on_camera_connection_error(self, error: str) -> None:
         source_name = self.cmb_camera_source.currentText()
@@ -948,10 +949,17 @@ class CameraMainWindow(QMainWindow):
         self.active_mode_task.start()
 
     def _on_mode_applied(self, mode: ReadoutMode) -> None:
-        self.spn_exposure.setMaximum(100.0 if mode == ReadoutMode.GLOBAL_SHUTTER else 10000.0)
+        self._set_exposure_mode_limit(mode)
         self._append_log(f"[READOUT MODE] Camera successfully configured to {mode.name}.")
         self.lbl_system_status.setText(f"Status: Mode Active ({mode.name})")
         self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #198754; padding-left: 8px;")
+
+    def _set_exposure_mode_limit(self, mode: ReadoutMode) -> None:
+        """Show the active readout mode's allowed exposure range in milliseconds."""
+        global_shutter = mode == ReadoutMode.GLOBAL_SHUTTER
+        self.spn_exposure.setMaximum(100.0 if global_shutter else 10000.0)
+        maximum_label = "100" if global_shutter else "10,000"
+        self.lbl_exposure.setText(f"Exposure (ms, 0.5–{maximum_label}):")
 
     def _on_mode_error(self, error: str) -> None:
         self._append_log(f"[READOUT MODE ERROR] {error}")

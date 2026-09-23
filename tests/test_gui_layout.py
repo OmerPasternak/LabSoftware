@@ -5,7 +5,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QLabel
 
 from hhg_control.drivers.base_camera import ReadoutMode
 from hhg_control.drivers.mock_camera import MockPcoCamera
@@ -89,6 +89,27 @@ def test_gui_offers_actual_global_shutter_mode():
         window.close()
 
 
+def test_camera_controls_name_counts_and_show_exposure_range():
+    """Control labels describe frame and scan counts and the active exposure limit."""
+    app = QApplication.instance() or QApplication([])
+    window = CameraMainWindow()
+    try:
+        window.show()
+        app.processEvents()
+        labels = {label.text() for label in window.findChildren(QLabel)}
+        assert window.lbl_exposure.text() == "Exposure (ms, 0.5–10,000):"
+        assert "Frames/step:" in labels
+        assert "Steps:" in labels
+        assert "N:" not in labels
+        assert window.lbl_exposure.geometry().right() < window.spn_exposure.geometry().left()
+
+        window._set_exposure_mode_limit(ReadoutMode.GLOBAL_SHUTTER)
+        assert window.lbl_exposure.text() == "Exposure (ms, 0.5–100):"
+        assert window.spn_exposure.maximum() == 100.0
+    finally:
+        window.close()
+
+
 def test_gui_connection_reflects_actual_mode_without_implicit_reboot(monkeypatch):
     app = QApplication.instance() or QApplication([])
     window = CameraMainWindow()
@@ -101,6 +122,7 @@ def test_gui_connection_reflects_actual_mode_without_implicit_reboot(monkeypatch
         window._on_camera_connected(camera, True, 0.0)
         assert window.cmb_readout_mode.currentData() == ReadoutMode.GLOBAL_SHUTTER
         assert window.spn_exposure.maximum() == 100.0
+        assert window.lbl_exposure.text() == "Exposure (ms, 0.5–100):"
         assert not started
     finally:
         camera.close()
