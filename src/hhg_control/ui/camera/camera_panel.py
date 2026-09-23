@@ -96,6 +96,20 @@ class CameraFigureCanvas(FigureCanvasQTAgg):
             painter.end()
 
 
+class ColorScaleControls(QFrame):
+    """Center editable ADU limits beside the corresponding gradient endpoints."""
+
+    def resizeEvent(self, event) -> None:
+        """Reposition the limit fields whenever the image row changes height."""
+        # The gradient spans 11% to 91% of the canvas height. Keep each
+        # spinbox centered on its end as the image row changes height.
+        if self.layout() is not None and hasattr(self, "high_spin"):
+            top = max(0, round(self.height() * 0.09 - self.high_spin.height() / 2))
+            bottom = max(0, round(self.height() * 0.11 - self.low_spin.height() / 2))
+            self.layout().setContentsMargins(2, top, 2, bottom)
+        super().resizeEvent(event)
+
+
 class CameraMainWindow(QMainWindow):
     """Primary Application Window for HHG Laboratory Camera Control."""
 
@@ -236,7 +250,7 @@ class CameraMainWindow(QMainWindow):
         image_row.addWidget(self.canvas, stretch=1)
 
         # The numbers themselves are editable and align with the bar endpoints.
-        self.grp_color_scale = QFrame()
+        self.grp_color_scale = ColorScaleControls()
         self.grp_color_scale.setObjectName("colorScaleControls")
         self.grp_color_scale.setFixedWidth(84)
         self.grp_color_scale.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
@@ -293,6 +307,8 @@ class CameraMainWindow(QMainWindow):
         self.spn_clim_low.setKeyboardTracking(False)
         self.spn_clim_low.valueChanged.connect(self._on_clim_changed)
         self.spn_clim_low.editingFinished.connect(self._on_clim_changed)
+        self.grp_color_scale.high_spin = self.spn_clim_high
+        self.grp_color_scale.low_spin = self.spn_clim_low
 
 
         btn_auto_clim = QPushButton("Auto")
@@ -323,7 +339,7 @@ class CameraMainWindow(QMainWindow):
             "border: 1px solid #dee2e6; border-radius: 3px; color: #212529;"
         )
         left_pane.addWidget(self.lbl_intensity_metrics)
-        root_layout.addLayout(left_pane, stretch=1)
+        root_layout.addLayout(left_pane, stretch=2)
 
         # =========================================================================
         # Right Pane: Vertical control panel (Compact, clean spacing)
@@ -338,23 +354,29 @@ class CameraMainWindow(QMainWindow):
         lay_cam.setSpacing(4)
         lay_cam.setContentsMargins(6, 8, 6, 6)
 
-        lay_cam.addWidget(QLabel("Exposure (ms):"), 0, 0)
+        lay_cam.addWidget(QLabel("Exp. (ms):"), 0, 0)
         self.spn_exposure = QDoubleSpinBox()
+        self.spn_exposure.setMinimumWidth(84)
+        self.spn_exposure.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.spn_exposure.setRange(0.5, 10000.0)
         self.spn_exposure.setValue(10.0)
         self.spn_exposure.setDecimals(2)
         self.spn_exposure.valueChanged.connect(self._on_exposure_changed)
         lay_cam.addWidget(self.spn_exposure, 0, 1)
 
-        lay_cam.addWidget(QLabel("Frames/Step:"), 0, 2)
+        lay_cam.addWidget(QLabel("Frames:"), 0, 2)
         self.spn_frames = QSpinBox()
+        self.spn_frames.setMinimumWidth(60)
+        self.spn_frames.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.spn_frames.setRange(1, 1000)
         self.spn_frames.setValue(5)
         lay_cam.addWidget(self.spn_frames, 0, 3)
 
         # Readout mode selector (row 1)
-        lay_cam.addWidget(QLabel("Readout Mode:"), 1, 0)
+        lay_cam.addWidget(QLabel("Mode:"), 1, 0)
         self.cmb_readout_mode = QComboBox()
+        self.cmb_readout_mode.setMinimumWidth(180)
+        self.cmb_readout_mode.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.cmb_readout_mode.addItem("Rolling Shutter", userData=ReadoutMode.ROLLING_SHUTTER)
         self.cmb_readout_mode.addItem("Global Reset (HHG)", userData=ReadoutMode.GLOBAL_RESET)
         self.cmb_readout_mode.setCurrentIndex(0)
@@ -369,6 +391,8 @@ class CameraMainWindow(QMainWindow):
         # ROI spinboxes (rows 2 & 3) — value changes immediately redraw ROI rectangle
         lay_cam.addWidget(QLabel("X:"), 2, 0)
         self.spn_roi_x0 = QSpinBox()
+        self.spn_roi_x0.setMinimumWidth(60)
+        self.spn_roi_x0.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.spn_roi_x0.setRange(0, 2496)
         self.spn_roi_x0.setSingleStep(4)
         self.spn_roi_x0.setValue(0)
@@ -377,6 +401,8 @@ class CameraMainWindow(QMainWindow):
         lay_cam.addWidget(self.spn_roi_x0, 2, 1)
 
         self.spn_roi_x1 = QSpinBox()
+        self.spn_roi_x1.setMinimumWidth(60)
+        self.spn_roi_x1.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.spn_roi_x1.setRange(64, 2560)
         self.spn_roi_x1.setSingleStep(4)
         self.spn_roi_x1.setValue(2560)
@@ -386,6 +412,8 @@ class CameraMainWindow(QMainWindow):
 
         lay_cam.addWidget(QLabel("Y (sym):"), 3, 0)
         self.spn_roi_y0 = QSpinBox()
+        self.spn_roi_y0.setMinimumWidth(60)
+        self.spn_roi_y0.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.spn_roi_y0.setRange(0, 1072)
         self.spn_roi_y0.setValue(0)
         self.spn_roi_y0.setToolTip("ROI Y Start — mirrored around sensor centre Y=1080")
@@ -393,6 +421,8 @@ class CameraMainWindow(QMainWindow):
         lay_cam.addWidget(self.spn_roi_y0, 3, 1)
 
         self.spn_roi_y1 = QSpinBox()
+        self.spn_roi_y1.setMinimumWidth(60)
+        self.spn_roi_y1.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.spn_roi_y1.setRange(1088, 2160)
         self.spn_roi_y1.setValue(2160)
         self.spn_roi_y1.setToolTip("ROI Y End — auto-set symmetrically")
@@ -400,6 +430,7 @@ class CameraMainWindow(QMainWindow):
         lay_cam.addWidget(self.spn_roi_y1, 3, 2, 1, 2)
 
         lbl_roi_hint = QLabel("Y centered on 1080 (pco.edge). X in 4-px steps.")
+        lbl_roi_hint.setWordWrap(True)
         lbl_roi_hint.setStyleSheet("font-size: 9px; color: #6c757d; font-style: italic;")
         lay_cam.addWidget(lbl_roi_hint, 4, 0, 1, 4)
 
@@ -433,6 +464,8 @@ class CameraMainWindow(QMainWindow):
 
         lay_exp.addWidget(QLabel("Start:"), 0, 0)
         self.spn_start_val = QDoubleSpinBox()
+        self.spn_start_val.setMinimumWidth(95)
+        self.spn_start_val.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.spn_start_val.setRange(-1e6, 1e6)
         self.spn_start_val.setDecimals(4)
         self.spn_start_val.setValue(0.0)
@@ -441,6 +474,8 @@ class CameraMainWindow(QMainWindow):
 
         lay_exp.addWidget(QLabel("End:"), 0, 2)
         self.spn_end_val = QDoubleSpinBox()
+        self.spn_end_val.setMinimumWidth(95)
+        self.spn_end_val.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.spn_end_val.setRange(-1e6, 1e6)
         self.spn_end_val.setDecimals(4)
         self.spn_end_val.setValue(0.4500)
@@ -449,14 +484,18 @@ class CameraMainWindow(QMainWindow):
 
         lay_exp.addWidget(QLabel("Step:"), 1, 0)
         self.spn_step_size = QDoubleSpinBox()
+        self.spn_step_size.setMinimumWidth(95)
+        self.spn_step_size.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.spn_step_size.setRange(-1e6, 1e6)
         self.spn_step_size.setDecimals(4)
         self.spn_step_size.setValue(0.0500)
         self.spn_step_size.valueChanged.connect(self._on_step_size_changed)
         lay_exp.addWidget(self.spn_step_size, 1, 1)
 
-        lay_exp.addWidget(QLabel("N Steps:"), 1, 2)
+        lay_exp.addWidget(QLabel("Steps:"), 1, 2)
         self.spn_num_steps = QSpinBox()
+        self.spn_num_steps.setMinimumWidth(70)
+        self.spn_num_steps.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.spn_num_steps.setRange(2, 100000)
         self.spn_num_steps.setValue(10)
         self.spn_num_steps.valueChanged.connect(self._on_num_steps_changed)
@@ -533,7 +572,7 @@ class CameraMainWindow(QMainWindow):
         right_pane.addWidget(grp_storage)
         right_pane.addStretch(1)
 
-        root_layout.addLayout(right_pane, stretch=0)
+        root_layout.addLayout(right_pane, stretch=1)
 
         self._update_progress_display()
 
