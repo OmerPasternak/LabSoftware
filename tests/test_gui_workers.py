@@ -294,10 +294,27 @@ def test_typing_upper_y_edge_in_start_field_keeps_centered_mock_roi(qtbot):
     window.spn_roi_y0.lineEdit().selectAll()
 
     qtbot.keyClicks(window.spn_roi_y0, "1116")
+    assert window.spn_roi_y0.lineEdit().text() == "1116"
+    assert window.spn_roi_y1.value() == 2160
     qtbot.keyPress(window.spn_roi_y0, Qt.Key.Key_Return)
 
     assert (window.spn_roi_y0.value(), window.spn_roi_y1.value()) == (1044, 1116)
     window.camera.validate_roi((0, 1044, 2560, 1116))
+
+
+def test_x_end_edit_updates_start_only_after_complete_number(qtbot):
+    """Partial typed X bounds must not shift the opposite ROI edge."""
+    window = CameraMainWindow()
+    qtbot.addWidget(window)
+    window.spn_roi_x0.setValue(1200)
+    window.spn_roi_x1.lineEdit().selectAll()
+
+    qtbot.keyClicks(window.spn_roi_x1, "1116")
+    assert window.spn_roi_x0.value() == 1200
+    qtbot.keyPress(window.spn_roi_x1, Qt.Key.Key_Return)
+
+    assert (window.spn_roi_x0.value(), window.spn_roi_x1.value()) == (1052, 1116)
+    window.camera.validate_roi((1052, 0, 1116, 2160))
 
 
 def test_mock_gui_live_start_stop_keeps_camera_idle(qtbot, tmp_path):
