@@ -67,6 +67,25 @@ class CameraModeTask(QThread):
             self.error_occurred.emit(str(exc))
 
 
+class CameraRoiTask(QThread):
+    """Apply sensor-pixel ROI after live acquisition has stopped."""
+
+    roi_applied = pyqtSignal(object)
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self, scan_manager: CameraScanManager, roi: tuple[int, int, int, int]) -> None:
+        super().__init__()
+        self.scan_manager = scan_manager
+        self.roi = roi
+
+    def run(self) -> None:
+        try:
+            self.scan_manager.set_roi(self.roi)
+            self.roi_applied.emit(self.roi)
+        except Exception as exc:
+            self.error_occurred.emit(str(exc))
+
+
 class PreviewTask(QThread):
     """Acquire one preview frame without blocking the GUI event loop."""
 

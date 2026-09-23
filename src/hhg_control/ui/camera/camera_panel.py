@@ -26,7 +26,6 @@ import matplotlib
 matplotlib.use("QtAgg")
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
-from matplotlib.widgets import RectangleSelector
 import matplotlib.patches as mpatches
 
 from hhg_control.drivers.base_camera import BaseCamera, ReadoutMode
@@ -35,6 +34,7 @@ from hhg_control.sequencer.scan_manager import CameraScanManager
 from .workers import (
     CameraConnectTask,
     CameraModeTask,
+    CameraRoiTask,
     LiveStreamTask,
     PreviewTask,
     ScanSequenceTask,
@@ -61,6 +61,7 @@ class CameraMainWindow(QMainWindow):
         self.active_live_task: Optional[LiveStreamTask] = None
         self.active_connect_task: Optional[CameraConnectTask] = None
         self.active_mode_task: Optional[CameraModeTask] = None
+        self.active_roi_task: Optional[CameraRoiTask] = None
 
         # State tracking
         self._is_live_active: bool = False
@@ -82,8 +83,12 @@ class CameraMainWindow(QMainWindow):
         self._colorbar = None
         self._timestamp_artist = None
         self._plot_background = None
-        self._roi_selector: Optional[RectangleSelector] = None
         self._roi_patch = None           # persistent Rectangle patch drawn when ROI is applied or edited
+        self._roi_drag_patch = None
+        self._roi_drag_start: Optional[tuple[float, float]] = None
+        self._roi_change_pending = False
+        self._resume_live_after_roi = False
+        self._roi_change_full_sensor = False
         self._clim_low: int = 0          # current lower color limit (ADU)
         self._clim_high: int = 65535     # current upper color limit (ADU)
         self._current_displayed_roi: Optional[tuple[int, int, int, int]] = None
@@ -114,7 +119,9 @@ class CameraMainWindow(QMainWindow):
         self.cmb_camera_source.addItem("Simulated", userData="simulated")
         self.cmb_camera_source.addItem("Physical pco.edge", userData="physical")
         self.cmb_camera_source.setToolTip(
-            "Select the camera explicitly. Physical-camera failures never fall back to synthetic data."
+            "Simulated generates synthetic frames without hardware. Physical pco.edge "
+            "tries the USB 3.0 camera through the pco SDK when GO is pressed; "
+            "connection failures never fall back to simulated data."
         )
         top_bar.addWidget(self.cmb_camera_source)
 
@@ -160,6 +167,7 @@ class CameraMainWindow(QMainWindow):
         self.axis = self.figure.add_subplot(111)
         self.canvas.mpl_connect("button_press_event", self._on_canvas_button_press)
         self.canvas.mpl_connect("button_release_event", self._on_canvas_button_release)
+        self.canvas.mpl_connect("motion_notify_event", self._on_canvas_motion)
         self.canvas.mpl_connect("draw_event", self._on_canvas_draw)
         image_row.addWidget(self.canvas)
 
@@ -562,6 +570,7 @@ class CameraMainWindow(QMainWindow):
     def _on_stop_clicked(self) -> None:
         """Global Stop: halts live view or gracefully aborts in-progress scan."""
         self._append_log("[STOP] Stop button pressed.")
+        self._resume_live_after_roi = False
         if self._is_live_active:
             self._stop_live()
 
@@ -825,13 +834,48 @@ class CameraMainWindow(QMainWindow):
             self._set_clim(int(self._last_frame.min()), int(self._last_frame.max()))
 
     def _on_canvas_button_press(self, event) -> None:
-        """Track when user starts dragging an ROI to pause live frame blitting and eliminate lag."""
-        if getattr(self, "btn_draw_roi", None) and self.btn_draw_roi.isChecked():
-            self._is_dragging_roi = True
+        """Start a lightweight ROI overlay while pausing live-frame delivery."""
+        if not self.btn_draw_roi.isChecked() or event.inaxes is not self.axis:
+            return
+        if event.xdata is None or event.ydata is None or event.button != 1:
+            return
+        self._roi_drag_start = (float(event.xdata), float(event.ydata))
+        self._is_dragging_roi = True
+        self._roi_drag_patch = mpatches.Rectangle(
+            self._roi_drag_start, 0, 0, linewidth=1.5,
+            edgecolor="red", facecolor="none", linestyle="--", zorder=6,
+        )
+        self._roi_drag_patch.set_animated(True)
+        self.axis.add_patch(self._roi_drag_patch)
+        self._blit_frame()
+
+    def _on_canvas_motion(self, event) -> None:
+        """Redraw only the changing drag outline over the current image."""
+        if not self._is_dragging_roi or self._roi_drag_start is None:
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+        start_x, start_y = self._roi_drag_start
+        end_x, end_y = float(event.xdata), float(event.ydata)
+        self._roi_drag_patch.set_bounds(
+            min(start_x, end_x), min(start_y, end_y),
+            abs(end_x - start_x), abs(end_y - start_y),
+        )
+        self._blit_frame()
 
     def _on_canvas_button_release(self, event) -> None:
-        """Resume live frame blitting after user finishes dragging an ROI."""
+        """Commit a drawn ROI and resume live acquisition after the overlay clears."""
+        start = self._roi_drag_start
+        end = (event.xdata, event.ydata) if event is not None else (None, None)
         self._is_dragging_roi = False
+        self._roi_drag_start = None
+        if self._roi_drag_patch is not None:
+            self._roi_drag_patch.remove()
+            self._roi_drag_patch = None
+        if start is not None and end[0] is not None and end[1] is not None:
+            self._on_roi_drawn(start[0], start[1], float(end[0]), float(end[1]))
+        else:
+            self._blit_frame()
         if self.active_live_task is not None:
             self.active_live_task.acknowledge_frame()
 
@@ -840,16 +884,21 @@ class CameraMainWindow(QMainWindow):
 
     def _on_canvas_draw(self, event) -> None:
         """Cache the static plot after a full draw, then paint the current frame."""
-        if event.canvas is self.canvas and self._image_artist is not None:
+        if event.canvas is self.canvas:
             self._plot_background = self.canvas.copy_from_bbox(self.axis.bbox)
             self._blit_frame()
 
     def _blit_frame(self) -> None:
         """Redraw only the image and timestamp over the cached plot background."""
-        if self._plot_background is None or self._image_artist is None:
+        if self._plot_background is None:
             return
         self.canvas.restore_region(self._plot_background)
-        self.axis.draw_artist(self._image_artist)
+        if self._image_artist is not None:
+            self.axis.draw_artist(self._image_artist)
+        if self._roi_patch is not None:
+            self.axis.draw_artist(self._roi_patch)
+        if self._roi_drag_patch is not None:
+            self.axis.draw_artist(self._roi_drag_patch)
         if self._timestamp_artist is not None:
             self.axis.draw_artist(self._timestamp_artist)
         self.canvas.blit(self.axis.bbox)
@@ -907,21 +956,9 @@ class CameraMainWindow(QMainWindow):
             self._colorbar = self.figure.colorbar(self._image_artist, ax=self.axis, fraction=0.046, pad=0.04)
             self._colorbar.ax.tick_params(labelsize=8)
 
-            # Rectangle selector with no fill color, no handles, and clean outline
-            self._roi_selector = RectangleSelector(
-                self.axis,
-                self._on_roi_drawn,
-                useblit=True,
-                button=[1],
-                minspanx=5,
-                minspany=5,
-                spancoords="data",
-                interactive=False,
-                props=dict(facecolor="none", edgecolor="red", linewidth=1.5, linestyle="-", fill=False),
-                handle_props=dict(alpha=0, marker=""),
-            )
-            self._roi_selector.set_active(False)
-            self._roi_patch = None
+            if self._roi_patch is not None:
+                self._roi_patch = None
+                self._sync_roi_patch_from_spinboxes()
             self._current_displayed_roi = (x0, y0, x1, y1)
             self.axis.set_aspect("auto")
             self.axis.set_xlim(x0, x1)
@@ -1043,19 +1080,15 @@ class CameraMainWindow(QMainWindow):
         self._sync_roi_patch_from_spinboxes()
 
     def _toggle_draw_roi(self, checked: bool) -> None:
-        if self._roi_selector is not None:
-            self._roi_selector.set_active(checked)
-            if checked:
-                self._append_log("[ROI] Draw mode active: Drag a rectangle on the camera image.")
+        if checked:
+            self._append_log("[ROI] Draw mode active: Drag a rectangle on the camera image.")
+        else:
+            self._on_canvas_button_release(None)
 
-    def _on_roi_drawn(self, eclick, erelease) -> None:
+    def _on_roi_drawn(self, start_x: float, start_y: float, end_x: float, end_y: float) -> None:
         """Handle rectangle drawn on image: expand Y symmetrically around 1080 and snap X."""
-        self._is_dragging_roi = False
-        if eclick.xdata is None or erelease.xdata is None or eclick.ydata is None or erelease.ydata is None:
-            return
-
-        x_min, x_max = sorted([float(eclick.xdata), float(erelease.xdata)])
-        y_min, y_max = sorted([float(eclick.ydata), float(erelease.ydata)])
+        x_min, x_max = sorted([start_x, end_x])
+        y_min, y_max = sorted([start_y, end_y])
 
         # Outer bound to 4-pixel steps so no user-drawn area is clipped
         x0 = int(np.floor(x_min / 4.0) * 4)
@@ -1082,10 +1115,6 @@ class CameraMainWindow(QMainWindow):
         finally:
             self._is_updating_roi = False
 
-        # Clear the temporary selector rectangle to remove drag handles
-        if self._roi_selector is not None:
-            self._roi_selector.clear()
-
         # Display the persistent minimal symmetric ROI outline
         self._draw_roi_patch(x0, y0, x1, y1)
 
@@ -1099,46 +1128,35 @@ class CameraMainWindow(QMainWindow):
         self._is_dragging_roi = False
         if self.active_live_task is not None:
             self.active_live_task.acknowledge_frame()
-        if self._roi_selector is not None:
-            self._roi_selector.clear()
-            self._roi_selector.set_active(False)
+        self._on_canvas_button_release(None)
         self.btn_draw_roi.blockSignals(True)
         self.btn_draw_roi.setChecked(False)
         self.btn_draw_roi.blockSignals(False)
 
     def _draw_roi_patch(self, x0: int, y0: int, x1: int, y1: int) -> None:
         """Stamp a persistent thin red outline rectangle onto the axis."""
-        if self._roi_patch is not None:
-            try:
-                self._roi_patch.remove()
-            except (ValueError, AttributeError):
-                pass
-            self._roi_patch = None
-
         width = x1 - x0
         height = y1 - y0
-        self._roi_patch = mpatches.Rectangle(
-            (x0, y0), width, height,
-            linewidth=1.5, edgecolor="red", facecolor="none",
-            linestyle="-", zorder=5, fill=False
-        )
-        self.axis.add_patch(self._roi_patch)
-        self._plot_background = None
+        if self._roi_patch is None:
+            self._roi_patch = mpatches.Rectangle(
+                (x0, y0), width, height,
+                linewidth=1.5, edgecolor="red", facecolor="none",
+                linestyle="-", zorder=5, fill=False
+            )
+            self._roi_patch.set_animated(True)
+            self.axis.add_patch(self._roi_patch)
+        else:
+            self._roi_patch.set_bounds(x0, y0, width, height)
         if self._image_artist is None:
             self.axis.set_xlim(0, 2560)
             self.axis.set_ylim(2160, 0)
             self.axis.set_aspect("auto")
-        self.canvas.draw_idle()
+            self.canvas.draw_idle()
+        else:
+            self._blit_frame()
 
     def _apply_roi(self) -> None:
-        """Configure hardware ROI on sensor; pixels outside are shut off and monitor zooms in."""
-        if not self.camera.is_connected:
-            self._connect_camera()
-
-        was_live = self._is_live_active
-        if was_live:
-            self._stop_live()
-
+        """Queue a valid sensor-pixel ROI change after live acquisition stops."""
         # Snap to valid hardware constraints
         x0 = (self.spn_roi_x0.value() // 4) * 4
         x1 = ((self.spn_roi_x1.value() + 3) // 4) * 4
@@ -1157,50 +1175,91 @@ class CameraMainWindow(QMainWindow):
         finally:
             self._is_updating_roi = False
 
-        try:
-            self.scan_manager.set_roi((x0, y0, x1, y1))
-            self._current_displayed_roi = None
+        self._request_roi_change((x0, y0, x1, y1), full_sensor=False)
+
+    def _reset_full_sensor(self) -> None:
+        """Queue full-sensor readout while preserving the configured ROI controls."""
+        self._request_roi_change((0, 0, 2560, 2160), full_sensor=True)
+
+    def _request_roi_change(self, roi: tuple[int, int, int, int], *, full_sensor: bool) -> None:
+        """Serialize ROI changes with live acquisition and reject duplicate clicks."""
+        if self._roi_change_pending:
+            return
+        if not self.camera.is_connected:
+            self._append_log("[ROI] Connect the selected camera with GO before changing sensor ROI.")
+            return
+        if self.active_scan_task is not None and self.active_scan_task.isRunning():
+            self._append_log("[ROI] Cannot change sensor ROI during a measurement scan.")
+            return
+
+        self._roi_change_pending = True
+        self._roi_change_full_sensor = full_sensor
+        self._resume_live_after_roi = self._is_live_active
+        self.btn_apply_roi.setEnabled(False)
+        self.btn_full_sensor.setEnabled(False)
+        self.btn_draw_roi.setEnabled(False)
+        if self.active_live_task is not None:
+            self._stop_live(after_stop=lambda: self._start_roi_task(roi))
+        else:
+            self._start_roi_task(roi)
+
+    def _start_roi_task(self, roi: tuple[int, int, int, int]) -> None:
+        """Apply a ROI in a worker after the live camera buffer is idle."""
+        if self._closing:
+            self._roi_change_pending = False
+            self.close()
+            return
+        self.lbl_system_status.setText("Status: Changing sensor ROI...")
+        self.active_roi_task = CameraRoiTask(self.scan_manager, roi)
+        self.active_roi_task.roi_applied.connect(self._on_roi_task_applied)
+        self.active_roi_task.error_occurred.connect(self._on_roi_task_error)
+        self.active_roi_task.finished.connect(self._on_roi_task_finished)
+        self.active_roi_task.start()
+
+    def _on_roi_task_applied(self, roi: tuple[int, int, int, int]) -> None:
+        """Update the display outline after the camera confirms the new ROI."""
+        self._current_displayed_roi = None
+        if self._roi_change_full_sensor:
             self._append_log(
-                f"[ROI APPLIED] Sensor readout set to X:[{x0}, {x1}], Y:[{y0}, {y1}] ({x1-x0}x{y1-y0} px).\n"
-                f"              Outside pixels shut off. Display zoomed to ROI."
+                "[FULL SENSOR] Switched readout to full 2560x2160. "
+                "Configured ROI preserved; Apply ROI reactivates it."
+            )
+            self._sync_roi_patch_from_spinboxes()
+        else:
+            x0, y0, x1, y1 = roi
+            self._append_log(
+                f"[ROI APPLIED] Sensor readout set to X:[{x0}, {x1}], "
+                f"Y:[{y0}, {y1}] ({x1-x0}x{y1-y0} px)."
             )
             self._deactivate_draw_roi()
             self._draw_roi_patch(x0, y0, x1, y1)
             self._clear_paused_scan("Hardware ROI modified")
-        except Exception as exc:
-            QMessageBox.warning(self, "Invalid Hardware ROI", str(exc))
-        finally:
-            if was_live:
-                self._start_live()
-            else:
-                self._capture_single_preview()
+        self.lbl_system_status.setText("Status: Sensor ROI updated")
 
-    def _reset_full_sensor(self) -> None:
-        """Switch camera readout to full 2560×2160 sensor without touching the configured ROI."""
-        if not self.camera.is_connected:
-            self._connect_camera()
+    def _on_roi_task_error(self, error: str) -> None:
+        """Report a rejected ROI while leaving the camera's prior setting intact."""
+        self._append_log(f"[ROI ERROR] {error}")
+        self.lbl_system_status.setText("Status: Sensor ROI change failed")
+        QMessageBox.warning(self, "Sensor ROI Change Failed", error)
 
-        was_live = self._is_live_active
-        if was_live:
-            self._stop_live()
-
-        try:
-            # Send full-sensor ROI to camera hardware
-            self.scan_manager.set_roi((0, 0, 2560, 2160))
-            self._current_displayed_roi = None
-            self._append_log(
-                "[FULL SENSOR] Switched readout to full 2560×2160. "
-                "Configured ROI preserved — click 'Apply Hardware ROI' to reactivate it."
-            )
-            # Retain and display the configured ROI patch on the full sensor
-            self._sync_roi_patch_from_spinboxes()
-        except Exception as exc:
-            QMessageBox.warning(self, "Error switching to full sensor", str(exc))
-        finally:
-            if was_live:
-                self._start_live()
-            else:
-                self._capture_single_preview()
+    def _on_roi_task_finished(self) -> None:
+        """Restore controls and preview only after the ROI worker has exited."""
+        task = self.active_roi_task
+        self.active_roi_task = None
+        if task is not None:
+            task.deleteLater()
+        self._roi_change_pending = False
+        self.btn_apply_roi.setEnabled(True)
+        self.btn_full_sensor.setEnabled(True)
+        self.btn_draw_roi.setEnabled(True)
+        resume_live = self._resume_live_after_roi
+        self._resume_live_after_roi = False
+        if self._closing:
+            self.close()
+        elif resume_live:
+            self._start_live()
+        else:
+            self._capture_single_preview()
 
     # =========================================================================
     # Two-Way Automatic Calculation & Display Sync for Experiment Parameters
@@ -1417,9 +1476,9 @@ class CameraMainWindow(QMainWindow):
             self.spn_end_val.setEnabled(True)
             self.spn_step_size.setEnabled(True)
             self.spn_num_steps.setEnabled(True)
-            self.btn_apply_roi.setEnabled(True)
-            self.btn_full_sensor.setEnabled(True)
-            self.btn_draw_roi.setEnabled(True)
+            self.btn_apply_roi.setEnabled(not self._roi_change_pending)
+            self.btn_full_sensor.setEnabled(not self._roi_change_pending)
+            self.btn_draw_roi.setEnabled(not self._roi_change_pending)
 
     def _on_scan_step_started(
         self,
@@ -1569,6 +1628,11 @@ class CameraMainWindow(QMainWindow):
             return
 
         if self.active_mode_task is not None and self.active_mode_task.isRunning():
+            self._closing = True
+            event.ignore()
+            return
+
+        if self.active_roi_task is not None and self.active_roi_task.isRunning():
             self._closing = True
             event.ignore()
             return
