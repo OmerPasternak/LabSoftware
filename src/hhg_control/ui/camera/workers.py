@@ -48,6 +48,26 @@ class CameraConnectTask(QThread):
             self.error_occurred.emit(str(exc))
 
 
+class CameraDisconnectTask(QThread):
+    """Close the prior camera off the GUI thread before source selection changes."""
+
+    disconnected = pyqtSignal()
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self, camera: BaseCamera) -> None:
+        super().__init__()
+        self.camera = camera
+
+    def run(self) -> None:
+        try:
+            self.camera.close()
+            if self.camera.is_connected:
+                raise RuntimeError("Camera still reports connected after close.")
+            self.disconnected.emit()
+        except Exception as exc:
+            self.error_occurred.emit(str(exc))
+
+
 class CameraModeTask(QThread):
     """Apply a camera readout mode, including any required firmware reboot."""
 
@@ -114,7 +134,8 @@ class LiveStreamTask(QThread):
         super().__init__()
         self.scan_manager = scan_manager
         self.target_fps = target_fps
-        self._running = False
+        # Set before QThread.start(); STOP may arrive before run() is scheduled.
+        self._running = True
         self._gui_ready = Event()
         self._gui_ready.set()
 
@@ -128,7 +149,8 @@ class LiveStreamTask(QThread):
         self._gui_ready.set()
 
     def run(self) -> None:
-        self._running = True
+        if not self._running:
+            return
         min_interval = 1.0 / self.target_fps
         try:
             self.scan_manager.start_live(buffer_size=4)

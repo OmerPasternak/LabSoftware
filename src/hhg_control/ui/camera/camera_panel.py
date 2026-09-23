@@ -1,7 +1,7 @@
 """
 PyQt6 Graphical User Interface for pco.edge 5.5 sCMOS Camera Control and Scan Sequencer.
 Implements top-left Go/Stop controls, horizontal widescreen layout with side control panel,
-fixed external color scale control box (docked beside the image colorbar),
+compact color-scale controls over the image's top-right corner,
 source-labelled frame timestamps, and hardware-constrained symmetrical ROI.
 """
 
@@ -33,6 +33,7 @@ from hhg_control.drivers.mock_camera import MockPcoCamera
 from hhg_control.sequencer.scan_manager import CameraScanManager
 from .workers import (
     CameraConnectTask,
+    CameraDisconnectTask,
     CameraModeTask,
     CameraRoiTask,
     LiveStreamTask,
@@ -60,6 +61,7 @@ class CameraMainWindow(QMainWindow):
         self.active_preview_task: Optional[PreviewTask] = None
         self.active_live_task: Optional[LiveStreamTask] = None
         self.active_connect_task: Optional[CameraConnectTask] = None
+        self.active_disconnect_task: Optional[CameraDisconnectTask] = None
         self.active_mode_task: Optional[CameraModeTask] = None
         self.active_roi_task: Optional[CameraRoiTask] = None
 
@@ -89,6 +91,8 @@ class CameraMainWindow(QMainWindow):
         self._roi_change_pending = False
         self._resume_live_after_roi = False
         self._roi_change_full_sensor = False
+        self._connected_source: Optional[str] = None
+        self._source_switch_pending = False
         self._clim_low: int = 0          # current lower color limit (ADU)
         self._clim_high: int = 65535     # current upper color limit (ADU)
         self._current_displayed_roi: Optional[tuple[int, int, int, int]] = None
@@ -111,7 +115,7 @@ class CameraMainWindow(QMainWindow):
         left_pane = QVBoxLayout()
         left_pane.setSpacing(4)
 
-        # Top bar: GO / STOP / Status + Color Scale
+        # Top bar: GO / STOP / Status
         top_bar = QHBoxLayout()
         top_bar.setSpacing(8)
 
@@ -123,6 +127,7 @@ class CameraMainWindow(QMainWindow):
             "tries the USB 3.0 camera through the pco SDK when GO is pressed; "
             "connection failures never fall back to simulated data."
         )
+        self.cmb_camera_source.currentIndexChanged.connect(self._on_camera_source_changed)
         top_bar.addWidget(self.cmb_camera_source)
 
         self.btn_go = QPushButton("GO")
@@ -157,10 +162,6 @@ class CameraMainWindow(QMainWindow):
         # Canvas — enlarged (550x450 px), tightly cropped margins
         self.figure = Figure(dpi=100)
         self.figure.subplots_adjust(left=0.07, right=0.90, top=0.97, bottom=0.07)
-        # Image row: Canvas (550x450 px) + Fixed Color Scale Control Box (outside the image)
-        image_row = QHBoxLayout()
-        image_row.setSpacing(6)
-        image_row.setContentsMargins(0, 0, 0, 0)
 
         self.canvas = FigureCanvasQTAgg(self.figure)
         self.canvas.setFixedSize(550, 450)
@@ -169,107 +170,91 @@ class CameraMainWindow(QMainWindow):
         self.canvas.mpl_connect("button_release_event", self._on_canvas_button_release)
         self.canvas.mpl_connect("motion_notify_event", self._on_canvas_motion)
         self.canvas.mpl_connect("draw_event", self._on_canvas_draw)
-        image_row.addWidget(self.canvas)
+        left_pane.addWidget(self.canvas)
 
-        # Fixed Color Scale Box — placed outside the image canvas right next to the colorbar
-        self.grp_color_scale = QGroupBox("Color Scale")
-        self.grp_color_scale.setFixedWidth(86)
+        # Compact canvas child: stays over the image rather than taking layout space.
+        self.grp_color_scale = QFrame(self.canvas)
+        self.grp_color_scale.setObjectName("imageColorScale")
+        self.grp_color_scale.setFixedWidth(138)
         self.grp_color_scale.setStyleSheet("""
-            QGroupBox {
-                font-weight: bold;
-                font-size: 11px;
-                color: #343a40;
-                border: 1px solid #ced4da;
-                border-radius: 4px;
-                margin-top: 6px;
-                padding-top: 8px;
-                background-color: #fdfdfd;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 6px;
-                padding: 0 3px;
+            QFrame#imageColorScale {
+                background-color: rgba(27, 35, 44, 210);
+                border: 1px solid rgba(235, 241, 245, 100);
+                border-radius: 6px;
             }
             QLabel {
                 font-size: 10px;
-                font-weight: 500;
-                color: #495057;
+                color: #f4f7fa;
             }
             QSpinBox {
                 font-size: 10px;
-                padding: 2px 2px;
-                background: #ffffff;
-                border: 1px solid #ced4da;
+                padding: 1px 2px;
+                background: #f4f7fa;
+                border: 1px solid #aab5bf;
                 border-radius: 3px;
             }
             QPushButton {
                 font-size: 10px;
-                font-weight: bold;
-                padding: 3px;
-                background-color: #f1f3f5;
-                border: 1px solid #ced4da;
+                padding: 2px;
+                background-color: #e3e8ed;
+                border: 1px solid #aab5bf;
                 border-radius: 3px;
             }
             QPushButton:hover {
-                background-color: #e9ecef;
+                background-color: #ffffff;
             }
         """)
-        lay_scale = QVBoxLayout(self.grp_color_scale)
-        lay_scale.setContentsMargins(6, 6, 6, 6)
-        lay_scale.setSpacing(4)
+        lay_scale = QGridLayout(self.grp_color_scale)
+        lay_scale.setContentsMargins(5, 4, 5, 4)
+        lay_scale.setHorizontalSpacing(3)
+        lay_scale.setVerticalSpacing(2)
 
-        lbl_max = QLabel("Max:")
-        lay_scale.addWidget(lbl_max)
+        lbl_scale = QLabel("Scale · ADU")
+        lbl_scale.setStyleSheet("font-size: 10px; font-weight: bold; color: #f4f7fa;")
+        lay_scale.addWidget(lbl_scale, 0, 0, 1, 2)
+        lay_scale.addWidget(QLabel("Max"), 1, 0)
 
         self.spn_clim_high = QSpinBox()
         self.spn_clim_high.setRange(1, 65535)
         self.spn_clim_high.setValue(65535)
-        self.spn_clim_high.setFixedWidth(72)
+        self.spn_clim_high.setFixedWidth(79)
         self.spn_clim_high.setToolTip("Max ADU. Press Enter to apply.")
         self.spn_clim_high.setKeyboardTracking(False)
         self.spn_clim_high.valueChanged.connect(self._on_clim_changed)
         self.spn_clim_high.editingFinished.connect(self._on_clim_changed)
-        lay_scale.addWidget(self.spn_clim_high)
-
-        lay_scale.addSpacing(3)
-
-        lbl_min = QLabel("Min:")
-        lay_scale.addWidget(lbl_min)
+        lay_scale.addWidget(self.spn_clim_high, 1, 1)
+        lay_scale.addWidget(QLabel("Min"), 2, 0)
 
         self.spn_clim_low = QSpinBox()
         self.spn_clim_low.setRange(0, 65534)
         self.spn_clim_low.setValue(0)
-        self.spn_clim_low.setFixedWidth(72)
+        self.spn_clim_low.setFixedWidth(79)
         self.spn_clim_low.setToolTip("Min ADU. Press Enter to apply.")
         self.spn_clim_low.setKeyboardTracking(False)
         self.spn_clim_low.valueChanged.connect(self._on_clim_changed)
         self.spn_clim_low.editingFinished.connect(self._on_clim_changed)
-        lay_scale.addWidget(self.spn_clim_low)
-
-        lay_scale.addSpacing(6)
+        lay_scale.addWidget(self.spn_clim_low, 2, 1)
 
         btn_auto_clim = QPushButton("Auto")
-        btn_auto_clim.setFixedWidth(72)
+        btn_auto_clim.setFixedWidth(60)
         btn_auto_clim.setToolTip("Auto-scale color limits to current frame min/max")
         btn_auto_clim.clicked.connect(self._on_clim_auto_clicked)
-        lay_scale.addWidget(btn_auto_clim)
+        lay_scale.addWidget(btn_auto_clim, 3, 0)
 
         btn_full_clim = QPushButton("Full")
-        btn_full_clim.setFixedWidth(72)
+        btn_full_clim.setFixedWidth(60)
         btn_full_clim.setToolTip("Reset color limits to full 16-bit range (0–65535)")
         btn_full_clim.clicked.connect(lambda: self._set_clim(0, 65535))
-        lay_scale.addWidget(btn_full_clim)
+        lay_scale.addWidget(btn_full_clim, 3, 1)
+        self.grp_color_scale.adjustSize()
+        self._position_color_scale_overlay()
+        self.grp_color_scale.raise_()
 
-        lay_scale.addStretch(1)
-        image_row.addWidget(self.grp_color_scale)
-
-        left_pane.addLayout(image_row)
-
-        # Intensity metrics strip below canvas — matched to image row width (642 px)
+        # Intensity metrics strip below canvas
         self.lbl_intensity_metrics = QLabel(
             "Pixel Intensity Metrics | Minimum: -- ADU | Maximum: -- ADU | Mean: -- ADU"
         )
-        self.lbl_intensity_metrics.setFixedWidth(642)
+        self.lbl_intensity_metrics.setFixedWidth(550)
         self.lbl_intensity_metrics.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_intensity_metrics.setStyleSheet(
             "font-size: 11px; font-weight: bold; padding: 3px 6px; background: #f8f9fa; "
@@ -498,12 +483,14 @@ class CameraMainWindow(QMainWindow):
     def _set_go_button_style(self, active: bool) -> None:
         if active:
             self.btn_go.setText("RUNNING")
+            self.btn_go.setToolTip("Live view is running. Use STOP to end it.")
             self.btn_go.setStyleSheet(
                 "border: 2px solid #28a745; background-color: #28a745; color: white; "
                 "font-weight: bold; font-size: 13px; padding: 6px 20px; border-radius: 4px;"
             )
         else:
             self.btn_go.setText("GO")
+            self.btn_go.setToolTip("Connect the selected camera and start live view.")
             self.btn_go.setStyleSheet(
                 "border: 2px solid #28a745; background-color: transparent; color: #28a745; "
                 "font-weight: bold; font-size: 13px; padding: 6px 20px; border-radius: 4px;"
@@ -512,7 +499,8 @@ class CameraMainWindow(QMainWindow):
     def _on_go_clicked(self) -> None:
         """Connect if disconnected, then start continuous live camera view."""
         if self._is_live_active:
-            self._stop_live()
+            return
+        if self.active_live_task is not None or self.active_disconnect_task is not None:
             return
 
         if not self.camera.is_connected:
@@ -523,21 +511,23 @@ class CameraMainWindow(QMainWindow):
     def _start_live(self) -> None:
         if not self.camera.is_connected:
             return
+        if self.active_live_task is not None or self._source_switch_pending:
+            return
         if self.active_scan_task is not None and self.active_scan_task.isRunning():
             self._append_log("[LIVE] Cannot start live stream while an experiment scan is running.")
             return
 
         self._is_live_active = True
         self._set_go_button_style(active=True)
+        self.cmb_camera_source.setEnabled(False)
         self.lbl_system_status.setText("Status: Live View Active (Streaming)")
         self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #198754; padding-left: 8px;")
 
-        if self.active_live_task is None or not self.active_live_task.isRunning():
-            self.active_live_task = LiveStreamTask(scan_manager=self.scan_manager, target_fps=20.0)
-            self.active_live_task.frame_ready.connect(self._on_live_frame_ready)
-            self.active_live_task.error_occurred.connect(self._on_preview_error)
-            self.active_live_task.finished.connect(self._on_live_task_finished)
-            self.active_live_task.start()
+        self.active_live_task = LiveStreamTask(scan_manager=self.scan_manager, target_fps=20.0)
+        self.active_live_task.frame_ready.connect(self._on_live_frame_ready)
+        self.active_live_task.error_occurred.connect(self._on_preview_error)
+        self.active_live_task.finished.connect(self._on_live_task_finished)
+        self.active_live_task.start()
 
     def _stop_live(self, after_stop: Optional[Callable[[], None]] = None) -> None:
         """Request live stop and continue only after the worker confirms completion."""
@@ -566,11 +556,13 @@ class CameraMainWindow(QMainWindow):
             callback()
         else:
             self.lbl_system_status.setText("Status: Live Paused")
+            self.cmb_camera_source.setEnabled(not self._roi_change_pending)
 
     def _on_stop_clicked(self) -> None:
         """Global Stop: halts live view or gracefully aborts in-progress scan."""
         self._append_log("[STOP] Stop button pressed.")
         self._resume_live_after_roi = False
+        self._after_connect = None
         if self._is_live_active:
             self._stop_live()
 
@@ -583,6 +575,8 @@ class CameraMainWindow(QMainWindow):
 
     def _connect_camera(self, after_connect: Optional[Callable[[], None]] = None) -> None:
         """Connect the explicitly selected camera source in a worker thread."""
+        if self.active_disconnect_task is not None or self._source_switch_pending:
+            return
         if self.active_connect_task is not None and self.active_connect_task.isRunning():
             return
         self._after_connect = after_connect
@@ -600,6 +594,7 @@ class CameraMainWindow(QMainWindow):
     def _on_camera_connected(self, camera: BaseCamera, is_sim: bool, connection_time: float) -> None:
         self.camera = camera
         self.scan_manager.camera = self.camera
+        self._connected_source = "simulated" if is_sim else "physical"
         info = self.camera.get_sensor_info()
         model_name = info.get("model", "pco.edge 5.5")
         if is_sim:
@@ -643,6 +638,95 @@ class CameraMainWindow(QMainWindow):
         self._after_connect = None
         if callback is not None and self.active_mode_task is None:
             callback()
+        if not self._is_live_active and self.active_mode_task is None:
+            self.cmb_camera_source.setEnabled(True)
+
+    def _on_camera_source_changed(self, index: int) -> None:
+        """Release a stopped camera before GO can connect a different source."""
+        del index
+        selected = self.cmb_camera_source.currentData()
+        if not self.camera.is_connected or selected == self._connected_source:
+            return
+        if self._is_live_active or self.active_live_task is not None:
+            self._restore_connected_source_selection()
+            return
+        if (self.active_connect_task is not None or self.active_disconnect_task is not None
+                or self.active_mode_task is not None or self.active_roi_task is not None):
+            self._restore_connected_source_selection()
+            return
+        if self.active_scan_task is not None and self.active_scan_task.isRunning():
+            self._restore_connected_source_selection()
+            return
+        self._source_switch_pending = True
+        self.btn_go.setEnabled(False)
+        self.cmb_camera_source.setEnabled(False)
+        if self.active_preview_task is not None and self.active_preview_task.isRunning():
+            self.lbl_system_status.setText("Status: Waiting for preview before switching camera...")
+        else:
+            self._begin_camera_disconnect()
+
+    def _restore_connected_source_selection(self) -> None:
+        """Keep the selector aligned with the still-connected camera."""
+        if self._connected_source is None:
+            return
+        index = self.cmb_camera_source.findData(self._connected_source)
+        if index >= 0:
+            self.cmb_camera_source.blockSignals(True)
+            self.cmb_camera_source.setCurrentIndex(index)
+            self.cmb_camera_source.blockSignals(False)
+
+    def _begin_camera_disconnect(self) -> None:
+        """Close the previous source in a worker, with no live or preview read active."""
+        self.lbl_system_status.setText("Status: Disconnecting previous camera...")
+        self.active_disconnect_task = CameraDisconnectTask(self.camera)
+        self.active_disconnect_task.disconnected.connect(self._on_camera_disconnected)
+        self.active_disconnect_task.error_occurred.connect(self._on_camera_disconnect_error)
+        self.active_disconnect_task.finished.connect(self._on_camera_disconnect_finished)
+        self.active_disconnect_task.start()
+
+    def _on_camera_disconnected(self) -> None:
+        """Clear old-source pixels so simulated frames cannot look like real data."""
+        self._connected_source = None
+        self.camera = MockPcoCamera()
+        self.scan_manager.camera = self.camera
+        self.figure.clear()
+        self.figure.subplots_adjust(left=0.07, right=0.90, top=0.97, bottom=0.07)
+        self.axis = self.figure.add_subplot(111)
+        self._image_artist = None
+        self._colorbar = None
+        self._timestamp_artist = None
+        self._roi_patch = None
+        self._roi_drag_patch = None
+        self._roi_drag_start = None
+        self._plot_background = None
+        self._current_displayed_roi = None
+        self._last_frame = None
+        self.lbl_intensity_metrics.setText(
+            "Pixel Intensity Metrics | Minimum: -- ADU | Maximum: -- ADU | Mean: -- ADU"
+        )
+        self.canvas.draw_idle()
+        self._append_log("[CAMERA] Previous source disconnected. Press GO to connect the selected source.")
+        self.lbl_system_status.setText("Status: Source selected / Ready")
+
+    def _on_camera_disconnect_error(self, error: str) -> None:
+        """Retain the prior source when it cannot be safely closed."""
+        self._restore_connected_source_selection()
+        self.lbl_system_status.setText("Status: Camera disconnect failed")
+        self._append_log(f"[CAMERA DISCONNECT ERROR] {error}")
+        QMessageBox.warning(self, "Camera Disconnect Failed", error)
+
+    def _on_camera_disconnect_finished(self) -> None:
+        """Unlock source selection after the disconnect worker has exited."""
+        task = self.active_disconnect_task
+        self.active_disconnect_task = None
+        if task is not None:
+            task.deleteLater()
+        self._source_switch_pending = False
+        if self._closing:
+            self.close()
+            return
+        self.btn_go.setEnabled(True)
+        self.cmb_camera_source.setEnabled(True)
 
     def _on_readout_mode_changed(self, index: int) -> None:
         """Handle user toggling camera sensor readout mode (Rolling Shutter vs Global Reset)."""
@@ -692,6 +776,7 @@ class CameraMainWindow(QMainWindow):
         self._resume_live_after_mode = resume_live
         self._after_connect = after_mode
         self.cmb_readout_mode.setEnabled(False)
+        self.cmb_camera_source.setEnabled(False)
         self.active_mode_task = CameraModeTask(self.camera, mode)
         self.active_mode_task.mode_applied.connect(self._on_mode_applied)
         self.active_mode_task.error_occurred.connect(self._on_mode_error)
@@ -732,6 +817,8 @@ class CameraMainWindow(QMainWindow):
             self._start_live()
         else:
             self._capture_single_preview()
+        if not self._is_live_active:
+            self.cmb_camera_source.setEnabled(True)
 
     # =========================================================================
     # Live Preview & Single Capture
@@ -782,6 +869,8 @@ class CameraMainWindow(QMainWindow):
             self.active_preview_task = None
         if self._closing:
             self.close()
+        elif self._source_switch_pending:
+            self._begin_camera_disconnect()
 
     # =========================================================================
     # Display & Color Scale
@@ -887,6 +976,18 @@ class CameraMainWindow(QMainWindow):
         if event.canvas is self.canvas:
             self._plot_background = self.canvas.copy_from_bbox(self.axis.bbox)
             self._blit_frame()
+            self._position_color_scale_overlay()
+
+    def _position_color_scale_overlay(self) -> None:
+        """Keep the compact color controls inside the image's top-right corner."""
+        if not hasattr(self, "grp_color_scale"):
+            return
+        bounds = self.axis.bbox
+        x = max(6, min(self.canvas.width() - self.grp_color_scale.width() - 6,
+                       round(bounds.x1) - self.grp_color_scale.width() - 7))
+        y = max(6, round(self.canvas.height() - bounds.y1) + 7)
+        self.grp_color_scale.move(x, y)
+        self.grp_color_scale.raise_()
 
     def _blit_frame(self) -> None:
         """Redraw only the image and timestamp over the cached plot background."""
@@ -1198,6 +1299,7 @@ class CameraMainWindow(QMainWindow):
         self.btn_apply_roi.setEnabled(False)
         self.btn_full_sensor.setEnabled(False)
         self.btn_draw_roi.setEnabled(False)
+        self.cmb_camera_source.setEnabled(False)
         if self.active_live_task is not None:
             self._stop_live(after_stop=lambda: self._start_roi_task(roi))
         else:
@@ -1260,6 +1362,8 @@ class CameraMainWindow(QMainWindow):
             self._start_live()
         else:
             self._capture_single_preview()
+        if not self._is_live_active:
+            self.cmb_camera_source.setEnabled(True)
 
     # =========================================================================
     # Two-Way Automatic Calculation & Display Sync for Experiment Parameters
@@ -1468,6 +1572,7 @@ class CameraMainWindow(QMainWindow):
             self.btn_apply_roi.setEnabled(False)
             self.btn_full_sensor.setEnabled(False)
             self.btn_draw_roi.setEnabled(False)
+            self.cmb_camera_source.setEnabled(False)
         else:
             self.btn_go.setEnabled(True)
             self.spn_exposure.setEnabled(True)
@@ -1479,6 +1584,10 @@ class CameraMainWindow(QMainWindow):
             self.btn_apply_roi.setEnabled(not self._roi_change_pending)
             self.btn_full_sensor.setEnabled(not self._roi_change_pending)
             self.btn_draw_roi.setEnabled(not self._roi_change_pending)
+            self.cmb_camera_source.setEnabled(
+                not self._roi_change_pending and not self._is_live_active
+                and self.active_mode_task is None and not self._source_switch_pending
+            )
 
     def _on_scan_step_started(
         self,
@@ -1633,6 +1742,11 @@ class CameraMainWindow(QMainWindow):
             return
 
         if self.active_roi_task is not None and self.active_roi_task.isRunning():
+            self._closing = True
+            event.ignore()
+            return
+
+        if self.active_disconnect_task is not None and self.active_disconnect_task.isRunning():
             self._closing = True
             event.ignore()
             return

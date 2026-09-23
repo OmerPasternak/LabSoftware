@@ -28,6 +28,19 @@ def test_live_worker_stops_cooperatively(qtbot, tmp_path):
     camera.close()
 
 
+def test_live_worker_immediate_stop_before_run_stays_stopped(qtbot, tmp_path):
+    """A queued worker must not re-enable itself after STOP was requested."""
+    camera = MockPcoCamera(fast_simulation=True)
+    camera.connect()
+    manager = CameraScanManager(camera, tmp_path)
+    worker = LiveStreamTask(manager)
+    worker.stop()
+    with qtbot.waitSignal(worker.finished, timeout=3000):
+        worker.start()
+    assert manager.state == "IDLE"
+    camera.close()
+
+
 def test_gui_reuses_plot_artists_and_frame_metadata_roi(qtbot, monkeypatch):
     """Live repaint avoids camera calls on the GUI thread and plot rebuilds."""
     window = CameraMainWindow()
@@ -48,7 +61,11 @@ def test_gui_reuses_plot_artists_and_frame_metadata_roi(qtbot, monkeypatch):
     image_artist = window._image_artist
     colorbar = window._colorbar
 
-    assert window.grp_color_scale.title() == "Color Scale"
+    assert window.grp_color_scale.objectName() == "imageColorScale"
+    assert window.grp_color_scale.parent() is window.canvas
+    overlay = window.grp_color_scale.geometry()
+    assert overlay.left() >= window.axis.bbox.x0
+    assert overlay.right() <= window.axis.bbox.x1
     assert not hasattr(window, "scale_tag")
     assert window._plot_background is not None
     assert tuple(image_artist.get_extent()) == (800, 1056, 1180, 980)
@@ -175,5 +192,74 @@ def test_repeated_roi_and_full_sensor_during_live_stays_open(qtbot, tmp_path):
         assert window.isVisible()
 
     window._on_stop_clicked()
+    qtbot.waitUntil(lambda: window.active_live_task is None, timeout=4000)
+    window.close()
+
+
+def test_running_button_is_status_only_and_stop_ends_live(qtbot, tmp_path):
+    """RUNNING cannot stop the stream; STOP remains the explicit stop action."""
+    window = CameraMainWindow()
+    qtbot.addWidget(window)
+    window.camera = MockPcoCamera(fast_simulation=True)
+    window.camera.connect()
+    window.camera.set_roi((800, 980, 1056, 1180))
+    window.scan_manager = CameraScanManager(window.camera, tmp_path)
+    window._start_live()
+    qtbot.waitUntil(lambda: window._frame_count >= 2, timeout=4000)
+    live_task = window.active_live_task
+
+    window.btn_go.click()
+    assert window.btn_go.text() == "RUNNING"
+    assert window._is_live_active
+    assert window.active_live_task is live_task
+    qtbot.waitUntil(lambda: window._frame_count >= 3, timeout=4000)
+
+    window.btn_stop.click()
+    qtbot.waitUntil(lambda: window.active_live_task is None, timeout=4000)
+    assert not window._is_live_active
+    assert window.cmb_camera_source.isEnabled()
+    window.close()
+
+
+def test_source_can_switch_after_stop_without_touching_real_hardware(qtbot, monkeypatch, tmp_path):
+    """Changing source closes the old mock, then GO connects the chosen fake source."""
+    from hhg_control.drivers import pco_edge
+
+    class FakePhysicalCamera(MockPcoCamera):
+        def __init__(self):
+            super().__init__(fast_simulation=True)
+
+    monkeypatch.setattr(pco_edge, "PcoEdgeCamera", FakePhysicalCamera)
+    window = CameraMainWindow()
+    qtbot.addWidget(window)
+    window.camera = MockPcoCamera(fast_simulation=True)
+    window.camera.connect()
+    window.camera.set_roi((800, 980, 1056, 1180))
+    window.scan_manager = CameraScanManager(window.camera, tmp_path)
+    window._connected_source = "simulated"
+    window._start_live()
+    qtbot.waitUntil(lambda: window._frame_count >= 2, timeout=4000)
+    original = window.camera
+
+    window.btn_stop.click()
+    qtbot.waitUntil(lambda: window.active_live_task is None, timeout=4000)
+    window.cmb_camera_source.setCurrentIndex(1)
+    qtbot.waitUntil(lambda: window.active_disconnect_task is None, timeout=4000)
+    assert not original.is_connected
+    assert window._image_artist is None
+    assert window.cmb_camera_source.currentData() == "physical"
+
+    window.btn_go.click()
+    qtbot.waitUntil(lambda: window._is_live_active and window._connected_source == "physical", timeout=4000)
+    assert isinstance(window.camera, FakePhysicalCamera)
+    window.btn_stop.click()
+    qtbot.waitUntil(lambda: window.active_live_task is None, timeout=4000)
+
+    window.cmb_camera_source.setCurrentIndex(0)
+    qtbot.waitUntil(lambda: window.active_disconnect_task is None, timeout=4000)
+    window.btn_go.click()
+    qtbot.waitUntil(lambda: window._is_live_active and window._connected_source == "simulated", timeout=4000)
+    assert type(window.camera) is MockPcoCamera
+    window.btn_stop.click()
     qtbot.waitUntil(lambda: window.active_live_task is None, timeout=4000)
     window.close()

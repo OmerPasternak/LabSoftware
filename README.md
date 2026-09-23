@@ -21,6 +21,9 @@ python -m pip install -r requirements.txt
 Launch the GUI with `hhg-camera` or `python -m hhg_control.ui.camera_gui`.
 The GUI defaults to the simulated camera. Selecting the physical camera never
 silently falls back to simulated data.
+Press GO to start live view; RUNNING is a status indicator and only STOP ends
+live view. After STOP, choose another camera source; the previous camera is
+disconnected before the next GO connects the selected one.
 
 On Windows, double-click `run_camera_gui.vbs` to open this checkout without a
 Command Prompt window. It uses this checkout's `.venv` and `src` directory and
