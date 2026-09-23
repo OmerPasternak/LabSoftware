@@ -55,6 +55,11 @@ class BaseCamera(ABC):
     def is_connected(self) -> bool:
         return self._is_connected
 
+    @property
+    def can_pause_acquisition(self) -> bool:
+        """Whether waiting for storage can safely pause frame production."""
+        return False
+
     @abstractmethod
     def connect(self) -> None:
         """Establish communication and configure initial camera state."""

@@ -33,6 +33,19 @@ class AcquisitionBackpressure(RuntimeError):
     """Raised when storage cannot accept frames within the bounded queue."""
 
 
+def _frame_chunk_shape(height: int, width: int) -> tuple[int, int, int]:
+    """Tile a uint16 frame with chunks at most 1 MiB and no edge padding."""
+    max_pixels = (1024 * 1024) // np.dtype("uint16").itemsize
+    rows = [size for size in range(1, height + 1) if height % size == 0]
+    cols = [size for size in range(1, width + 1) if width % size == 0]
+    best_rows, best_cols = 1, 1
+    for row in rows:
+        for col in cols:
+            if row * col <= max_pixels and row * col > best_rows * best_cols:
+                best_rows, best_cols = row, col
+    return 1, best_rows, best_cols
+
+
 def sanitize_filename_component(value: str, fallback: str = "HHG_Scan") -> str:
     """Return a cross-platform-safe filename component without path traversal."""
     cleaned = re.sub(r"[<>:\"/\\|?*\x00-\x1f]", "_", value.strip())
@@ -172,8 +185,9 @@ class CameraScanManager:
         """Acquire and atomically save one scan step in bounded frame batches.
 
         Units are raw 16-bit ADU, seconds for exposure, and sensor pixels for ROI.
-        The bounded queue overlaps camera capture with HDF5 writing. A full
-        queue fails the step instead of discarding images or growing without bound.
+        The bounded queue overlaps camera capture with HDF5 writing. A mock
+        waits for storage; a physical camera fails the step on backpressure
+        instead of silently losing frames.
         """
         with self._operation("SCANNING"):
             return self._acquire_and_save_step(
@@ -290,7 +304,7 @@ class CameraScanManager:
                             )
                             image_dset = h5f.create_dataset(
                                 "images", shape=(num_frames, height, width), dtype="uint16",
-                                chunks=(1, min(512, height), min(512, width)), **options,
+                                chunks=_frame_chunk_shape(height, width), **options,
                             )
                             image_dset.attrs["units"] = "16-bit digital counts (ADU)"
                             image_dset.attrs["physical_units"] = "16-bit digital counts (ADU)"
@@ -339,12 +353,25 @@ class CameraScanManager:
                         raise ValueError("Camera returned an empty or oversized frame batch.")
                     if len(metadata) != len(images):
                         raise ValueError("Camera metadata count does not match frame count.")
-                    try:
-                        pending.put((images.copy(), list(metadata)), timeout=0.05)
-                    except Full as exc:
-                        raise AcquisitionBackpressure(
-                            "HDF5 writer queue filled; acquisition stopped to avoid frame loss."
-                        ) from exc
+                    copied_batch = (images.copy(), list(metadata))
+                    while True:
+                        try:
+                            pending.put(copied_batch, timeout=0.05)
+                            break
+                        except Full as exc:
+                            if writer_errors:
+                                raise RuntimeError("HDF5 writer failed during acquisition.") from writer_errors[0]
+                            if abort_check is not None and abort_check():
+                                raise AcquisitionAborted(
+                                    f"Acquisition stopped after {captured} of {num_frames} frames."
+                                ) from exc
+                            if not self.camera.can_pause_acquisition:
+                                raise AcquisitionBackpressure(
+                                    f"HDF5 writer queue filled after {captured} frames "
+                                    f"at {images.shape[2]}x{images.shape[1]} pixels; "
+                                    "acquisition stopped to avoid frame loss. "
+                                    "Use a smaller applied ROI or faster storage."
+                                ) from exc
                     captured += len(images)
                     latest_frame = images[-1].copy()
                 if abort_check is not None and abort_check() and captured != num_frames:

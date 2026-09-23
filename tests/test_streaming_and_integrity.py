@@ -15,6 +15,7 @@ from hhg_control.sequencer.scan_manager import (
     AcquisitionAborted,
     AcquisitionBackpressure,
     CameraScanManager,
+    _frame_chunk_shape,
     sanitize_filename_component,
 )
 
@@ -106,7 +107,14 @@ def test_bounded_writer_queue_fails_instead_of_silently_losing_frames(tmp_path):
             time.sleep(0.2)
             super()._write_batch(image_dset, metadata_dset, start, images, metadata)
 
-    camera = _small_camera()
+    class UnpausableCamera(MockPcoCamera):
+        @property
+        def can_pause_acquisition(self):
+            return False
+
+    camera = UnpausableCamera(fast_simulation=True)
+    camera.connect()
+    camera.set_roi((800, 980, 1056, 1180))
     manager = SlowWriter(camera, tmp_path)
     with pytest.raises(AcquisitionBackpressure, match="queue filled"):
         manager.acquire_and_save_step(
@@ -120,6 +128,34 @@ def test_bounded_writer_queue_fails_instead_of_silently_losing_frames(tmp_path):
         assert h5f.attrs["frames_written"] < 20
     assert manager.state == "IDLE"
     camera.close()
+
+
+def test_mock_waits_for_slow_writer_without_unbounded_queue(tmp_path):
+    """Synthetic capture may slow down to storage speed without losing frames."""
+    class SlowWriter(CameraScanManager):
+        def _write_batch(self, image_dset, metadata_dset, start, images, metadata):
+            time.sleep(0.08)
+            super()._write_batch(image_dset, metadata_dset, start, images, metadata)
+
+    camera = _small_camera()
+    manager = SlowWriter(camera, tmp_path)
+    path, _ = manager.acquire_and_save_step(
+        "slow_mock", 0, "delay_mm", 0.0, 8,
+        batch_size=1, queue_batches=1,
+    )
+    with h5py.File(path) as h5f:
+        assert h5f.attrs["complete"]
+        assert h5f.attrs["frames_written"] == 8
+    camera.close()
+
+
+@pytest.mark.parametrize("height,width", [(2160, 2560), (1072, 2144), (56, 2560)])
+def test_uncompressed_chunks_fit_frame_without_padding(height, width):
+    """Chunk allocation must not inflate large full-sensor scans."""
+    _, rows, cols = _frame_chunk_shape(height, width)
+    assert height % rows == 0
+    assert width % cols == 0
+    assert rows * cols * 2 <= 1024 * 1024
 
 
 def test_camera_can_capture_while_writer_is_busy(tmp_path):

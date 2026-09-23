@@ -16,6 +16,11 @@ class MockPcoCamera(BaseCamera):
     WIDTH: int  = 2560
     HEIGHT: int = 2160
 
+    @property
+    def can_pause_acquisition(self) -> bool:
+        """Synthetic frames can wait for storage without losing camera frames."""
+        return True
+
     def __init__(self, fast_simulation: bool = False) -> None:
         super().__init__()
         self.fast_simulation = fast_simulation
