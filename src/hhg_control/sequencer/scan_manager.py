@@ -12,7 +12,6 @@ import re
 import threading
 from typing import Any, Optional
 
-import h5py
 import numpy as np
 
 from ..drivers.base_camera import BaseCamera
@@ -179,6 +178,9 @@ class CameraScanManager:
             raise RuntimeError("Cannot execute scan step: Camera is disconnected.")
         if num_frames < 1:
             raise ValueError("num_frames must be >= 1.")
+
+        # HDF5 is only needed for a saved scan, not for opening the GUI or live view.
+        import h5py
 
         run_id = run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
         filepath = self._unique_filepath(experiment_name, run_id, step_index)

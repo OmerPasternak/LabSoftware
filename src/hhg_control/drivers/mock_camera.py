@@ -23,6 +23,18 @@ class MockPcoCamera(BaseCamera):
         self._serial = "MOCK-EDGE-5501"
         self._rng = np.random.default_rng(42)
 
+        # Keep construction cheap so the GUI can appear before GO is pressed.
+        # Simulation arrays are prepared by the connection worker, not the UI thread.
+        self._gaussian_profile: np.ndarray | None = None
+        self._dark_bank: np.ndarray | None = None
+        self._dark_idx = 0
+        self._frame_count = 0
+
+    def _prepare_simulation_data(self) -> None:
+        """Build synthetic full-sensor patterns when the mock connects."""
+        if self._gaussian_profile is not None and self._dark_bank is not None:
+            return
+
         # Precompute static 2D spatial Gaussian beam profile (sigma = 120 px, centred at (1280, 1080))
         y, x = np.ogrid[:self.HEIGHT, :self.WIDTH]
         center_y, center_x = self.HEIGHT // 2, self.WIDTH // 2
@@ -42,14 +54,14 @@ class MockPcoCamera(BaseCamera):
             self._rng.normal(loc=100.0, scale=3.0, size=(4, self.HEIGHT, self.WIDTH)),
             0, 65535
         ).astype(np.uint16)
-        self._dark_idx = 0
-        self._frame_count = 0
 
     # ------------------------------------------------------------------
     # Connection
     # ------------------------------------------------------------------
 
     def connect(self) -> None:
+        """Prepare synthetic data and mark the mock connected; no hardware is used."""
+        self._prepare_simulation_data()
         self._is_connected = True
 
     def close(self) -> None:
@@ -140,6 +152,9 @@ class MockPcoCamera(BaseCamera):
             raise RuntimeError("Cannot acquire frames: Mock camera is not connected.")
         if num_frames < 1:
             raise ValueError("num_frames must be >= 1.")
+
+        if self._gaussian_profile is None or self._dark_bank is None:
+            raise RuntimeError("Mock camera simulation data was not initialized.")
 
         if not self.fast_simulation:
             time.sleep(self._exposure_time_s * num_frames)

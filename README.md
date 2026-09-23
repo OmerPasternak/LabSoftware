@@ -22,8 +22,10 @@ Launch the GUI with `hhg-camera` or `python -m hhg_control.ui.camera_gui`.
 The GUI defaults to the simulated camera. Selecting the physical camera never
 silently falls back to simulated data.
 
-On Windows, `run_camera_gui.bat` opens this checkout using its `.venv` and
-`src` directory. It reports a setup message if `.venv` has not been created.
+On Windows, double-click `run_camera_gui.vbs` to open this checkout without a
+Command Prompt window. It uses this checkout's `.venv` and `src` directory and
+shows a setup message if `.venv` is missing. Keep `run_camera_gui.bat` for
+troubleshooting: it leaves a console open when startup fails.
 
 ## Validation
 

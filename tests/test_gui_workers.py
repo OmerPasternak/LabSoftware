@@ -31,6 +31,7 @@ def test_gui_reuses_plot_artists_and_frame_metadata_roi(qtbot, monkeypatch):
     """Live repaint avoids camera calls on the GUI thread and plot rebuilds."""
     window = CameraMainWindow()
     qtbot.addWidget(window)
+    assert window.camera._dark_bank is None
 
     def unexpected_camera_call():
         raise AssertionError("GUI rendering queried the camera")

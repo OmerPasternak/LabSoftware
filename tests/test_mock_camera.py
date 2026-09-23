@@ -1,6 +1,18 @@
 import pytest
 import numpy as np
 from hhg_control.drivers.mock_camera import MockPcoCamera
+
+
+def test_mock_prepares_large_arrays_only_on_connect():
+    """Opening an unconnected GUI should not allocate synthetic full-sensor data."""
+    camera = MockPcoCamera(fast_simulation=True)
+    assert camera._gaussian_profile is None
+    assert camera._dark_bank is None
+
+    camera.connect()
+    assert camera._gaussian_profile is not None
+    assert camera._dark_bank is not None
+    camera.close()
 from hhg_control.drivers.base_camera import CameraSafetyError
 
 
@@ -51,4 +63,3 @@ def test_mock_camera_readout_modes():
     assert metas[0]["readout_mode"] == "GLOBAL_RESET"
 
     cam.close()
-
