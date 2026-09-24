@@ -1,4 +1,4 @@
-"""Exercise the MATLAB axis analysis on a small mock camera scan file."""
+"""Exercise folder-wide MATLAB correlations against direct mock calculations."""
 
 from pathlib import Path
 import shutil
@@ -9,48 +9,77 @@ import numpy as np
 import pytest
 
 
-def test_matlab_axis_g2_matches_direct_mock_calculation(tmp_path):
+def _write_mock_step(path, frames, step_index=2):
+    """Write a completed schema-2 camera step with synthetic ADU frames."""
+    with h5py.File(path, "w") as h5:
+        h5.create_dataset("images", data=frames)
+        h5.attrs["complete"] = True
+        h5.attrs["frames_written"] = len(frames)
+        h5.attrs["scan_step_index"] = step_index
+        h5.attrs["scan_parameter_name"] = "Delay Stage (mm)"
+        h5.attrs["scan_parameter_value"] = 1.5
+        h5.attrs["roi_bounds"] = [0, 0, frames.shape[2], frames.shape[1]]
+        h5.attrs["exposure_time_s"] = 0.01
+
+
+def test_matlab_folder_pixel_g2_and_x_correlation(tmp_path):
     matlab = shutil.which("matlab")
     if matlab is None:
         pytest.skip("MATLAB is not installed")
 
     frames = np.array(
         [
-            [[1, 2, 3, 4], [5, 6, 7, 8]],
-            [[2, 4, 6, 8], [6, 8, 10, 12]],
-            [[3, 5, 7, 9], [7, 9, 11, 13]],
+            [[1, 2, 0, 4], [5, 6, 0, 8]],
+            [[2, 4, 0, 8], [6, 8, 0, 12]],
+            [[3, 5, 0, 9], [7, 9, 0, 13]],
         ],
         dtype=np.uint16,
     )
-    scan_file = tmp_path / "mock_step.h5"
-    with h5py.File(scan_file, "w") as h5:
-        h5.create_dataset("images", data=frames)
-        h5.attrs["complete"] = True
-        h5.attrs["frames_written"] = len(frames)
+    good = tmp_path / "one_step"
+    good.mkdir()
+    _write_mock_step(good / "a.h5", frames[:2])
+    _write_mock_step(good / "b.h5", frames[2:])
+    # Interrupted acquisitions are excluded by the .h5 file selection.
+    (good / "ignored.h5.partial").write_text("incomplete")
+
+    mixed = tmp_path / "mixed_steps"
+    mixed.mkdir()
+    _write_mock_step(mixed / "a.h5", frames[:2])
+    _write_mock_step(mixed / "b.h5", frames[2:], step_index=3)
 
     script = Path(__file__).resolve().parents[1] / "scripts" / "analyze_camera_axis_g2.m"
 
     def matlab_string(path):
         return str(path).replace("'", "''")
 
-    cases = (("x", 1, []), ("y", 1, []), ("x_binned", 2, [1, 1]))
-    commands = ["set(0, 'DefaultFigureVisible', 'off')", f"inputFile='{matlab_string(scan_file)}'", "backgroundADU=0"]
+    cases = (("all_y", 1, []), ("first_y_binned", 2, [1, 1]))
+    commands = ["set(0, 'DefaultFigureVisible', 'off')", f"inputFolder='{matlab_string(good)}'", "backgroundADU=0"]
     for label, width, band in cases:
-        axis = label[0]
-        matrix_csv = tmp_path / f"{label}_matrix.csv"
-        pixels_csv = tmp_path / f"{label}_pixels.csv"
         range_text = "[]" if not band else f"[{band[0]} {band[1]}]"
         commands.extend(
             [
-                f"axisName='{axis}'",
                 f"binWidth={width}",
-                f"orthogonalRange={range_text}",
+                f"yRange={range_text}",
                 f"run('{matlab_string(script)}')",
-                f"writematrix(g2Matrix, '{matlab_string(matrix_csv)}')",
-                f"writematrix(axisPixels, '{matlab_string(pixels_csv)}')",
+                f"writematrix(g2Pixel, '{matlab_string(tmp_path / f'{label}_pixel.csv')}')",
+                f"writematrix(g2Matrix, '{matlab_string(tmp_path / f'{label}_matrix.csv')}')",
+                f"writematrix(xPixels, '{matlab_string(tmp_path / f'{label}_pixels.csv')}')",
+                f"assert(totalFrames==3 && numel(filesAnalyzed)==2)",
                 "close all",
             ]
         )
+    commands.extend(
+        [
+            f"inputFolder='{matlab_string(mixed)}'",
+            "yRange=[]",
+            "try",
+            f"run('{matlab_string(script)}')",
+            "error('Mixed scan steps were accepted')",
+            "catch ME",
+            "assert(contains(ME.message, 'metadata differs'))",
+            "end",
+        ]
+    )
     result = subprocess.run(
         [matlab, "-batch", ";".join(commands)],
         capture_output=True,
@@ -60,22 +89,30 @@ def test_matlab_axis_g2_matches_direct_mock_calculation(tmp_path):
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
+    pixel_mean = frames.mean(axis=0, dtype=float)
+    pixel_mean_square = np.square(frames.astype(float)).mean(axis=0)
+    expected_pixel = np.full(pixel_mean.shape, np.nan)
+    np.divide(pixel_mean_square, pixel_mean**2, out=expected_pixel, where=pixel_mean > 0)
     for label, width, band in cases:
-        axis = label[0]
+        actual_pixel = np.loadtxt(tmp_path / f"{label}_pixel.csv", delimiter=",")
+        np.testing.assert_allclose(actual_pixel, expected_pixel.T, rtol=1e-6, equal_nan=True)
+
         selected = frames if not band else frames[:, band[0] - 1 : band[1], :]
-        profiles = selected.mean(axis=1 if axis == "x" else 2).astype(float)
+        profiles = selected.sum(axis=1).astype(float)
+        expected_pixels = np.arange(1, frames.shape[2] + 1, dtype=float)
         if width > 1:
             profiles = np.stack(
                 [profiles[:, start : start + width].mean(axis=1) for start in range(0, profiles.shape[1], width)],
                 axis=1,
             )
+            expected_pixels = np.array(
+                [expected_pixels[start : start + width].mean() for start in range(0, len(expected_pixels), width)]
+            )
         means = profiles.mean(axis=0)
-        expected = (profiles.T @ profiles / len(frames)) / np.outer(means, means)
-        actual = np.atleast_2d(np.loadtxt(tmp_path / f"{label}_matrix.csv", delimiter=","))
-        pixels = np.atleast_1d(np.loadtxt(tmp_path / f"{label}_pixels.csv", delimiter=","))
-        np.testing.assert_allclose(actual, expected, rtol=1e-6)
-        expected_pixels = np.array(
-            [np.arange(start + 1, min(start + width, frames.shape[2 if axis == "x" else 1]) + 1).mean()
-             for start in range(0, frames.shape[2 if axis == "x" else 1], width)]
-        )
-        np.testing.assert_array_equal(pixels, expected_pixels)
+        expected_matrix = np.full((len(means), len(means)), np.nan)
+        denominator = np.outer(means, means)
+        np.divide(profiles.T @ profiles / len(frames), denominator, out=expected_matrix, where=denominator > 0)
+        actual_matrix = np.atleast_2d(np.loadtxt(tmp_path / f"{label}_matrix.csv", delimiter=","))
+        actual_pixels = np.atleast_1d(np.loadtxt(tmp_path / f"{label}_pixels.csv", delimiter=","))
+        np.testing.assert_allclose(actual_matrix, expected_matrix, rtol=1e-6, equal_nan=True)
+        np.testing.assert_array_equal(actual_pixels, expected_pixels)

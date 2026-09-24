@@ -76,16 +76,17 @@ bounded frame batches, per-frame HDF5 chunks, and a separate file per
 scan step; changing to a different HDF5 hierarchy would require a reader
 migration and a new schema version.
 
-For axis-resolved intensity correlations, open
-`scripts/analyze_camera_axis_g2.m` in MATLAB and Run it. Select a completed
-scan-step `.h5` file when prompted. Set `axisName` to `'x'` or `'y'`, set
-`orthogonalRange` to `[first last]` to restrict the perpendicular pixel band,
-and set `binWidth` to the number of adjacent axis pixels per bin (default 8).
-The script plots `g2Axis` and `g2Matrix` and leaves them, `axisPixels`, and
-`meanIntensity` in the MATLAB workspace. It reads one frame at a time. These
-are normalized zero-lag **ADU intensity** correlations across frames; they are
-not time-delay correlations or photon-count coincidences. The matrix diagonal
-matches the Python intensity definition of g²(0).
+For camera intensity correlations, open `scripts/analyze_camera_axis_g2.m` in
+MATLAB and Run it. Select a folder containing completed `.h5` acquisitions
+from one scan step. The script checks that the step index, setpoint, ROI,
+exposure, and frame dimensions agree, then reads all frames one at a time.
+It computes `g2Pixel(x,y)` at each pixel and sums over `y` in each frame to
+form a normalized `g2Matrix(x1,x2)`; `g2X` is the matrix diagonal. Set
+`yRange` to `[first last]` to limit the summed y band. `binWidth` defaults
+to 1 for a pixel-by-pixel x-x matrix; increase it to reduce matrix size.
+Results and the analyzed file list remain in the MATLAB workspace. These
+are zero-lag **ADU intensity** correlations across frames, not time-delay
+correlations or photon-count coincidences.
 
 New scans use uncompressed HDF5 and a bounded writer queue so saving can overlap
 continuous camera acquisition. A simulated camera waits if storage is slower;
