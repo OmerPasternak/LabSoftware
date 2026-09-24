@@ -557,7 +557,7 @@ class CameraMainWindow(QMainWindow):
         self.spn_num_steps = QSpinBox()
         self.spn_num_steps.setMinimumWidth(70)
         self.spn_num_steps.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        self.spn_num_steps.setRange(2, 100000)
+        self.spn_num_steps.setRange(1, 100000)
         self.spn_num_steps.setValue(10)
         self.spn_num_steps.valueChanged.connect(self._on_num_steps_changed)
         lay_exp.addWidget(self.spn_num_steps, 3, 1)
@@ -1691,6 +1691,7 @@ class CameraMainWindow(QMainWindow):
             step_size = self.spn_step_size.value()
             num_steps = self.spn_num_steps.value()
             self.spn_end_val.setValue(start + (num_steps - 1) * step_size)
+            self.spn_step_size.setEnabled(num_steps > 1)
             self._update_progress_display()
         finally:
             self._is_updating_range = False
@@ -1703,8 +1704,11 @@ class CameraMainWindow(QMainWindow):
             start = self.spn_start_val.value()
             end_val = self.spn_end_val.value()
             num_steps = self.spn_num_steps.value()
-            calc_step_size = (end_val - start) / (num_steps - 1) if num_steps > 1 else 0.0
-            self.spn_step_size.setValue(calc_step_size)
+            if num_steps == 1:
+                # Either endpoint edits the one setpoint; spacing is unused.
+                self.spn_start_val.setValue(end_val)
+            else:
+                self.spn_step_size.setValue((end_val - start) / (num_steps - 1))
             self._update_progress_display()
         finally:
             self._is_updating_range = False
@@ -1721,6 +1725,11 @@ class CameraMainWindow(QMainWindow):
             if reason:
                 self._append_log(f"[SCAN RESET] {reason}. Next scan starts from Step 1.")
 
+    @staticmethod
+    def _step_count_label(count: int) -> str:
+        """Format a scan-point count for status text."""
+        return f"{count} {'step' if count == 1 else 'steps'}"
+
     def _update_progress_display(self) -> None:
         if self.active_scan_task is not None and self.active_scan_task.isRunning():
             return
@@ -1730,7 +1739,7 @@ class CameraMainWindow(QMainWindow):
         total_steps = self.spn_num_steps.value()
         param_name = self.txt_scan_param.text().strip() or "Setpoint"
         self.lbl_scan_progress.setText(
-            f"Scan Progress: Ready (0 of {total_steps} steps) | {param_name}: {start:.4f}"
+            f"Scan Progress: Ready (0 of {self._step_count_label(total_steps)}) | {param_name}: {start:.4f}"
         )
 
     def _on_exposure_changed(self, value_ms: float) -> None:
@@ -1911,7 +1920,7 @@ class CameraMainWindow(QMainWindow):
         else:
             self._append_log(
                 f"[SCAN START][{self._scan_source_label()}] Initiating scan: "
-                f"{num_steps} steps from {start_val:.4f} to "
+                f"{self._step_count_label(num_steps)} from {start_val:.4f} to "
                 f"{self.spn_end_val.value():.4f} | Param: '{param_name}' | Frames/step: {num_frames}"
             )
 
@@ -1974,7 +1983,7 @@ class CameraMainWindow(QMainWindow):
             self.spn_frames.setEnabled(True)
             self.spn_start_val.setEnabled(True)
             self.spn_end_val.setEnabled(True)
-            self.spn_step_size.setEnabled(True)
+            self.spn_step_size.setEnabled(self.spn_num_steps.value() > 1)
             self.spn_num_steps.setEnabled(True)
             self.btn_apply_roi.setEnabled(not self._roi_change_pending)
             self.btn_full_sensor.setEnabled(not self._roi_change_pending)
@@ -2027,12 +2036,12 @@ class CameraMainWindow(QMainWindow):
         end_val = self.spn_end_val.value()
         param_name = self.txt_scan_param.text().strip() or "Setpoint"
         self.lbl_scan_progress.setText(
-            f"Scan Progress: Completed all {total_steps} steps | {param_name}: {end_val:.4f}"
+            f"Scan Progress: Completed all {self._step_count_label(total_steps)} | {param_name}: {end_val:.4f}"
         )
-        self.lbl_system_status.setText(f"Status: Scan Completed Successfully ({total_steps} steps saved)")
+        self.lbl_system_status.setText(f"Status: Scan Completed Successfully ({self._step_count_label(total_steps)} saved)")
         self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #198754; padding-left: 8px;")
         self._append_log(
-            f"[SCAN COMPLETE][{self._scan_source_label()}] All {total_steps} steps saved to disk. "
+            f"[SCAN COMPLETE][{self._scan_source_label()}] All {self._step_count_label(total_steps)} saved to disk. "
             f"Measurement duration: {elapsed_s:.2f} s."
         )
         self._scan_active_elapsed_s = 0.0
@@ -2075,7 +2084,7 @@ class CameraMainWindow(QMainWindow):
         start_val = self.spn_start_val.value()
         param_name = self.txt_scan_param.text().strip() or "Setpoint"
         self.lbl_scan_progress.setText(
-            f"Scan Progress: Ready (0 of {total_steps} steps) | {param_name}: {start_val:.4f}"
+            f"Scan Progress: Ready (0 of {self._step_count_label(total_steps)}) | {param_name}: {start_val:.4f}"
         )
         self.lbl_system_status.setText("Status: Idle / Ready")
         self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #198754; padding-left: 8px;")

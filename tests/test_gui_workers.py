@@ -43,6 +43,54 @@ def test_measurement_log_reports_complete_scan_duration(qtbot, tmp_path):
     window.close()
 
 
+def test_one_point_scan_keeps_endpoints_equal_and_saves_one_mock_step(qtbot, tmp_path):
+    """One scan point uses a single setpoint and writes one HDF5 measurement."""
+    import h5py
+
+    camera = MockPcoCamera()
+    camera.connect()
+    camera.set_roi((800, 1052, 1056, 1108))
+    window = CameraMainWindow()
+    qtbot.addWidget(window)
+    window.camera = camera
+    window.scan_manager.camera = camera
+    window.txt_storage_dir.setText(str(tmp_path))
+    window.spn_roi_x0.setValue(800)
+    window.spn_roi_x1.setValue(1056)
+    window.spn_roi_y0.setValue(1052)
+    window.spn_frames.setValue(1)
+    window.spn_start_val.setValue(1.25)
+    window.spn_step_size.setValue(0.5)
+
+    window.spn_num_steps.setValue(1)
+    assert window.spn_end_val.value() == 1.25
+    assert not window.spn_step_size.isEnabled()
+    window.spn_end_val.setValue(2.5)
+    assert window.spn_start_val.value() == 2.5
+    assert window.spn_end_val.value() == 2.5
+    window.spn_start_val.setValue(3.0)
+    assert window.spn_end_val.value() == 3.0
+
+    window._toggle_measurement_scan()
+    qtbot.waitUntil(
+        lambda: window.active_scan_task is None and "[SCAN COMPLETE]" in window.txt_activity_log.toPlainText(),
+        timeout=10000,
+    )
+    files = list(tmp_path.glob("*.h5"))
+    assert len(files) == 1
+    with h5py.File(files[0], "r") as h5f:
+        assert h5f.attrs["scan_step_index"] == 0
+        assert h5f.attrs["scan_parameter_setpoint_value"] == 3.0
+    assert "Completed all 1 step" in window.lbl_scan_progress.text()
+    assert "All 1 step saved to disk" in window.txt_activity_log.toPlainText()
+    assert not window.spn_step_size.isEnabled()
+
+    window.spn_num_steps.setValue(2)
+    assert window.spn_step_size.isEnabled()
+    assert window.spn_end_val.value() == 3.5
+    window.close()
+
+
 def test_external_trigger_checkbox_applies_and_reads_back_mock_mode(qtbot, tmp_path):
     """The checkbox changes an idle camera in a worker and saves the mode."""
     camera = MockPcoCamera()
