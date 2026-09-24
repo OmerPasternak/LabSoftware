@@ -48,12 +48,21 @@ def test_matlab_folder_pixel_g2_and_x_correlation(tmp_path):
     _write_mock_step(mixed / "b.h5", frames[2:], step_index=3)
 
     script = Path(__file__).resolve().parents[1] / "scripts" / "analyze_camera_axis_g2.m"
+    auto_project = tmp_path / "auto_project"
+    auto_script_dir = auto_project / "scripts"
+    auto_data_dir = auto_project / "data"
+    auto_script_dir.mkdir(parents=True)
+    auto_data_dir.mkdir()
+    auto_script = auto_script_dir / script.name
+    shutil.copyfile(script, auto_script)
+    shutil.copyfile(good / "a.h5", auto_data_dir / "a.h5")
+    shutil.copyfile(good / "b.h5", auto_data_dir / "b.h5")
 
     def matlab_string(path):
         return str(path).replace("'", "''")
 
     cases = (("all_y", 1, []), ("first_y_binned", 2, [1, 1]))
-    commands = ["set(0, 'DefaultFigureVisible', 'off')", f"inputFolder='{matlab_string(good)}'", "backgroundADU=0"]
+    commands = ["set(0, 'DefaultFigureVisible', 'off')", f"inputFolder='{matlab_string(good)}'", "backgroundADU=0", "batchFrames=2"]
     for label, width, band in cases:
         range_text = "[]" if not band else f"[{band[0]} {band[1]}]"
         commands.extend(
@@ -62,7 +71,8 @@ def test_matlab_folder_pixel_g2_and_x_correlation(tmp_path):
                 f"yRange={range_text}",
                 f"run('{matlab_string(script)}')",
                 f"writematrix(g2Pixel, '{matlab_string(tmp_path / f'{label}_pixel.csv')}')",
-                f"writematrix(g2Matrix, '{matlab_string(tmp_path / f'{label}_matrix.csv')}')",
+                f"writematrix(pearsonMatrix, '{matlab_string(tmp_path / f'{label}_matrix.csv')}')",
+                f"writematrix(g2X, '{matlab_string(tmp_path / f'{label}_g2x.csv')}')",
                 f"writematrix(xPixels, '{matlab_string(tmp_path / f'{label}_pixels.csv')}')",
                 f"assert(totalFrames==3 && numel(filesAnalyzed)==2)",
                 "close all",
@@ -78,6 +88,12 @@ def test_matlab_folder_pixel_g2_and_x_correlation(tmp_path):
             "catch ME",
             "assert(contains(ME.message, 'metadata differs'))",
             "end",
+            "clear inputFolder",
+            f"run('{matlab_string(auto_script)}')",
+            "assert(totalFrames==3 && numel(filesAnalyzed)==2)",
+            "inputFolder=0",
+            f"run('{matlab_string(auto_script)}')",
+            "assert(totalFrames==3 && numel(filesAnalyzed)==2)",
         ]
     )
     result = subprocess.run(
@@ -109,10 +125,16 @@ def test_matlab_folder_pixel_g2_and_x_correlation(tmp_path):
                 [expected_pixels[start : start + width].mean() for start in range(0, len(expected_pixels), width)]
             )
         means = profiles.mean(axis=0)
+        expected_g2x = np.full(len(means), np.nan)
+        np.divide(np.square(profiles).mean(axis=0), means**2, out=expected_g2x, where=means > 0)
+        centered = profiles - means
+        std = np.sqrt(np.square(centered).mean(axis=0))
         expected_matrix = np.full((len(means), len(means)), np.nan)
-        denominator = np.outer(means, means)
-        np.divide(profiles.T @ profiles / len(frames), denominator, out=expected_matrix, where=denominator > 0)
+        denominator = np.outer(std, std)
+        np.divide(centered.T @ centered / len(frames), denominator, out=expected_matrix, where=denominator > 0)
         actual_matrix = np.atleast_2d(np.loadtxt(tmp_path / f"{label}_matrix.csv", delimiter=","))
+        actual_g2x = np.atleast_1d(np.loadtxt(tmp_path / f"{label}_g2x.csv", delimiter=","))
         actual_pixels = np.atleast_1d(np.loadtxt(tmp_path / f"{label}_pixels.csv", delimiter=","))
         np.testing.assert_allclose(actual_matrix, expected_matrix, rtol=1e-6, equal_nan=True)
+        np.testing.assert_allclose(actual_g2x, expected_g2x, rtol=1e-6, equal_nan=True)
         np.testing.assert_array_equal(actual_pixels, expected_pixels)

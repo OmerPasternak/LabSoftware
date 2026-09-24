@@ -77,16 +77,19 @@ scan step; changing to a different HDF5 hierarchy would require a reader
 migration and a new schema version.
 
 For camera intensity correlations, open `scripts/analyze_camera_axis_g2.m` in
-MATLAB and Run it. Select a folder containing completed `.h5` acquisitions
-from one scan step. The script checks that the step index, setpoint, ROI,
-exposure, and frame dimensions agree, then reads all frames one at a time.
-It computes `g2Pixel(x,y)` at each pixel and sums over `y` in each frame to
-form a normalized `g2Matrix(x1,x2)`; `g2X` is the matrix diagonal. Set
-`yRange` to `[first last]` to limit the summed y band. `binWidth` defaults
-to 1 for a pixel-by-pixel x-x matrix; increase it to reduce matrix size.
-Results and the analyzed file list remain in the MATLAB workspace. These
-are zero-lag **ADU intensity** correlations across frames, not time-delay
-correlations or photon-count coincidences.
+MATLAB and Run it. With no `inputFolder` set, it analyzes completed `.h5`
+files directly in this repository's `data` folder. Set `inputFolder` before
+running to analyze a different folder. The script checks that the step index,
+setpoint, ROI, exposure, and frame dimensions agree. It reads frames in
+bounded batches and uses matrix multiplication for the x-x calculation.
+It computes `g2Pixel(x,y)` at each pixel, sums over `y` in each frame, then
+computes `pearsonMatrix(x1,x2)` across those summed x traces. `g2X` is the
+separate intensity g²(0) of each x trace. Set `yRange` to `[first last]` to
+limit the summed y band. `binWidth` defaults to 1 for a pixel-by-pixel x-x
+matrix; increase it to reduce matrix size. Results and the analyzed file
+list remain in the MATLAB workspace. These are zero-lag **ADU intensity**
+statistics across frames, not time-delay correlations or photon-count
+coincidences.
 
 New scans use uncompressed HDF5 and a bounded writer queue so saving can overlap
 continuous camera acquisition. A simulated camera waits if storage is slower;
