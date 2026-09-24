@@ -21,7 +21,7 @@ from hhg_control.sequencer.scan_manager import (
 
 
 def _small_camera() -> MockPcoCamera:
-    camera = MockPcoCamera(fast_simulation=True)
+    camera = MockPcoCamera()
     camera.connect()
     camera.set_roi((800, 980, 1056, 1180))
     return camera
@@ -112,7 +112,7 @@ def test_bounded_writer_queue_fails_instead_of_silently_losing_frames(tmp_path):
         def can_pause_acquisition(self):
             return False
 
-    camera = UnpausableCamera(fast_simulation=True)
+    camera = UnpausableCamera()
     camera.connect()
     camera.set_roi((800, 980, 1056, 1180))
     manager = SlowWriter(camera, tmp_path)
@@ -173,7 +173,7 @@ def test_camera_can_capture_while_writer_is_busy(tmp_path):
 
     class CountedCamera(MockPcoCamera):
         def __init__(self):
-            super().__init__(fast_simulation=True)
+            super().__init__()
             self.calls = 0
 
         def acquire_frames(self, num_frames):

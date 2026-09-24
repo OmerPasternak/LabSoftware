@@ -7,7 +7,7 @@ from hhg_control.sequencer.scan_manager import CameraScanManager
 
 
 def test_scan_step_hdf5_output(tmp_path):
-    cam = MockPcoCamera(fast_simulation=True)
+    cam = MockPcoCamera()
     cam.connect()
     cam.set_exposure_time(0.005)
     cam.set_trigger_mode(TriggerMode.EXTERNAL_EXPOSURE_START)
@@ -56,7 +56,7 @@ def test_scan_step_hdf5_output(tmp_path):
 
 def test_execute_scan_full_sequence(tmp_path):
     """Test full multi-step automated scan sequence execution."""
-    cam = MockPcoCamera(fast_simulation=True)
+    cam = MockPcoCamera()
     cam.connect()
     scan_mgr = CameraScanManager(camera=cam, storage_dir=tmp_path)
 
@@ -88,7 +88,7 @@ def test_execute_scan_full_sequence(tmp_path):
 
 def test_execute_scan_resume_and_callbacks(tmp_path):
     """Test resuming an experiment scan from a given step index and callback invocations."""
-    cam = MockPcoCamera(fast_simulation=True)
+    cam = MockPcoCamera()
     cam.connect()
     scan_mgr = CameraScanManager(camera=cam, storage_dir=tmp_path)
 

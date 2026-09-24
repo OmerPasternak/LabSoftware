@@ -12,7 +12,7 @@ from scripts.inspect_camera_scan import main, read_frame_metadata, scan_files, s
 
 
 def test_inspect_mock_scan_and_exports(tmp_path):
-    camera = MockPcoCamera(fast_simulation=True)
+    camera = MockPcoCamera()
     camera.connect()
     try:
         camera.set_roi((800, 980, 1056, 1180))

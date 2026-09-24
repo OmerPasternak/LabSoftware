@@ -40,13 +40,13 @@ class PausableReplay(ReplayCamera):
 class TimedMock(MockPcoCamera):
     """Measure time spent inside synthetic acquisition, with seconds as units."""
 
-    def __init__(self, fast_simulation: bool) -> None:
-        super().__init__(fast_simulation=fast_simulation)
+    def __init__(self) -> None:
+        super().__init__()
         self.acquire_wall_s = 0.0
         self.acquire_cpu_s = 0.0
 
     def acquire_frames(self, num_frames):
-        """Time frame synthesis and optional mock exposure delay in seconds."""
+        """Time frame synthesis and the mandatory mock exposure wait in seconds."""
         wall_start = time.perf_counter()
         cpu_start = time.process_time()
         try:
@@ -108,14 +108,14 @@ def main() -> None:
         "frames_per_step": FRAMES_PER_STEP,
         "steps": STEPS,
         "exposure_s": EXPOSURE_S,
-        "note": "Prepared replay has no camera SDK or USB cost; OS write cache may affect HDF5 time.",
+        "note": "Prepared replay has no exposure, camera SDK, or USB cost; OS write cache may affect HDF5 time.",
         "cases": {},
     }
-    for name in ("mock_realistic", "mock_no_exposure_sleep", "prepared_replay"):
+    for name in ("mock_realistic", "prepared_replay"):
         if name == "prepared_replay":
             camera = PausableReplay(ROI[2] - ROI[0], ROI[3] - ROI[1], 4, "noise")
         else:
-            camera = TimedMock(fast_simulation=name == "mock_no_exposure_sleep")
+            camera = TimedMock()
         camera.connect()
         try:
             camera.set_exposure_time(EXPOSURE_S)

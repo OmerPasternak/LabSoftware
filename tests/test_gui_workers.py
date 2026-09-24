@@ -17,7 +17,7 @@ from hhg_control.ui.camera.workers import LiveStreamTask
 
 def test_measurement_log_reports_complete_scan_duration(qtbot, tmp_path):
     """A mock-camera GUI scan reports elapsed capture and save time."""
-    camera = MockPcoCamera(fast_simulation=True)
+    camera = MockPcoCamera()
     camera.connect()
     camera.set_roi((0, 1052, 2560, 1108))
     window = CameraMainWindow()
@@ -45,7 +45,7 @@ def test_measurement_log_reports_complete_scan_duration(qtbot, tmp_path):
 
 def test_external_trigger_checkbox_applies_and_reads_back_mock_mode(qtbot, tmp_path):
     """The checkbox changes an idle camera in a worker and saves the mode."""
-    camera = MockPcoCamera(fast_simulation=True)
+    camera = MockPcoCamera()
     camera.connect()
     camera.set_roi((800, 1052, 1056, 1108))
     window = CameraMainWindow()
@@ -78,7 +78,7 @@ def test_external_trigger_checkbox_applies_and_reads_back_mock_mode(qtbot, tmp_p
 
 def test_external_trigger_change_pauses_and_resumes_mock_live_view(qtbot, tmp_path):
     """A live camera is never reconfigured while its reader owns the buffer."""
-    camera = MockPcoCamera(fast_simulation=True)
+    camera = MockPcoCamera()
     camera.connect()
     camera.set_roi((800, 1052, 1056, 1108))
     window = CameraMainWindow()
@@ -102,7 +102,7 @@ def test_external_trigger_change_pauses_and_resumes_mock_live_view(qtbot, tmp_pa
 
 def test_live_view_resumes_after_mock_measurement(qtbot, tmp_path):
     """A scan returns camera ownership to the live worker after saving."""
-    camera = MockPcoCamera(fast_simulation=True)
+    camera = MockPcoCamera()
     camera.connect()
     camera.set_roi((800, 1052, 1056, 1108))
     window = CameraMainWindow()
@@ -138,7 +138,7 @@ def test_live_view_resumes_after_mock_measurement(qtbot, tmp_path):
 
 def test_live_view_returns_after_scan_preflight_rejection(qtbot, tmp_path, monkeypatch):
     """Rejecting an unapplied ROI leaves the prior live view available."""
-    camera = MockPcoCamera(fast_simulation=True)
+    camera = MockPcoCamera()
     camera.connect()
     window = CameraMainWindow()
     qtbot.addWidget(window)
@@ -168,7 +168,7 @@ def test_live_view_returns_after_scan_preflight_rejection(qtbot, tmp_path, monke
 
 def test_stop_cancels_pending_live_to_scan_handoff(qtbot, tmp_path):
     """STOP during live shutdown must not start a queued measurement."""
-    camera = MockPcoCamera(fast_simulation=True)
+    camera = MockPcoCamera()
     camera.connect()
     window = CameraMainWindow()
     qtbot.addWidget(window)
@@ -190,7 +190,7 @@ def test_stop_cancels_pending_live_to_scan_handoff(qtbot, tmp_path):
 
 def test_measurement_rejects_unapplied_roi(qtbot, tmp_path, monkeypatch):
     """A drawn ROI cannot silently produce full-sensor measurement files."""
-    camera = MockPcoCamera(fast_simulation=True)
+    camera = MockPcoCamera()
     camera.connect()
     window = CameraMainWindow()
     qtbot.addWidget(window)
@@ -214,7 +214,7 @@ def test_measurement_rejects_unapplied_roi(qtbot, tmp_path, monkeypatch):
 
 def test_measurement_rejects_trigger_checkbox_hardware_mismatch(qtbot, tmp_path, monkeypatch):
     """Never start a scan when the selected trigger differs from camera readback."""
-    camera = MockPcoCamera(fast_simulation=True)
+    camera = MockPcoCamera()
     camera.connect()
     window = CameraMainWindow()
     qtbot.addWidget(window)
@@ -236,7 +236,7 @@ def test_measurement_rejects_trigger_checkbox_hardware_mismatch(qtbot, tmp_path,
 
 def test_measurement_rejects_run_larger_than_free_space(qtbot, tmp_path, monkeypatch):
     """Check the full remaining scan size before opening its first HDF5 file."""
-    camera = MockPcoCamera(fast_simulation=True)
+    camera = MockPcoCamera()
     camera.connect()
     window = CameraMainWindow()
     qtbot.addWidget(window)
@@ -275,7 +275,7 @@ def test_measurement_duration_accumulates_active_time_across_pause(qtbot, monkey
 
 
 def test_live_worker_stops_cooperatively(qtbot, tmp_path):
-    camera = MockPcoCamera(fast_simulation=True)
+    camera = MockPcoCamera()
     camera.connect()
     camera.set_roi((800, 980, 1056, 1180))
     manager = CameraScanManager(camera, tmp_path)
@@ -292,7 +292,7 @@ def test_live_worker_stops_cooperatively(qtbot, tmp_path):
 
 def test_live_worker_immediate_stop_before_run_stays_stopped(qtbot, tmp_path):
     """A queued worker must not re-enable itself after STOP was requested."""
-    camera = MockPcoCamera(fast_simulation=True)
+    camera = MockPcoCamera()
     camera.connect()
     manager = CameraScanManager(camera, tmp_path)
     worker = LiveStreamTask(manager)
@@ -407,7 +407,7 @@ def test_mock_gui_live_start_stop_keeps_camera_idle(qtbot, tmp_path):
     """Exercise the complete worker-to-display flow without physical hardware."""
     window = CameraMainWindow()
     qtbot.addWidget(window)
-    window.camera = MockPcoCamera(fast_simulation=True)
+    window.camera = MockPcoCamera()
     window.camera.connect()
     window.camera.set_roi((800, 980, 1056, 1180))
     window.scan_manager = CameraScanManager(window.camera, tmp_path)
@@ -486,7 +486,7 @@ def test_repeated_roi_and_full_sensor_during_live_stays_open(qtbot, tmp_path):
     window = CameraMainWindow()
     qtbot.addWidget(window)
     window.show()
-    window.camera = MockPcoCamera(fast_simulation=True)
+    window.camera = MockPcoCamera()
     window.camera.connect()
     window.camera.set_roi((800, 980, 1056, 1180))
     window.scan_manager = CameraScanManager(window.camera, tmp_path)
@@ -522,7 +522,7 @@ def test_running_button_is_status_only_and_stop_ends_live(qtbot, tmp_path):
     """RUNNING cannot stop the stream; STOP remains the explicit stop action."""
     window = CameraMainWindow()
     qtbot.addWidget(window)
-    window.camera = MockPcoCamera(fast_simulation=True)
+    window.camera = MockPcoCamera()
     window.camera.connect()
     window.camera.set_roi((800, 980, 1056, 1180))
     window.scan_manager = CameraScanManager(window.camera, tmp_path)
@@ -549,12 +549,12 @@ def test_source_can_switch_after_stop_without_touching_real_hardware(qtbot, monk
 
     class FakePhysicalCamera(MockPcoCamera):
         def __init__(self):
-            super().__init__(fast_simulation=True)
+            super().__init__()
 
     monkeypatch.setattr(pco_edge, "PcoEdgeCamera", FakePhysicalCamera)
     window = CameraMainWindow()
     qtbot.addWidget(window)
-    window.camera = MockPcoCamera(fast_simulation=True)
+    window.camera = MockPcoCamera()
     window.camera.connect()
     window.camera.set_roi((800, 980, 1056, 1180))
     window.scan_manager = CameraScanManager(window.camera, tmp_path)

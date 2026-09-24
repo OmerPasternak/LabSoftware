@@ -31,9 +31,10 @@ evidence available on 2026-09-24, not a hardware acceptance result.
 - A matched software benchmark is available with
   `./.venv/Scripts/python.exe -m scripts.benchmark_simulation_overhead`.
   It times 2 x 1,000 frames at 1740 x 128, 1 ms, using the production HDF5
-  scan writer for realistic mock, mock without its exposure sleep, and
-  prepared-frame replay. Reports go to `data/test_data`; its own HDF5 files
-  are removed after measurement. The replay has no USB or camera SDK cost.
+  scan writer for the exposure-paced mock and prepared-frame replay. Mock
+  image synthesis always follows the full requested exposure wait. Reports go
+  to `data/test_data`; its own HDF5 files are removed after measurement. The
+  replay isolates storage and has no exposure, USB, or camera SDK cost.
 
 ## Before the lab session
 

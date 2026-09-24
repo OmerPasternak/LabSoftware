@@ -21,9 +21,8 @@ class MockPcoCamera(BaseCamera):
         """Synthetic frames can wait for storage without losing camera frames."""
         return True
 
-    def __init__(self, fast_simulation: bool = False) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.fast_simulation = fast_simulation
         self._model  = "pco.edge 5.5 USB (EMULATOR)"
         self._serial = "MOCK-EDGE-5501"
         self._rng = np.random.default_rng(42)
@@ -161,7 +160,11 @@ class MockPcoCamera(BaseCamera):
     # ------------------------------------------------------------------
 
     def acquire_frames(self, num_frames: int) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
-        """Acquire ``num_frames`` synthetic frames directly in requested ROI bounds."""
+        """Wait one configured exposure per frame, then synthesize ROI images.
+
+        Exposure is in seconds; generation time adds to the simulated capture
+        duration. No camera hardware or external trigger pulse is involved.
+        """
         if not self._is_connected:
             raise RuntimeError("Cannot acquire frames: Mock camera is not connected.")
         if num_frames < 1:
@@ -170,8 +173,10 @@ class MockPcoCamera(BaseCamera):
         if self._gaussian_profile is None or self._dark_bank is None:
             raise RuntimeError("Mock camera simulation data was not initialized.")
 
-        if not self.fast_simulation:
-            time.sleep(self._exposure_time_s * num_frames)
+        # Synthetic image generation is additional work, not a substitute for
+        # the configured exposure. Every requested frame contributes its full
+        # exposure duration, even when the image is generated quickly.
+        time.sleep(self._exposure_time_s * num_frames)
 
         x0, y0, x1, y1 = self.get_roi()
         roi_h = y1 - y0

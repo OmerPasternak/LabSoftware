@@ -115,7 +115,7 @@ def test_camera_controls_name_counts_and_show_exposure_range():
 def test_gui_connection_reflects_actual_mode_without_implicit_reboot(monkeypatch):
     app = QApplication.instance() or QApplication([])
     window = CameraMainWindow()
-    camera = MockPcoCamera(fast_simulation=True)
+    camera = MockPcoCamera()
     camera.set_readout_mode(ReadoutMode.GLOBAL_SHUTTER)
     camera.connect()
     started = []
@@ -134,7 +134,7 @@ def test_gui_connection_reflects_actual_mode_without_implicit_reboot(monkeypatch
 def test_gui_applies_mode_explicitly_selected_before_connection(monkeypatch):
     app = QApplication.instance() or QApplication([])
     window = CameraMainWindow()
-    camera = MockPcoCamera(fast_simulation=True)
+    camera = MockPcoCamera()
     camera.connect()
     started = []
     monkeypatch.setattr(window, "_start_mode_change", lambda *args, **kwargs: started.append(args))

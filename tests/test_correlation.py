@@ -45,7 +45,7 @@ def test_compute_g2_map_shape_and_validation():
 
 def test_acquire_and_compute_g2_mock_camera():
     """Verify acquire_and_compute_g2 works seamlessly with MockPcoCamera."""
-    cam = MockPcoCamera(fast_simulation=True)
+    cam = MockPcoCamera()
     cam.connect()
 
     g2_map, stats = acquire_and_compute_g2(cam, num_frames=10, epsilon=0.0)

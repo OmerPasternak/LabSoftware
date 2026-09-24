@@ -8,7 +8,7 @@ from hhg_control.sequencer.scan_manager import CameraScanManager
 
 def test_consecutive_scan_steps(tmp_path):
     """Test running multiple consecutive acquisitions in a single session without state corruption."""
-    cam = MockPcoCamera(fast_simulation=True)
+    cam = MockPcoCamera()
     cam.connect()
     scan_mgr = CameraScanManager(camera=cam, storage_dir=tmp_path)
 
