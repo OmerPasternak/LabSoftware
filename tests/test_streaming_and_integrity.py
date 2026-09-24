@@ -72,6 +72,29 @@ def test_atomic_hdf5_schema_metadata_and_no_overwrite(tmp_path):
     camera.close()
 
 
+def test_mock_scan_saves_more_than_ten_thousand_frames_in_batches(tmp_path, monkeypatch):
+    """A long mock step is fully written without buffering its frames together."""
+    monkeypatch.setattr("hhg_control.drivers.mock_camera.time.sleep", lambda _: None)
+    camera = MockPcoCamera()
+    camera.connect()
+    camera.set_roi((0, 1072, 64, 1088))
+    manager = CameraScanManager(camera, tmp_path)
+    frame_count = 10_001
+    try:
+        path, last_frame = manager.acquire_and_save_step(
+            "long_step", 0, "setpoint", 1.0, frame_count, batch_size=256,
+        )
+        assert last_frame.shape == (16, 64)
+        assert not list(tmp_path.glob("*.partial"))
+        with h5py.File(path, "r") as h5f:
+            assert bool(h5f.attrs["complete"])
+            assert h5f.attrs["frames_written"] == frame_count
+            assert h5f["images"].shape == (frame_count, 16, 64)
+            assert h5f["frame_metadata/json"].shape == (frame_count,)
+    finally:
+        camera.close()
+
+
 def test_abort_retains_partial_file(tmp_path):
     camera = _small_camera()
     manager = CameraScanManager(camera, tmp_path)

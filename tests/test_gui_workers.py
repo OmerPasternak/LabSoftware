@@ -91,6 +91,19 @@ def test_one_point_scan_keeps_endpoints_equal_and_saves_one_mock_step(qtbot, tmp
     window.close()
 
 
+def test_frames_per_step_accepts_typed_counts_above_ten_thousand(qtbot):
+    """The GUI must accept long acquisitions beyond its former 1,000-frame cap."""
+    window = CameraMainWindow()
+    qtbot.addWidget(window)
+    for count in (10_000, 50_000):
+        window.spn_frames.lineEdit().selectAll()
+        qtbot.keyClicks(window.spn_frames, str(count))
+        qtbot.keyPress(window.spn_frames, Qt.Key.Key_Return)
+        assert window.spn_frames.value() == count
+    assert window.spn_frames.maximum() == 9_999_999
+    window.close()
+
+
 def test_external_trigger_checkbox_applies_and_reads_back_mock_mode(qtbot, tmp_path):
     """The checkbox changes an idle camera in a worker and saves the mode."""
     camera = MockPcoCamera()

@@ -415,10 +415,13 @@ class CameraMainWindow(QMainWindow):
 
         lay_cam.addWidget(QLabel("Frames/step:"), 1, 0)
         self.spn_frames = QSpinBox()
-        self.spn_frames.setMinimumWidth(60)
+        self.spn_frames.setMinimumWidth(112)
         self.spn_frames.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        self.spn_frames.setRange(1, 1000)
+        self.spn_frames.setRange(1, 9_999_999)
         self.spn_frames.setValue(5)
+        self.spn_frames.setToolTip(
+            "1–9,999,999 frames per scan step; storage space is checked before acquisition."
+        )
         lay_cam.addWidget(self.spn_frames, 1, 1)
 
         # Readout mode selector
