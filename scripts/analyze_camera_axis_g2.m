@@ -9,8 +9,16 @@
 % These are zero-frame-lag camera ADU statistics, not g2(tau) or photon
 % coincidences. Zero-mean g2 and zero-variance Pearson values return NaN.
 
+defaultFolder = fullfile(fileparts(mfilename('fullpath')), '..', 'data');
 if ~exist('inputFolder', 'var') || isempty(inputFolder) || isequal(inputFolder, 0)
-    inputFolder = fullfile(fileparts(mfilename('fullpath')), '..', 'data');
+    inputFolder = defaultFolder;
+elseif ~(ischar(inputFolder) || (isstring(inputFolder) && isscalar(inputFolder)))
+    warning('Invalid inputFolder value. Using the project data folder: %s', defaultFolder);
+    inputFolder = defaultFolder;
+elseif ~isfolder(inputFolder)
+    warning('inputFolder does not exist: %s. Using the project data folder: %s', ...
+        char(inputFolder), defaultFolder);
+    inputFolder = defaultFolder;
 end
 if ~exist('yRange', 'var') || isempty(yRange)
     yRange = [];  % [] sums all y pixels; or [first last] in local ROI pixels
@@ -28,7 +36,7 @@ clear g2Matrix  % remove a stale result from older versions of this script
 
 inputFolder = char(inputFolder);
 if ~isfolder(inputFolder)
-    error('inputFolder must be an existing folder.');
+    error('No data folder found at %s. Set inputFolder to the folder containing your .h5 files.', inputFolder);
 end
 if ~isscalar(binWidth) || ~isfinite(binWidth) || binWidth < 1 || binWidth ~= fix(binWidth)
     error('binWidth must be a positive integer in pixels.');

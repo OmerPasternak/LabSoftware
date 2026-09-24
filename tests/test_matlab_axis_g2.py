@@ -94,6 +94,9 @@ def test_matlab_folder_pixel_g2_and_x_correlation(tmp_path):
             "inputFolder=0",
             f"run('{matlab_string(auto_script)}')",
             "assert(totalFrames==3 && numel(filesAnalyzed)==2)",
+            f"inputFolder=fullfile('{matlab_string(auto_project)}', 'old_missing_folder')",
+            f"run('{matlab_string(auto_script)}')",
+            "assert(totalFrames==3 && numel(filesAnalyzed)==2)",
         ]
     )
     result = subprocess.run(

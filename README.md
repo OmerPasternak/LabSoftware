@@ -79,7 +79,9 @@ migration and a new schema version.
 For camera intensity correlations, open `scripts/analyze_camera_axis_g2.m` in
 MATLAB and Run it. With no `inputFolder` set, it analyzes completed `.h5`
 files directly in this repository's `data` folder. Set `inputFolder` before
-running to analyze a different folder. The script checks that the step index,
+running to analyze a different folder. If a stale `inputFolder` points to a
+folder that no longer exists, the script warns and uses the repository's
+`data` folder. The script checks that the step index,
 setpoint, ROI, exposure, and frame dimensions agree. It reads frames in
 bounded batches and uses matrix multiplication for the x-x calculation.
 It computes `g2Pixel(x,y)` at each pixel, sums over `y` in each frame, then
