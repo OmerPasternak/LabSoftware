@@ -1,6 +1,7 @@
 """Render-only checks for the camera viewer at common window sizes."""
 
 import os
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -10,6 +11,29 @@ from PyQt6.QtWidgets import QApplication, QLabel
 from hhg_control.drivers.base_camera import ReadoutMode
 from hhg_control.drivers.mock_camera import MockPcoCamera
 from hhg_control.ui.camera.camera_panel import CameraMainWindow
+
+
+def test_roi_draw_mode_ends_after_one_completed_rectangle():
+    """A completed selection leaves its outline and unchecks Draw ROI."""
+    app = QApplication.instance() or QApplication([])
+    window = CameraMainWindow()
+    try:
+        window.show()
+        window._update_display(np.zeros((216, 256), dtype=np.uint16),
+                               {"roi": (0, 0, 2560, 2160)})
+        app.processEvents()
+        window.btn_draw_roi.click()
+        assert window.btn_draw_roi.isChecked()
+        window._on_canvas_button_press(SimpleNamespace(
+            inaxes=window.axis, xdata=800, ydata=800, button=1))
+        window._on_canvas_button_release(SimpleNamespace(xdata=1200, ydata=1300))
+        assert not window.btn_draw_roi.isChecked()
+        assert window._roi_patch is not None
+        window._on_canvas_button_press(SimpleNamespace(
+            inaxes=window.axis, xdata=900, ydata=900, button=1))
+        assert window._roi_drag_patch is None
+    finally:
+        window.close()
 
 
 def test_full_frame_and_color_scale_fit_when_window_resizes():
@@ -85,6 +109,12 @@ def test_gui_offers_actual_global_shutter_mode():
         modes = [window.cmb_readout_mode.itemData(i) for i in range(window.cmb_readout_mode.count())]
         assert modes == [ReadoutMode.ROLLING_SHUTTER, ReadoutMode.GLOBAL_SHUTTER]
         assert window.cmb_readout_mode.itemText(1) == "Global Shutter"
+        window.show()
+        app.processEvents()
+        mode_box = window.cmb_readout_mode
+        assert mode_box.geometry().right() <= mode_box.parentWidget().width() - 24
+        assert all(mode_box.fontMetrics().horizontalAdvance(mode_box.itemText(i)) <= mode_box.width() - 24
+                   for i in range(mode_box.count()))
     finally:
         window.close()
 

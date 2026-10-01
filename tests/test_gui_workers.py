@@ -527,6 +527,7 @@ def test_draw_roi_keeps_image_visible_and_draws_outline(qtbot):
     window._on_canvas_motion(SimpleNamespace(xdata=1200, ydata=1300))
     assert window._roi_drag_patch is not None
     window._on_canvas_button_release(SimpleNamespace(xdata=1200, ydata=1300))
+    assert not window.btn_draw_roi.isChecked()
     assert window._roi_drag_patch is None
     assert window._roi_patch is not None
     assert window._roi_patch.get_animated()

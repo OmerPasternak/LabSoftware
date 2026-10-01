@@ -390,7 +390,7 @@ class CameraMainWindow(QMainWindow):
         grp_camera = QGroupBox("Camera & Hardware ROI")
         lay_cam = QGridLayout(grp_camera)
         lay_cam.setSpacing(4)
-        lay_cam.setContentsMargins(6, 8, 6, 6)
+        lay_cam.setContentsMargins(6, 8, 18, 6)
 
         self.lbl_exposure = QLabel("Exposure (ms, 0.5–10,000):")
         lay_cam.addWidget(self.lbl_exposure, 0, 0)
@@ -425,10 +425,16 @@ class CameraMainWindow(QMainWindow):
         lay_cam.addWidget(self.spn_frames, 1, 1)
 
         # Readout mode selector
-        lay_cam.addWidget(QLabel("Mode:"), 1, 2)
+        mode_row = QHBoxLayout()
+        mode_row.setContentsMargins(0, 0, 0, 0)
+        mode_row.setSpacing(4)
+        mode_label = QLabel("Mode")
+        mode_label.setStyleSheet("font-size: 9px;")
+        mode_label.setFixedWidth(36)
+        mode_row.addWidget(mode_label)
         self.cmb_readout_mode = QComboBox()
-        self.cmb_readout_mode.setMinimumWidth(180)
-        self.cmb_readout_mode.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.cmb_readout_mode.setFixedWidth(165)
+        self.cmb_readout_mode.setStyleSheet("font-size: 9px;")
         self.cmb_readout_mode.addItem("Rolling Shutter", userData=ReadoutMode.ROLLING_SHUTTER)
         self.cmb_readout_mode.addItem("Global Shutter", userData=ReadoutMode.GLOBAL_SHUTTER)
         self.cmb_readout_mode.setCurrentIndex(0)
@@ -438,7 +444,9 @@ class CameraMainWindow(QMainWindow):
             "Switching triggers camera reboot (~5 s)."
         )
         self.cmb_readout_mode.currentIndexChanged.connect(self._on_readout_mode_changed)
-        lay_cam.addWidget(self.cmb_readout_mode, 1, 3)
+        mode_row.addWidget(self.cmb_readout_mode)
+        mode_row.addStretch(1)
+        lay_cam.addLayout(mode_row, 1, 2, 1, 2)
 
         # ROI spinboxes — value changes immediately redraw ROI rectangle
         lay_cam.addWidget(QLabel("X:"), 2, 0)
@@ -1256,6 +1264,7 @@ class CameraMainWindow(QMainWindow):
             self._roi_drag_patch = None
         if start is not None and end[0] is not None and end[1] is not None:
             self._on_roi_drawn(start[0], start[1], float(end[0]), float(end[1]))
+            self._uncheck_draw_roi()
         else:
             self._blit_frame()
         if self.active_live_task is not None:
@@ -1518,9 +1527,13 @@ class CameraMainWindow(QMainWindow):
         if self.active_live_task is not None:
             self.active_live_task.acknowledge_frame()
         self._on_canvas_button_release(None)
-        self.btn_draw_roi.blockSignals(True)
+        self._uncheck_draw_roi()
+
+    def _uncheck_draw_roi(self) -> None:
+        """Leave drawing mode without recursively handling the button toggle."""
+        was_blocked = self.btn_draw_roi.blockSignals(True)
         self.btn_draw_roi.setChecked(False)
-        self.btn_draw_roi.blockSignals(False)
+        self.btn_draw_roi.blockSignals(was_blocked)
 
     def _draw_roi_patch(self, x0: int, y0: int, x1: int, y1: int) -> None:
         """Stamp a persistent thin red outline rectangle onto the axis."""
