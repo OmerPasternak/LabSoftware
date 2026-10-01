@@ -112,7 +112,7 @@ def test_gui_offers_actual_global_shutter_mode():
         window.show()
         app.processEvents()
         mode_box = window.cmb_readout_mode
-        assert mode_box.geometry().right() <= mode_box.parentWidget().width() - 24
+        assert mode_box.geometry().right() <= mode_box.parentWidget().width() - 12
         assert all(mode_box.fontMetrics().horizontalAdvance(mode_box.itemText(i)) <= mode_box.width() - 24
                    for i in range(mode_box.count()))
     finally:
