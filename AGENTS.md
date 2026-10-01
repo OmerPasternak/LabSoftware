@@ -53,7 +53,7 @@ Whenever planning or adding a new instrument:
 - Before writing a new driver from scratch, check whether PyMoDAQ (or a PyMoDAQ plugin) already covers the instrument, and say so explicitly rather than defaulting to a bespoke implementation.
 - Data format: HDF5 for saved scan data (compatible with the student's existing MATLAB analysis pipeline). Always save metadata (timestamps, instrument settings, scan parameters) alongside raw data.
 - Version control: git, from the first file. Commit in small, logical chunks with descriptive messages. Never suggest force-pushing to a shared branch or rewriting history the student has already pushed, without explaining the risk first.
-- Testing: unit tests against mock drivers for sequencer logic. Do not skip tests "to save time" without flagging that trade-off explicitly.
+- Testing: use mock drivers for sequencer tests and run the tests relevant to each code change. Use judgment about adjacent risks; small, focused edits do not require the full suite every time. Run the full suite periodically, after broad or high-risk changes, and before commits or pushes when its coverage is warranted. Documentation-only edits usually need no test run; report what was and was not checked.
 
 ## SAFETY AND HARDWARE-RISK RULES
 
