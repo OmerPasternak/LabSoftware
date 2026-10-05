@@ -1,7 +1,7 @@
 # %% SETUP — helpers/configuration for the companion notebook and CLI
 """Section-by-section lab-PC acceptance checks using the existing camera stack.
 
-Notebook: open lab_computer_acceptance.ipynb, select this checkout's .venv
+Notebook: open application tests/lab_computer_acceptance.ipynb, select this checkout's .venv
 interpreter, run setup, edit CONFIG, then run individual numbered cells.
 IPython/Spyder console: import this module, edit CONFIG, call execute(3, CONFIG).
 Each section opens/closes its own camera.
@@ -71,7 +71,7 @@ class Settings:
     output_dir: Path = ROOT / "data/test_data/lab_acceptance"
     expected_serial: str | None = None  # Fill in the physical camera serial.
     usb_port_note: str = "FILL IN: controller, physical port, cable"
-    roi: tuple[int, int, int, int] = (612, 1016, 2352, 1144)  # 1740 x 128
+    roi: tuple[int, int, int, int] = (0, 1016, 2560, 1144)  # 2560 x 128, centered vertically
     exposure_s: float = 0.001
     readout: ReadoutMode = ReadoutMode.GLOBAL_SHUTTER
     target_fps: float = 455.0  # Storage load/reference only; replace with measured rate.
@@ -83,9 +83,10 @@ class Settings:
     speed_frames: int = 10000
     repeats: int = 3
     sustained_seconds: float = 300.0  # ~61 GB at the default ROI/rate.
-    max_section_raw_gb: float = 100.0  # Per-section budget, not permission to fill disk.
+    max_section_raw_gb: float = 120.0  # Per-section budget, not permission to fill disk.
     run_offline_tests: bool = True
-    # Files to inspect in section 7. Empty means use this script's saved scans.
+    # Section 7: empty uses the latest short scan; one path checks it; two paths
+    # compare an original and its byte-for-byte copy.
     data_files: tuple[Path, ...] = ()
     # Only fill these after the manual bench checks described in section 8.
     trigger_bench_ready: bool = False
@@ -109,6 +110,15 @@ def json_default(value):
     if isinstance(value, np.generic):
         return value.item()
     raise TypeError(f"Cannot serialize {type(value).__name__}")
+
+
+def sha256_file(path: Path) -> str:
+    """Hash an entire file in bounded reads to verify an archived copy."""
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for block in iter(lambda: handle.read(32 * 2**20), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def prepare(cfg: Settings, frames: int = 0) -> Path:
@@ -332,9 +342,18 @@ def section_1(cfg: Settings) -> dict:
         temp = destination / ("pytest_" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%f"))
         run = subprocess.run([sys.executable, "-m", "pytest", "-q", "--basetemp", str(temp)],
                              cwd=ROOT, capture_output=True, text=True)
-        (destination / (temp.name + ".log")).write_text(run.stdout + run.stderr, encoding="utf-8")
-        require(run.returncode == 0, f"Offline tests failed; see {temp.name}.log")
-        result["offline_tests"] = run.stdout
+        log_path = destination / (temp.name + ".log")
+        log_path.write_text(run.stdout + run.stderr, encoding="utf-8")
+        result["offline_tests"] = {
+            "passed": run.returncode == 0,
+            "exit_code": run.returncode,
+            "log": str(log_path),
+            "summary": run.stdout.strip().splitlines()[-1] if run.stdout.strip() else run.stderr.strip(),
+        }
+        if run.returncode:
+            print(f"Offline tests failed; see {log_path}. Continuing with independent storage checks.")
+    else:
+        result["offline_tests"] = {"passed": None, "status": "SKIPPED"}
     width, height = cfg.roi[2] - cfg.roi[0], cfg.roi[3] - cfg.roi[1]
     # Replay can wait; unpaced throughput estimates writer capacity rather than
     # modeling a camera FIFO. Existing benchmark cleans up only its own outputs.
@@ -356,6 +375,12 @@ def section_1(cfg: Settings) -> dict:
     required_mb_s = width * height * 2 * cfg.target_fps / 1e6
     result["required_raw_MB_per_s"] = required_mb_s
     result["provisional_writer_margin_met"] = result["unpaced_writer"]["raw_MB_per_s"] >= required_mb_s * cfg.storage_margin
+    result["readiness_passed"] = (
+        result["offline_tests"]["passed"] is True
+        and result["provisional_writer_margin_met"]
+        and result["paced_writer"]["verified_consecutive_frame_ids"]
+        and result["paced_writer"]["verified_image_frame_markers"]
+    )
     result["storage_note"] = "Synthetic results; OS/device caching and replay waiting limit hardware conclusions."
     return result
 
@@ -398,9 +423,10 @@ def section_4(cfg: Settings) -> dict:
     if cfg.source == "physical" and cfg.camware_fps is not None:
         require(cfg.camware_fps > 0, "CamWare baseline must be positive")
         result["camware_fps"] = cfg.camware_fps
-        result["provisional_speed_target_met"] = saved_median >= cfg.speed_fraction * cfg.camware_fps
+        result["provisional_capture_target_met"] = capture_median >= cfg.speed_fraction * cfg.camware_fps
+        result["saved_over_camware_capture"] = saved_median / cfg.camware_fps
     else:
-        result["provisional_speed_target_met"] = None
+        result["provisional_capture_target_met"] = None
         result["pending"] = "Matched physical CamWare baseline needed for hardware speed acceptance."
     return result
 
@@ -469,12 +495,32 @@ def section_6(cfg: Settings) -> dict:
 
 
 def section_7(cfg: Settings) -> dict:
-    """Read all raw pixels and metadata, retain hashes, and provide MATLAB examples."""
+    """Verify one scan in Python and optionally compare its byte-for-byte copy."""
     prepare(cfg)
-    paths = list(cfg.data_files) if cfg.data_files else sorted(Path(cfg.output_dir).glob("acceptance_*.h5"))
-    require(paths, "No files found: run section 3 or set CONFIG.data_files")
-    return {"files": [inspect_file(path, full_read=True) for path in paths],
-            "pending": "MATLAB axis agreement and dark/illuminated image interpretation require manual review."}
+    if cfg.data_files:
+        require(1 <= len(cfg.data_files) <= 2,
+                "Set CONFIG.data_files to one scan or (original, copy)")
+        paths = [Path(path) for path in cfg.data_files]
+    else:
+        candidates = list(Path(cfg.output_dir).glob("acceptance_short_*.h5"))
+        require(candidates, "Run section 3 first, or set CONFIG.data_files")
+        paths = [max(candidates, key=lambda path: path.stat().st_mtime_ns)]
+    files = []
+    for path in paths:
+        result = inspect_file(path, full_read=True)
+        result["file_sha256"] = sha256_file(path)
+        files.append(result)
+    comparison = None
+    if len(files) == 2:
+        fields = ("file_sha256", "pixel_sha256", "metadata_sha256", "frames",
+                  "shape_frame_y_x", "roi_bounds", "camera_model", "camera_serial",
+                  "readout_mode", "trigger_mode", "exposure_s", "schema_version", "compression")
+        differences = [field for field in fields if files[0][field] != files[1][field]]
+        require(not differences, f"Original and copy differ in: {', '.join(differences)}")
+        comparison = {"original": str(paths[0]), "copy": str(paths[1]),
+                      "byte_for_byte_match": True, "pixel_and_metadata_match": True}
+    return {"files": files, "copy_comparison": comparison,
+            "note": "Python checks raw ADU data and metadata. MATLAB interpretation and physical calibration are separate checks."}
 
 
 def section_8(cfg: Settings) -> dict:
@@ -556,8 +602,10 @@ def selected(number: int) -> bool:
 # 4. Watch Task Manager > Performance > Disk during a longer write. Short results
 #    can fit in OS/device caches; fsync timings still depend on the storage stack.
 # Benchmarks: all offline tests pass; sufficient free space; proposed unpaced
-# capacity >= 1.30 * (ROI width * height * 2 bytes * required fps). At 1740x128,
-# 455 fps means 202.68 MB/s raw and a proposed 263.48 MB/s writer-capacity target.
+# capacity >= 1.30 * (ROI width * height * 2 bytes * required fps). At 2560x128,
+# 455 fps means 298.19 MB/s raw and a proposed 387.65 MB/s writer-capacity target.
+# A GUI layout test may fail separately; its failure is recorded and storage
+# still runs. The storage source is synthetic, so it cannot test camera or USB.
 # Paced replay: every ID/image marker must agree, no error; review max lateness.
 # Replay waits for scheduled delivery and cannot prove physical FIFO tolerance.
 if selected(1):
@@ -566,7 +614,9 @@ if selected(1):
 
 # %% 2 — Physical identity, settings and reconnect
 # 1. Close CamWare/GUI. Review exposure_s, roi, readout; set source="physical".
-# 2. Fill expected_serial from the camera label; execute this cell.
+# 2. Global Shutter is mode value 2. expected_serial is the camera's unique
+#    hardware serial, not a shutter value. Read it first or use the camera label,
+#    then fill expected_serial and repeat to verify the intended camera.
 # 3. In GUI separately check Rolling -> Global -> Rolling -> intended mode.
 #    Camera reboot may take seconds. Confirm final ROI/exposure/trigger readback.
 # 4. Close/reopen the GUI; repeat once. Do not run GUI and script simultaneously.
@@ -588,16 +638,22 @@ if selected(3):
 
 
 # %% 4 — Camera download vs saving speed (3 x 10,000 by default)
-# 1. In CamWare measure >=10,000 frames three times at exactly the same PC, USB
-#    port, ROI, exposure, shutter and AUTO_SEQUENCE trigger. Record measured fps
-#    and whether timing includes disk saving. Put capture baseline in camware_fps.
-# 2. Close CamWare; run this cell. Script compares capture-only and saved scans.
-# 3. Close script handles (automatic). In GUI repeat 10,000 frames three times,
+# 1. Close our GUI. In CamWare Camera Properties select Global Shutter, Auto
+#    Sequence, 1 ms exposure, and a centered 2560x128 ROI. CamWare's one-based
+#    inclusive bounds may read Left 1, Right 2560, Top 1017, Bottom 1144.
+# 2. Acquisition > Memory Allocation Dialog: start with 1000 frames (~0.66 GB
+#    raw). Use 10000 (~6.55 GB raw) only if available PC RAM permits.
+# 3. Use Record Sequence, not Live Preview. Time the actual recording, note its
+#    saved-in-memory frame count, and repeat three times. Record fps=count/time.
+#    Playback speed and configured frame rate are not measured capture rates.
+#    Enter the matched memory-recording result in camware_fps.
+# 4. Close CamWare; run this cell. Script compares capture-only and saved scans.
+# 5. Close script handles (automatic). In GUI repeat 10,000 frames three times,
 #    timing Start -> finished AND inspecting saved files. Record GUI times.
-# 4. Repeat with normal lab apps open and the intended disk; compare variability.
-# Benchmarks: zero missing IDs/errors. Proposed saved total rate >=90% of matched
-# CamWare capture rate; inspect host-read rate too, since close/flush overhead
-# affects total rate. A failed speed target prompts diagnosis, not frame dropping.
+# 6. Repeat with normal lab apps open and the intended disk; compare variability.
+# Benchmarks: zero missing IDs/errors. Proposed capture-only rate >=90% of
+# CamWare's matched memory-recording rate. Saved rate is reported separately;
+# it includes HDF5 writing and file close. Inspect host-read rate too.
 # High capture/low save: disk/writer. Low capture and save vs CamWare: SDK/reader.
 # Good script/slow GUI: display/orchestration. Mock rates measure synthesis cost.
 if selected(4):
@@ -605,7 +661,7 @@ if selected(4):
 
 
 # %% 5 — Repeated and sustained reliability
-# 1. Review space estimate: default repeated steps + 5-minute run ~74 GB raw;
+# 1. Review space estimate: default repeated steps + 5-minute run ~109 GB raw;
 #    script requires 1.5x headroom. Reduce duration for a preliminary trial only.
 # 2. Watch Task Manager memory/CPU/disk while running. Record start/end and peak
 #    memory plus any upward trend; repeat at least once after PC warm-up.
@@ -645,30 +701,16 @@ if selected(6):
     REPORT_6 = execute(6, CONFIG)
 
 
-# %% 7 — Raw-data integrity, MATLAB interoperability and copy verification
-# 1. Run this cell after short/speed tests, or set data_files to selected .h5 paths.
-#    Every pixel is read; hashes are retained. This can take time for large files.
-# 2. Copy a file to its analysis/archive destination, rerun with data_files pointing
-#    to the copy, and require identical pixel_sha256, counts, metadata and settings.
-#    Pixel hash excludes metadata: compare reported settings and full file SHA256
-#    separately if requiring a byte-for-byte copy (Get-FileHash in PowerShell).
-# 3. MATLAB, replace f with one reported path:
-#    f = 'D:\CameraTests\acceptance_short_...h5';
-#    info = h5info(f, '/images'); disp(info.Dataspace.Size);
-#    disp(h5readatt(f, '/images', 'dimension_order'));
-#    roi = double(h5readatt(f, '/', 'roi_bounds'));
-#    n = double(h5readatt(f, '/', 'frames_written'));
-#    assert(isequal(double(info.Dataspace.Size(:))', [roi(3)-roi(1), roi(4)-roi(2), n]));
-#    % Read ONE frame, avoid loading a multi-GB stack:
-#    I = h5read(f, '/images', [1 1 1], [roi(3)-roi(1), roi(4)-roi(2), 1]);
-#    assert(isa(I, 'uint16')); imagesc(I'); axis image; colorbar;
-#    fprintf('mean=%g min=%g max=%g\n', mean(double(I(:))), min(I(:)), max(I(:)));
-#    % These values must match frame 0 sample_statistics in the JSON report.
-# 4. Acquire labelled dark and stable-illumination short files at identical settings
-#    using safe existing lab procedures. Review clipping, row artifacts, ROI edges,
-#    unexpected dark/signal shifts versus matched CamWare files and repeatability.
-# Benchmarks: all pixels readable, exact counts/axes/settings, Python/MATLAB
-# sample statistics agree, no display scaling in raw ADU, exact archive hashes.
+# %% 7 — Raw-data integrity and optional copy verification, entirely in Python
+# 1. With CONFIG.data_files=(), this checks the latest short scan from section 3.
+#    It reads every pixel and metadata record and computes SHA-256 fingerprints.
+# 2. To compare an archived copy, set CONFIG.data_files=(Path(original), Path(copy))
+#    before running. It checks exact file bytes, raw pixels, metadata, counts,
+#    ROI and camera settings. No MATLAB installation is needed for this cell.
+# 3. Acquire labelled dark and stable-illumination short files at identical
+#    settings using safe existing lab procedures. Review clipping and artifacts.
+# Benchmarks: complete uint16 [frame,y,x], exact counts, consecutive camera IDs,
+# and byte-for-byte copy equality if supplied. Pixel statistics remain in ADU.
 # Saturation/noise acceptance depends on experiment and calibration; document
 # limits before using these files for correlation measurements.
 if selected(7):

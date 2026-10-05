@@ -1,8 +1,14 @@
 # Camera acquisition: lab validation plan
 
-Use this at the first physical-camera session next week. Recheck the code and
-rerun the offline tests after any further edits; this document records the
-evidence available on 2026-09-24, not a hardware acceptance result.
+The section-by-section main-computer checklist and executable tests are in
+[`application tests/lab_computer_acceptance.ipynb`](../application%20tests/lab_computer_acceptance.ipynb).
+Select the project's `.venv` as the notebook kernel and run one section at a
+time. Its Python helper is `scripts/lab_computer_acceptance.py`.
+
+Use this at the first physical-camera session. Recheck the code and rerun the
+offline tests after further edits. The evidence below is from 2026-09-24 and
+is not a hardware acceptance result. The notebook now defaults to a centered
+2560 × 128 ROI; the older 1740 × 128 results below are historical comparisons.
 
 ## Current evidence
 

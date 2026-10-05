@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 import json
+from pathlib import Path
 import shutil
 import subprocess
 import sys
@@ -34,6 +35,9 @@ def test_sections_use_production_writer_and_preserve_copy_hashes(config):
     source = report["files"][0]
     copy = config.output_dir / "copy.h5"
     shutil.copyfile(source["file"], copy)
+    comparison = lab.section_7(replace(config, data_files=(source["file"], copy)))
+    assert comparison["copy_comparison"]["byte_for_byte_match"]
+    assert comparison["files"][0]["file_sha256"] == comparison["files"][1]["file_sha256"]
     copied = lab.inspect_file(copy, full_read=True)
     assert source["pixel_sha256"] == copied["pixel_sha256"]
     assert source["metadata_sha256"] == copied["metadata_sha256"]
@@ -45,15 +49,43 @@ def test_sections_use_production_writer_and_preserve_copy_hashes(config):
         lab.inspect_file(copy)
 
 
+def test_copy_pixel_change_fails_even_with_valid_frame_ids(config):
+    source = lab.section_3(config)["runs"][0]["file"]
+    copy = config.output_dir / "copy.h5"
+    shutil.copyfile(source, copy)
+    with h5py.File(copy, "r+") as h5:
+        frame = h5["images"][0]
+        frame[0, 0] += 1
+        h5["images"][0] = frame
+    with pytest.raises(AssertionError, match="Original and copy differ"):
+        lab.section_7(replace(config, data_files=(source, copy)))
+
+
 def test_storage_speed_and_sustained_sections(config):
     readiness = lab.section_1(config)
     assert readiness["paced_writer"]["verified_consecutive_frame_ids"]
     assert readiness["paced_writer"]["verified_image_frame_markers"]
     speed = lab.section_4(config)
     assert speed["capture_median_fps"] > 0
-    assert speed["provisional_speed_target_met"] is None  # Mock cannot certify hardware.
+    assert speed["provisional_capture_target_met"] is None  # Mock cannot certify hardware.
     sustained = lab.section_5(config)
     assert sustained["continuous_run"]["frames"] == 4
+
+
+def test_offline_failure_is_recorded_and_storage_still_runs(config, monkeypatch):
+    actual_run = subprocess.run
+
+    def fake_pytest(command, **kwargs):
+        if len(command) >= 3 and command[1:3] == ["-m", "pytest"]:
+            return subprocess.CompletedProcess(command, 1, stdout="1 failed\n", stderr="")
+        return actual_run(command, **kwargs)
+
+    monkeypatch.setattr(lab.subprocess, "run", fake_pytest)
+    result = lab.section_1(replace(config, run_offline_tests=True))
+    assert result["offline_tests"]["passed"] is False
+    assert result["readiness_passed"] is False
+    assert "unpaced_writer" in result and "paced_writer" in result
+    assert "1 failed" in (config.output_dir / Path(result["offline_tests"]["log"]).name).read_text()
 
 
 def test_faults_are_mock_only_and_trigger_defaults_to_deferred(config, monkeypatch):
@@ -99,7 +131,7 @@ def test_camera_is_closed_on_settings_mismatch(config, monkeypatch):
 
 
 def test_notebook_setup_and_cells_are_executable():
-    notebook = json.loads((lab.ROOT / "scripts/lab_computer_acceptance.ipynb").read_text(encoding="utf-8"))
+    notebook = json.loads((lab.ROOT / "application tests/lab_computer_acceptance.ipynb").read_text(encoding="utf-8"))
     code_cells = ["".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "code"]
     assert len(code_cells) == 9
     for source in code_cells:
@@ -108,6 +140,8 @@ def test_notebook_setup_and_cells_are_executable():
     exec(code_cells[0], namespace)
     assert namespace["CONFIG"].source == "mock"
     assert namespace["CONFIG"].trigger_bench_ready is False
+    assert namespace["CONFIG"].roi == (0, 1016, 2560, 1144)
+    assert namespace["CONFIG"].max_section_raw_gb == 120.0
     assert code_cells[-1] == "REPORT_8 = lab.execute(8, CONFIG)\n"
 
 

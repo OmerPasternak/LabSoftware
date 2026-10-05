@@ -415,7 +415,8 @@ class CameraMainWindow(QMainWindow):
 
         lay_cam.addWidget(QLabel("Frames/step:"), 1, 0)
         self.spn_frames = QSpinBox()
-        self.spn_frames.setMinimumWidth(104)
+        # Leave room for all seven digits at the maximum 9,999,999 setting.
+        self.spn_frames.setMinimumWidth(112)
         self.spn_frames.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.spn_frames.setRange(1, 9_999_999)
         self.spn_frames.setValue(5)
