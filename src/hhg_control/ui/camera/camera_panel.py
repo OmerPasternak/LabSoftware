@@ -35,6 +35,7 @@ import matplotlib.patches as mpatches
 from hhg_control.drivers.base_camera import BaseCamera, ReadoutMode, TriggerMode
 from hhg_control.drivers.mock_camera import MockPcoCamera
 from hhg_control.sequencer.scan_manager import CameraScanManager
+from .selection import load_camera_serial, save_camera_serial
 from .workers import (
     CameraConnectTask,
     CameraDisconnectTask,
@@ -151,8 +152,12 @@ class CameraMainWindow(QMainWindow):
         default_storage.mkdir(parents=True, exist_ok=True)
         self.scan_manager = CameraScanManager(camera=self.camera, storage_dir=default_storage)
 
-        self._physical_serial = None
+        self._camera_selection_path = default_storage / "camera_selection.json"
+        self._physical_serial = load_camera_serial(self._camera_selection_path)
+        self._configuration_display_preserved = False
         self._mode_change_pending = False
+        self._mode_change_succeeded = False
+        self._roi_change_succeeded = False
         self._hardware_state_unknown = False
         self._close_disconnect_done = False
         self.active_exposure_task = None
@@ -696,6 +701,19 @@ class CameraMainWindow(QMainWindow):
 
     def _configuration_controls(self, busy: bool) -> None:
         """Disable only conflicting controls while leaving painting and STOP responsive."""
+        if busy and self._is_live_active:
+            # A temporary SDK pause must not flash GO/Stopping/Running labels.
+            self._configuration_display_preserved = True
+        if not busy and self._configuration_display_preserved:
+            resume = any((self._resume_live_after_roi and self._roi_change_succeeded,
+                          self._resume_live_after_mode and self._mode_change_succeeded,
+                          self._resume_live_after_trigger and self._trigger_change_succeeded,
+                          self._resume_live_after_exposure and self._exposure_change_succeeded))
+            if not resume and not self._is_live_active:
+                self._configuration_display_preserved = False
+                self._set_go_button_style(active=False)
+                if not self._hardware_state_unknown:
+                    self.lbl_system_status.setText("Status: Live Paused")
         for control in (self.btn_go, self.btn_take_measurement, self.spn_exposure,
                         self.cmb_readout_mode, self.btn_apply_roi, self.btn_full_sensor, self.btn_draw_roi):
             control.setEnabled(not busy and not self._hardware_state_unknown)
@@ -737,15 +755,17 @@ class CameraMainWindow(QMainWindow):
         self.active_live_task.error_occurred.connect(self._on_preview_error)
         self.active_live_task.finished.connect(self._on_live_task_finished)
         self.active_live_task.start()
+        self._configuration_display_preserved = False
 
     def _stop_live(self, after_stop: Optional[Callable[[], None]] = None) -> None:
         """Request live stop and continue only after the worker confirms completion."""
         self._is_live_active = False
         if after_stop is not None:
             self._after_live_stopped = after_stop
-        self._set_go_button_style(active=False)
-        self.lbl_system_status.setText("Status: Stopping live acquisition...")
-        self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #6c757d; padding-left: 8px;")
+        if not self._configuration_display_preserved:
+            self._set_go_button_style(active=False)
+            self.lbl_system_status.setText("Status: Stopping live acquisition...")
+            self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #6c757d; padding-left: 8px;")
 
         if self.active_live_task is not None:
             self.active_live_task.stop()
@@ -770,6 +790,10 @@ class CameraMainWindow(QMainWindow):
     def _on_stop_clicked(self) -> None:
         """Global Stop: halts live view or gracefully aborts in-progress scan."""
         self._append_log("[STOP] Stop button pressed.")
+        if self._configuration_display_preserved:
+            self._configuration_display_preserved = False
+            self._set_go_button_style(active=False)
+            self.lbl_system_status.setText("Status: Live Paused")
         self._resume_live_after_roi = False
         self._resume_live_after_exposure = False
         self._resume_live_after_mode = False
@@ -808,7 +832,7 @@ class CameraMainWindow(QMainWindow):
         self.cmb_camera_source.setEnabled(False)
         source = self.cmb_camera_source.currentData()
         if source == "physical" and self._physical_serial is None:
-            serial, accepted = QInputDialog.getText(self, "Physical Camera", "Camera serial number (from the camera label):")
+            serial, accepted = QInputDialog.getText(self, "Physical Camera", "Camera serial number (from the camera label).\nRemembered after a successful connection:")
             if not accepted or not serial.strip().isdigit():
                 self._configuration_controls(False)
                 self._after_connect = None
@@ -839,6 +863,10 @@ class CameraMainWindow(QMainWindow):
             self._append_log(f"[CONNECT] Connected to explicitly selected simulated camera in {connection_time:.2f} s.")
             self.lbl_system_status.setText("Status: Connected (Simulated Camera)")
         else:
+            try:
+                save_camera_serial(self._camera_selection_path, self._physical_serial)
+            except (OSError, ValueError, TypeError) as error:
+                self._append_log(f"[CAMERA SELECTION] Could not remember camera: {error}")
             self._append_log(f"[CONNECT] Connected to physical {model_name} on USB 3.0 in {connection_time:.2f} s.")
             self.lbl_system_status.setText(f"Status: Connected ({model_name} USB 3.0)")
         self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #198754; padding-left: 8px;")
@@ -1040,8 +1068,6 @@ class CameraMainWindow(QMainWindow):
         self._mode_change_pending = False
         if self._configuration_busy() or self.active_preview_task is not None or self._hardware_state_unknown:
             return
-        self.lbl_system_status.setText(f"Status: Switching to {mode.name}... (Camera reconfiguring)")
-        self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #d97706; padding-left: 8px;")
         self._append_log(f"[READOUT MODE] {self.camera._readout_mode.name} -> {mode.name} (PCO setup value {mode.value}); physical camera will reboot if the mode changes.")
         self._resume_live_after_mode = resume_live
         self._after_connect = after_mode
@@ -1060,8 +1086,6 @@ class CameraMainWindow(QMainWindow):
         self._mode_change_succeeded = True
         self._set_exposure_mode_limit(mode)
         self._append_log(f"[READOUT MODE] Camera successfully configured to {mode.name}.")
-        self.lbl_system_status.setText(f"Status: Mode Active ({mode.name})")
-        self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #198754; padding-left: 8px;")
 
     def _set_exposure_mode_limit(self, mode: ReadoutMode) -> None:
         """Show the active readout mode's allowed exposure range in milliseconds."""
@@ -1156,7 +1180,6 @@ class CameraMainWindow(QMainWindow):
         self.chk_external_trigger.setEnabled(False)
         self.cmb_readout_mode.setEnabled(False)
         self.cmb_camera_source.setEnabled(False)
-        self.lbl_system_status.setText("Status: Configuring camera trigger...")
         self.active_trigger_task = CameraTriggerTask(self.scan_manager, mode)
         self.active_trigger_task.trigger_applied.connect(self._on_trigger_applied)
         self.active_trigger_task.error_occurred.connect(self._on_trigger_error)
@@ -1168,7 +1191,6 @@ class CameraMainWindow(QMainWindow):
         self._trigger_change_succeeded = True
         self._sync_trigger_checkbox()
         self._append_log(f"[TRIGGER] Camera confirmed {mode.value}.")
-        self.lbl_system_status.setText(f"Status: Trigger mode active ({mode.value})")
 
     def _on_trigger_error(self, error: str) -> None:
         self._trigger_change_succeeded = False
@@ -1701,7 +1723,6 @@ class CameraMainWindow(QMainWindow):
             self._roi_change_pending = False
             self.close()
             return
-        self.lbl_system_status.setText("Status: Changing sensor ROI...")
         self.active_roi_task = CameraRoiTask(self.scan_manager, roi)
         self.active_roi_task.roi_applied.connect(self._on_roi_task_applied)
         self.active_roi_task.error_occurred.connect(self._on_roi_task_error)
@@ -1727,7 +1748,6 @@ class CameraMainWindow(QMainWindow):
             self._deactivate_draw_roi()
             self._draw_roi_patch(x0, y0, x1, y1)
             self._clear_paused_scan("Hardware ROI modified")
-        self.lbl_system_status.setText("Status: Sensor ROI updated")
 
     def _on_roi_task_error(self, error: str) -> None:
         """Report a rejected ROI while leaving the camera's prior setting intact."""

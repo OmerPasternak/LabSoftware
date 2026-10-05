@@ -9,7 +9,7 @@ import pytest
 from PyQt6.QtCore import QTimer
 
 from hhg_control import safe_io
-from hhg_control.drivers.base_camera import CameraSafetyError, ReadoutMode
+from hhg_control.drivers.base_camera import CameraSafetyError, ReadoutMode, TriggerMode
 from hhg_control.drivers.mock_camera import MockPcoCamera
 from hhg_control.drivers import pco_edge
 from hhg_control.sequencer.scan_manager import CameraScanManager
@@ -126,11 +126,24 @@ def test_slow_commands_keep_gui_responsive_and_block_overlap(qtbot, tmp_path):
     assert all(thread_id != gui_thread for _, thread_id in calls)
 
 
-def test_exposure_change_pauses_live_and_restores_it(qtbot, tmp_path):
+@pytest.mark.parametrize("change", ["exposure", "mode", "trigger", "roi"])
+def test_configuration_pauses_live_without_label_flicker(qtbot, tmp_path, change):
     class GuardedMock(SmallMock):
-        def set_exposure_time(self, value):
+        def _idle_delay(self):
             assert not getattr(self, "_live_active", False)
+            time.sleep(0.15)
+        def set_exposure_time(self, value):
+            self._idle_delay()
             super().set_exposure_time(value)
+        def set_readout_mode(self, mode):
+            self._idle_delay()
+            super().set_readout_mode(mode)
+        def set_trigger_mode(self, mode):
+            self._idle_delay()
+            super().set_trigger_mode(mode)
+        def set_roi(self, roi):
+            self._idle_delay()
+            super().set_roi(roi)
     camera = GuardedMock()
     camera.connect()
     window = CameraMainWindow()
@@ -139,11 +152,79 @@ def test_exposure_change_pauses_live_and_restores_it(qtbot, tmp_path):
     window._on_camera_connected(camera, True, 0)
     window._start_live()
     qtbot.waitUntil(lambda: window._frame_count > 0)
-    window.spn_exposure.setValue(20)
-    qtbot.waitUntil(lambda: window.active_exposure_task is None and window.scan_manager.state == "LIVE"
-                    and camera._exposure_time_s == 0.02)
+    original = (window.btn_go.text(), window.btn_go.styleSheet(), window.lbl_system_status.text())
+    observed = []
+    timer = QTimer(window)
+    timer.timeout.connect(lambda: observed.append(
+        (window.btn_go.text(), window.btn_go.styleSheet(), window.lbl_system_status.text())))
+    timer.start(5)
+    if change == "exposure":
+        window.spn_exposure.setValue(20)
+    elif change == "mode":
+        window.cmb_readout_mode.setCurrentIndex(window.cmb_readout_mode.findData(ReadoutMode.GLOBAL_SHUTTER))
+    elif change == "trigger":
+        window.chk_external_trigger.setChecked(True)
+    else:
+        window._request_roi_change((0, 0, 64, 32), full_sensor=True)
+    assert not window.btn_go.isEnabled() and window.btn_stop.isEnabled()
+    qtbot.waitUntil(lambda: not window._configuration_busy() and window.scan_manager.state == "LIVE")
+    timer.stop()
+    assert len(observed) >= 10 and all(item == original for item in observed)
+    if change == "exposure":
+        assert camera._exposure_time_s == 0.02
+    elif change == "mode":
+        assert camera._readout_mode == ReadoutMode.GLOBAL_SHUTTER
+    elif change == "trigger":
+        assert camera._trigger_mode == TriggerMode.EXTERNAL_EXPOSURE_START
     window._on_stop_clicked()
     qtbot.waitUntil(lambda: window.active_live_task is None)
+    window.close()
+    qtbot.waitUntil(lambda: window._close_disconnect_done)
+
+
+def test_camera_selection_is_remembered_between_windows(qtbot, tmp_path, monkeypatch):
+    from hhg_control.ui.camera.selection import load_camera_serial, save_camera_serial
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / "data" / "camera_selection.json"
+    assert load_camera_serial(path) is None
+    window = CameraMainWindow()
+    qtbot.addWidget(window)
+    window._physical_serial = "12345"
+    camera = SmallMock()
+    camera.connect()
+    window._on_camera_connected(camera, False, 0)
+    assert load_camera_serial(path) == "12345"
+    second = CameraMainWindow()
+    qtbot.addWidget(second)
+    assert second._physical_serial == "12345"
+    window.close()
+    qtbot.waitUntil(lambda: window._close_disconnect_done)
+    second.close()
+    path.write_text("invalid JSON", encoding="utf-8")
+    assert load_camera_serial(path) is None
+    with pytest.raises(ValueError):
+        save_camera_serial(path, "not a serial")
+
+
+def test_stop_during_configuration_cancels_live_resume(qtbot, tmp_path):
+    class SlowMock(SmallMock):
+        def set_exposure_time(self, value):
+            time.sleep(0.2)
+            super().set_exposure_time(value)
+    camera = SlowMock()
+    camera.connect()
+    window = CameraMainWindow()
+    qtbot.addWidget(window)
+    window.scan_manager = CameraScanManager(camera, tmp_path)
+    window._on_camera_connected(camera, True, 0)
+    window._start_live()
+    qtbot.waitUntil(lambda: window._frame_count > 0)
+    window.spn_exposure.setValue(20)
+    qtbot.waitUntil(lambda: window.active_exposure_task is not None)
+    window.btn_stop.click()
+    qtbot.waitUntil(lambda: window.active_exposure_task is None)
+    assert window.active_live_task is None and not window._is_live_active
+    assert window.btn_go.text() == "GO" and window.btn_go.isEnabled()
     window.close()
     qtbot.waitUntil(lambda: window._close_disconnect_done)
 

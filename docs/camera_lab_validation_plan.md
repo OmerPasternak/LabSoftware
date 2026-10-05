@@ -104,9 +104,14 @@ a physical delay stage. Validate any stage integration separately.
 ## Approved software safeguards
 
 The GUI owns camera configuration; the vendor SDK default reset on connection is intentional.
-Enter the physical camera serial from its label before connecting. Shutter changes reboot
+Enter the physical camera serial from its label once. After a verified connection,
+the GUI remembers it in `data/camera_selection.json` and uses it in later sessions;
+an unavailable saved camera produces an error rather than selecting another device.
+Shutter changes reboot
 that same camera and restore verified ROI, exposure and triggering. Physical commands
 run in workers under the sequencer lock. Failed cleanup is reported as an unknown state.
+Configuration disables conflicting controls while retaining the image and live labels.
+The camera reader briefly pauses where required; Qt painting and STOP remain responsive.
 Exposure is limited to 2 s in rolling/global-reset and 100 ms in Global Shutter,
 and intersected with reported SDK limits. Scan and export creation refuses overwrites.
 
