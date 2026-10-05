@@ -108,7 +108,8 @@ The Global Shutter setting is the camera's true global exposure mode, with a
 Run the synthetic storage benchmark **on the acquisition PC**, with the output
 directory on the drive intended for real scans. It never connects to the camera.
 This example writes 1,000 full-resolution frames (about 11.1 GB raw) per case,
-one case at a time, then removes only its own data files. It leaves a JSON report.
+one case at a time. It retains clearly labelled BENCHMARK_ONLY files under
+benchmark_runs, including a JSON report and a README explaining manual deletion.
 Check available space first; the script also refuses to start if its minimum
 free-space check fails.
 
@@ -150,7 +151,7 @@ does not model USB transfer, SDK buffers, triggers, exposure, or the GUI.
 
 The paced benchmark sends prepared frames through the production scan manager
 and HDF5 writer at a requested rate. It verifies the saved frame IDs and a
-marker in every image, times close/rename and `fsync`, then removes its data
+marker in every image, times close/rename and `fsync`, and retains its labelled data
 file unless `--keep-data` is specified. It leaves a small JSON report in the
 selected output directory. Run it on the scan drive, one case at a time:
 

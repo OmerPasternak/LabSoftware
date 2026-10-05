@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGroupBox, QLabel, QLineEdit, QDoubleSpinBox, QSpinBox,
     QAbstractSpinBox, QPushButton, QFileDialog, QTextEdit, QMessageBox,
-    QGridLayout, QFrame, QSizePolicy, QComboBox, QCheckBox
+    QGridLayout, QFrame, QSizePolicy, QComboBox, QCheckBox, QInputDialog
 )
 
 import matplotlib
@@ -39,6 +39,7 @@ from .workers import (
     CameraConnectTask,
     CameraDisconnectTask,
     CameraModeTask,
+    CameraExposureTask,
     CameraTriggerTask,
     CameraRoiTask,
     LiveStreamTask,
@@ -149,6 +150,15 @@ class CameraMainWindow(QMainWindow):
         default_storage = Path.cwd() / "data"
         default_storage.mkdir(parents=True, exist_ok=True)
         self.scan_manager = CameraScanManager(camera=self.camera, storage_dir=default_storage)
+
+        self._physical_serial = None
+        self._mode_change_pending = False
+        self._hardware_state_unknown = False
+        self._close_disconnect_done = False
+        self.active_exposure_task = None
+        self._exposure_change_pending = False
+        self._resume_live_after_exposure = False
+        self._exposure_change_succeeded = False
 
         # Worker tasks
         self.active_scan_task: Optional[ScanSequenceTask] = None
@@ -392,14 +402,15 @@ class CameraMainWindow(QMainWindow):
         lay_cam.setSpacing(4)
         lay_cam.setContentsMargins(6, 8, 12, 6)
 
-        self.lbl_exposure = QLabel("Exposure (ms, 0.5–10,000):")
+        self.lbl_exposure = QLabel("Exposure (ms, 0.5–2,000):")
         lay_cam.addWidget(self.lbl_exposure, 0, 0)
         self.spn_exposure = QDoubleSpinBox()
         self.spn_exposure.setMinimumWidth(84)
         self.spn_exposure.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        self.spn_exposure.setRange(0.5, 10000.0)
+        self.spn_exposure.setRange(0.5, 2000.0)
         self.spn_exposure.setValue(10.0)
         self.spn_exposure.setDecimals(2)
+        self.spn_exposure.setKeyboardTracking(False)
         self.spn_exposure.valueChanged.connect(self._on_exposure_changed)
         lay_cam.addWidget(self.spn_exposure, 0, 1)
 
@@ -671,9 +682,29 @@ class CameraMainWindow(QMainWindow):
                 "font-weight: bold; font-size: 13px; padding: 6px 20px; border-radius: 4px;"
             )
 
+    def _cached_roi(self) -> tuple[int, int, int, int]:
+        """Return the last verified pixel bounds without a GUI-thread SDK call."""
+        info = self.camera.get_sensor_info()
+        return getattr(self.camera, "_roi", (0, 0, info.get("width", 2560), info.get("height", 2160)))
+
+    def _configuration_busy(self) -> bool:
+        """Check worker ownership without waiting for a hardware lock."""
+        return bool(self.active_mode_task or self.active_trigger_task or self.active_roi_task
+                    or self.active_exposure_task or self.active_connect_task or self.active_disconnect_task
+                    or self._roi_change_pending or self._trigger_change_pending or self._exposure_change_pending
+                    or self._mode_change_pending)
+
+    def _configuration_controls(self, busy: bool) -> None:
+        """Disable only conflicting controls while leaving painting and STOP responsive."""
+        for control in (self.btn_go, self.btn_take_measurement, self.spn_exposure,
+                        self.cmb_readout_mode, self.btn_apply_roi, self.btn_full_sensor, self.btn_draw_roi):
+            control.setEnabled(not busy and not self._hardware_state_unknown)
+        self.chk_external_trigger.setEnabled(not busy and self.camera.is_connected and not self._hardware_state_unknown)
+        self.cmb_camera_source.setEnabled(not busy and not self._is_live_active and not self._hardware_state_unknown)
+
     def _on_go_clicked(self) -> None:
         """Connect if disconnected, then start continuous live camera view."""
-        if self._is_live_active:
+        if self._is_live_active or self._configuration_busy() or self._hardware_state_unknown:
             return
         if (self.active_live_task is not None or self.active_disconnect_task is not None
                 or self.active_trigger_task is not None):
@@ -685,6 +716,8 @@ class CameraMainWindow(QMainWindow):
         self._start_live()
 
     def _start_live(self) -> None:
+        if self._configuration_busy() or self._hardware_state_unknown:
+            return
         if not self.camera.is_connected:
             return
         if self.active_live_task is not None or self._source_switch_pending or self.active_trigger_task is not None:
@@ -738,6 +771,8 @@ class CameraMainWindow(QMainWindow):
         """Global Stop: halts live view or gracefully aborts in-progress scan."""
         self._append_log("[STOP] Stop button pressed.")
         self._resume_live_after_roi = False
+        self._resume_live_after_exposure = False
+        self._resume_live_after_mode = False
         self._resume_live_after_trigger = False
         if self._trigger_change_pending:
             self._trigger_change_pending = False
@@ -772,16 +807,30 @@ class CameraMainWindow(QMainWindow):
         self.btn_go.setEnabled(False)
         self.cmb_camera_source.setEnabled(False)
         source = self.cmb_camera_source.currentData()
-        self.active_connect_task = CameraConnectTask(source, self.spn_exposure.value() / 1000.0)
+        if source == "physical" and self._physical_serial is None:
+            serial, accepted = QInputDialog.getText(self, "Physical Camera", "Camera serial number (from the camera label):")
+            if not accepted or not serial.strip().isdigit():
+                self._configuration_controls(False)
+                self._after_connect = None
+                return
+            self._physical_serial = str(int(serial.strip()))
+        desired_mode = self.cmb_readout_mode.currentData() if self._mode_requested_before_connect else None
+        trigger = TriggerMode.EXTERNAL_EXPOSURE_START if self.chk_external_trigger.isChecked() else TriggerMode.AUTO_SEQUENCE
+        self.active_connect_task = CameraConnectTask(
+            source, self.spn_exposure.value() / 1000.0, serial=self._physical_serial,
+            mode=desired_mode, trigger=trigger)
+        self._configuration_controls(True)
         self.active_connect_task.connected.connect(self._on_camera_connected)
         self.active_connect_task.error_occurred.connect(self._on_camera_connection_error)
         self.active_connect_task.finished.connect(self._on_camera_connection_finished)
         self.active_connect_task.start()
 
     def _on_camera_connected(self, camera: BaseCamera, is_sim: bool, connection_time: float) -> None:
+        self._hardware_state_unknown = False
         self.camera = camera
         self.scan_manager.camera = self.camera
         self._connected_source = "simulated" if is_sim else "physical"
+        self._append_log(f"[CAMERA SETTINGS] Serial {camera.get_sensor_info().get('serial_number')}; exposure {camera._exposure_time_s} s; mode {camera._readout_mode.name}; trigger {camera._trigger_mode.value}.")
         self._sync_trigger_checkbox()
         self.chk_external_trigger.setEnabled(True)
         info = self.camera.get_sensor_info()
@@ -793,7 +842,7 @@ class CameraMainWindow(QMainWindow):
             self._append_log(f"[CONNECT] Connected to physical {model_name} on USB 3.0 in {connection_time:.2f} s.")
             self.lbl_system_status.setText(f"Status: Connected ({model_name} USB 3.0)")
         self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #198754; padding-left: 8px;")
-        actual_mode = self.camera.get_readout_mode()
+        actual_mode = self.camera._readout_mode
         desired_mode = self.cmb_readout_mode.currentData()
         requested = self._mode_requested_before_connect
         self._mode_requested_before_connect = False
@@ -811,6 +860,10 @@ class CameraMainWindow(QMainWindow):
             self._set_exposure_mode_limit(actual_mode)
 
     def _on_camera_connection_error(self, error: str) -> None:
+        if "state unknown" in error.lower():
+            self._hardware_state_unknown = True
+        elif self.cmb_camera_source.currentData() == "physical":
+            self._physical_serial = None
         source_name = self.cmb_camera_source.currentText()
         self._append_log(f"[CONNECT ERROR] {source_name}: {error}")
         self.lbl_system_status.setText(f"Status: {source_name} connection failed")
@@ -827,7 +880,7 @@ class CameraMainWindow(QMainWindow):
         self.active_connect_task = None
         if task is not None:
             task.deleteLater()
-        self.btn_go.setEnabled(True)
+        self._configuration_controls(False)
         if self._closing:
             self.close()
             return
@@ -879,7 +932,8 @@ class CameraMainWindow(QMainWindow):
     def _begin_camera_disconnect(self) -> None:
         """Close the previous source in a worker, with no live or preview read active."""
         self.lbl_system_status.setText("Status: Disconnecting previous camera...")
-        self.active_disconnect_task = CameraDisconnectTask(self.camera)
+        self.active_disconnect_task = CameraDisconnectTask(self.camera, self.scan_manager)
+        self._configuration_controls(True)
         self.active_disconnect_task.disconnected.connect(self._on_camera_disconnected)
         self.active_disconnect_task.error_occurred.connect(self._on_camera_disconnect_error)
         self.active_disconnect_task.finished.connect(self._on_camera_disconnect_finished)
@@ -887,6 +941,7 @@ class CameraMainWindow(QMainWindow):
 
     def _on_camera_disconnected(self) -> None:
         """Clear old-source pixels so simulated frames cannot look like real data."""
+        self._hardware_state_unknown = False
         self._connected_source = None
         self.chk_external_trigger.setEnabled(False)
         self.chk_external_trigger.blockSignals(True)
@@ -917,8 +972,9 @@ class CameraMainWindow(QMainWindow):
 
     def _on_camera_disconnect_error(self, error: str) -> None:
         """Retain the prior source when it cannot be safely closed."""
+        self._hardware_state_unknown = True
         self._restore_connected_source_selection()
-        self.lbl_system_status.setText("Status: Camera disconnect failed")
+        self.lbl_system_status.setText("Status: Camera state unknown / disconnect failed")
         self._append_log(f"[CAMERA DISCONNECT ERROR] {error}")
         QMessageBox.warning(self, "Camera Disconnect Failed", error)
 
@@ -930,17 +986,17 @@ class CameraMainWindow(QMainWindow):
             task.deleteLater()
         self._source_switch_pending = False
         if self._closing:
+            self._close_disconnect_done = True
             self.close()
             return
-        self.btn_go.setEnabled(True)
-        self.cmb_camera_source.setEnabled(True)
+        self._configuration_controls(False)
 
     def _on_readout_mode_changed(self, index: int) -> None:
         """Handle switching between rolling and global shutter modes."""
         mode = self.cmb_readout_mode.itemData(index)
         if mode is None:
             return
-        if self.active_trigger_task is not None or self._trigger_change_pending:
+        if self._configuration_busy() or self.active_preview_task is not None:
             self._append_log("[READOUT MODE] Wait for the trigger mode change to finish.")
             return
 
@@ -952,7 +1008,7 @@ class CameraMainWindow(QMainWindow):
                 "Cannot change sensor readout mode while an experiment scan is executing."
             )
             self.cmb_readout_mode.blockSignals(True)
-            curr = self.camera.get_readout_mode()
+            curr = self.camera._readout_mode
             for idx in range(self.cmb_readout_mode.count()):
                 if self.cmb_readout_mode.itemData(idx) == curr:
                     self.cmb_readout_mode.setCurrentIndex(idx)
@@ -964,11 +1020,13 @@ class CameraMainWindow(QMainWindow):
             self._mode_requested_before_connect = True
             return
 
-        if hasattr(self.camera, "get_readout_mode") and self.camera.get_readout_mode() == mode:
+        if hasattr(self.camera, "get_readout_mode") and self.camera._readout_mode == mode:
             return
 
         was_live = self._is_live_active
         if was_live:
+            self._mode_change_pending = True
+            self._configuration_controls(True)
             self._stop_live(after_stop=lambda: self._start_mode_change(mode, resume_live=True))
             return
         self._start_mode_change(mode, resume_live=False)
@@ -979,23 +1037,27 @@ class CameraMainWindow(QMainWindow):
         resume_live: bool,
         after_mode: Optional[Callable[[], None]] = None,
     ) -> None:
-        if self.active_mode_task is not None and self.active_mode_task.isRunning():
+        self._mode_change_pending = False
+        if self._configuration_busy() or self.active_preview_task is not None or self._hardware_state_unknown:
             return
         self.lbl_system_status.setText(f"Status: Switching to {mode.name}... (Camera reconfiguring)")
         self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #d97706; padding-left: 8px;")
-        self._append_log(f"[READOUT MODE] Switching sensor mode to {mode.name} (PCO setup value {mode.value})...")
+        self._append_log(f"[READOUT MODE] {self.camera._readout_mode.name} -> {mode.name} (PCO setup value {mode.value}); physical camera will reboot if the mode changes.")
         self._resume_live_after_mode = resume_live
         self._after_connect = after_mode
+        self._mode_change_succeeded = False
+        self._configuration_controls(True)
         self.cmb_readout_mode.setEnabled(False)
         self.chk_external_trigger.setEnabled(False)
         self.cmb_camera_source.setEnabled(False)
-        self.active_mode_task = CameraModeTask(self.camera, mode)
+        self.active_mode_task = CameraModeTask(self.scan_manager, mode)
         self.active_mode_task.mode_applied.connect(self._on_mode_applied)
         self.active_mode_task.error_occurred.connect(self._on_mode_error)
         self.active_mode_task.finished.connect(self._on_mode_task_finished)
         self.active_mode_task.start()
 
     def _on_mode_applied(self, mode: ReadoutMode) -> None:
+        self._mode_change_succeeded = True
         self._set_exposure_mode_limit(mode)
         self._append_log(f"[READOUT MODE] Camera successfully configured to {mode.name}.")
         self.lbl_system_status.setText(f"Status: Mode Active ({mode.name})")
@@ -1004,14 +1066,24 @@ class CameraMainWindow(QMainWindow):
     def _set_exposure_mode_limit(self, mode: ReadoutMode) -> None:
         """Show the active readout mode's allowed exposure range in milliseconds."""
         global_shutter = mode == ReadoutMode.GLOBAL_SHUTTER
-        self.spn_exposure.setMaximum(100.0 if global_shutter else 10000.0)
-        maximum_label = "100" if global_shutter else "10,000"
-        self.lbl_exposure.setText(f"Exposure (ms, 0.5–{maximum_label}):")
+        minimum, maximum = self.camera.get_exposure_limits()
+        maximum = min(maximum, 0.1 if global_shutter else 2.0)
+        self.spn_exposure.blockSignals(True)
+        self.spn_exposure.setRange(minimum * 1000, maximum * 1000)
+        self.spn_exposure.setValue(self.camera._exposure_time_s * 1000.0)
+        self.spn_exposure.blockSignals(False)
+        self.lbl_exposure.setText(f"Exposure (ms, {minimum * 1000:g}–{maximum * 1000:,.0f}):")
 
     def _on_mode_error(self, error: str) -> None:
+        self._mode_change_succeeded = False
+        self._resume_live_after_mode = False
+        self._after_connect = None
+        if getattr(self.camera, "state_unknown", False):
+            self._hardware_state_unknown = True
+            self.lbl_system_status.setText("Status: Camera state unknown; reconnect required")
         self._append_log(f"[READOUT MODE ERROR] {error}")
         QMessageBox.warning(self, "Readout Mode Error", f"Could not switch readout mode:\n\n{error}")
-        current = self.camera.get_readout_mode()
+        current = self.camera._readout_mode
         self.cmb_readout_mode.blockSignals(True)
         for index in range(self.cmb_readout_mode.count()):
             if self.cmb_readout_mode.itemData(index) == current:
@@ -1024,9 +1096,11 @@ class CameraMainWindow(QMainWindow):
         self.active_mode_task = None
         if task is not None:
             task.deleteLater()
-        self.cmb_readout_mode.setEnabled(True)
+        self._configuration_controls(False)
         if self._closing:
             self.close()
+            return
+        if not self._mode_change_succeeded:
             return
         self._sync_trigger_checkbox()
         self.chk_external_trigger.setEnabled(True)
@@ -1044,7 +1118,7 @@ class CameraMainWindow(QMainWindow):
 
     def _sync_trigger_checkbox(self) -> None:
         """Display the camera's verified trigger mode without issuing a change."""
-        mode = self.scan_manager.get_trigger_mode()
+        mode = self.camera._trigger_mode
         self.chk_external_trigger.blockSignals(True)
         self.chk_external_trigger.setChecked(mode == TriggerMode.EXTERNAL_EXPOSURE_START)
         self.chk_external_trigger.blockSignals(False)
@@ -1054,17 +1128,17 @@ class CameraMainWindow(QMainWindow):
         if not self.camera.is_connected:
             return
         if (self.active_scan_task is not None and self.active_scan_task.isRunning()
-                or self._roi_change_pending or self.active_mode_task is not None
+                or self._configuration_busy()
                 or self.active_trigger_task is not None or self.active_preview_task is not None):
             self._sync_trigger_checkbox()
             self._append_log("[TRIGGER] Wait for the current camera operation to finish.")
             return
         mode = TriggerMode.EXTERNAL_EXPOSURE_START if checked else TriggerMode.AUTO_SEQUENCE
-        if self.scan_manager.get_trigger_mode() == mode:
+        if self.camera._trigger_mode == mode:
             return
         if self._is_live_active:
             self._trigger_change_pending = True
-            self.chk_external_trigger.setEnabled(False)
+            self._configuration_controls(True)
             self._stop_live(after_stop=lambda: self._start_trigger_change(mode, resume_live=True))
             return
         self._start_trigger_change(mode, resume_live=False)
@@ -1077,6 +1151,8 @@ class CameraMainWindow(QMainWindow):
             return
         self._resume_live_after_trigger = resume_live
         self._trigger_change_succeeded = False
+        self._append_log(f"[TRIGGER REQUEST] {self.camera._trigger_mode.value} -> {mode.value}")
+        self._configuration_controls(True)
         self.chk_external_trigger.setEnabled(False)
         self.cmb_readout_mode.setEnabled(False)
         self.cmb_camera_source.setEnabled(False)
@@ -1096,6 +1172,9 @@ class CameraMainWindow(QMainWindow):
 
     def _on_trigger_error(self, error: str) -> None:
         self._trigger_change_succeeded = False
+        if getattr(self.camera, "state_unknown", False):
+            self._hardware_state_unknown = True
+            self.lbl_system_status.setText("Status: Camera state unknown; reconnect required")
         self._append_log(f"[TRIGGER ERROR] {error}")
         try:
             self._sync_trigger_checkbox()
@@ -1111,8 +1190,8 @@ class CameraMainWindow(QMainWindow):
         if self._closing:
             self.close()
             return
-        self.chk_external_trigger.setEnabled(self.camera.is_connected)
-        self.cmb_readout_mode.setEnabled(True)
+        self._configuration_controls(False)
+        self.cmb_readout_mode.setEnabled(not self._hardware_state_unknown)
         resume = self._resume_live_after_trigger and self._trigger_change_succeeded
         self._resume_live_after_trigger = False
         if resume:
@@ -1132,7 +1211,7 @@ class CameraMainWindow(QMainWindow):
             self._capture_next_preview()
 
     def _capture_next_preview(self) -> None:
-        if not self.camera.is_connected or self._is_live_active:
+        if not self.camera.is_connected or self._is_live_active or self._configuration_busy() or self._hardware_state_unknown:
             return
         if self.active_preview_task is not None and self.active_preview_task.isRunning():
             return
@@ -1160,6 +1239,9 @@ class CameraMainWindow(QMainWindow):
         self._update_display(frame, meta=meta)
 
     def _on_preview_error(self, err_msg: str) -> None:
+        if getattr(self.camera, "state_unknown", False):
+            self._hardware_state_unknown = True
+            self._after_live_stopped = None
         self._append_log(f"[ERROR] Live frame error: {err_msg}")
         self._stop_live()
 
@@ -1332,7 +1414,7 @@ class CameraMainWindow(QMainWindow):
         if isinstance(reported_roi, (tuple, list)) and len(reported_roi) == 4:
             x0, y0, x1, y1 = map(int, reported_roi)
         else:
-            x0, y0, x1, y1 = self.camera.get_roi()
+            x0, y0, x1, y1 = self._cached_roi()
 
         full_draw_needed = self._plot_background is None
 
@@ -1586,7 +1668,7 @@ class CameraMainWindow(QMainWindow):
 
     def _request_roi_change(self, roi: tuple[int, int, int, int], *, full_sensor: bool) -> None:
         """Serialize ROI changes with live acquisition and reject duplicate clicks."""
-        if self._roi_change_pending:
+        if self._configuration_busy() or self.active_preview_task is not None or self._hardware_state_unknown:
             return
         if self.active_trigger_task is not None:
             self._append_log("[ROI] Wait for the trigger mode change to finish.")
@@ -1598,7 +1680,10 @@ class CameraMainWindow(QMainWindow):
             self._append_log("[ROI] Cannot change sensor ROI during a measurement scan.")
             return
 
+        self._configuration_controls(True)
         self._roi_change_pending = True
+        self._roi_change_succeeded = False
+        self._append_log(f"[ROI REQUEST] {self._cached_roi()} -> {roi}")
         self._roi_change_full_sensor = full_sensor
         self._resume_live_after_roi = self._is_live_active
         self.btn_apply_roi.setEnabled(False)
@@ -1625,6 +1710,7 @@ class CameraMainWindow(QMainWindow):
 
     def _on_roi_task_applied(self, roi: tuple[int, int, int, int]) -> None:
         """Update the display outline after the camera confirms the new ROI."""
+        self._roi_change_succeeded = True
         self._current_displayed_roi = None
         if self._roi_change_full_sensor:
             self._append_log(
@@ -1645,6 +1731,9 @@ class CameraMainWindow(QMainWindow):
 
     def _on_roi_task_error(self, error: str) -> None:
         """Report a rejected ROI while leaving the camera's prior setting intact."""
+        self._roi_change_succeeded = False
+        if getattr(self.camera, "state_unknown", False):
+            self._hardware_state_unknown = True
         self._append_log(f"[ROI ERROR] {error}")
         self.lbl_system_status.setText("Status: Sensor ROI change failed")
         QMessageBox.warning(self, "Sensor ROI Change Failed", error)
@@ -1656,16 +1745,17 @@ class CameraMainWindow(QMainWindow):
         if task is not None:
             task.deleteLater()
         self._roi_change_pending = False
-        self.btn_apply_roi.setEnabled(True)
+        self._configuration_controls(False)
+        self.btn_apply_roi.setEnabled(not self._hardware_state_unknown)
         self.btn_full_sensor.setEnabled(True)
         self.btn_draw_roi.setEnabled(True)
-        resume_live = self._resume_live_after_roi
+        resume_live = self._resume_live_after_roi and self._roi_change_succeeded
         self._resume_live_after_roi = False
         if self._closing:
             self.close()
         elif resume_live:
             self._start_live()
-        else:
+        elif self._roi_change_succeeded:
             self._capture_single_preview()
         if not self._is_live_active:
             self.cmb_camera_source.setEnabled(True)
@@ -1760,12 +1850,67 @@ class CameraMainWindow(QMainWindow):
         )
 
     def _on_exposure_changed(self, value_ms: float) -> None:
-        if self.camera.is_connected:
-            try:
-                self.camera.set_exposure_time(value_ms / 1000.0)
-                self._append_log(f"[EXPOSURE] Set to {value_ms:.2f} ms ({value_ms / 1000.0:.6f} s)")
-            except Exception as exc:
-                QMessageBox.warning(self, "Safety Limit Violation", str(exc))
+        """Commit exposure in a worker after the live reader has stopped."""
+        if not self.camera.is_connected:
+            return
+        if self._configuration_busy() or self.active_preview_task is not None or self._hardware_state_unknown:
+            self.spn_exposure.blockSignals(True)
+            self.spn_exposure.setValue(self.camera._exposure_time_s * 1000)
+            self.spn_exposure.blockSignals(False)
+            return
+        self._resume_live_after_exposure = self._is_live_active
+        self._exposure_change_pending = True
+        self._append_log(f"[EXPOSURE REQUEST] {self.camera._exposure_time_s:.6f} s -> {value_ms / 1000:.6f} s")
+        self._configuration_controls(True)
+        if self.active_live_task is not None:
+            self._stop_live(after_stop=lambda: self._start_exposure_change(value_ms / 1000))
+        else:
+            self._start_exposure_change(value_ms / 1000)
+
+    def _start_exposure_change(self, exposure_s: float) -> None:
+        """Run exposure configuration without waiting on the Qt event thread."""
+        self._exposure_change_pending = False
+        if self._closing:
+            self.close()
+            return
+        self._exposure_change_succeeded = False
+        self.active_exposure_task = CameraExposureTask(self.scan_manager, exposure_s)
+        self.active_exposure_task.exposure_applied.connect(self._on_exposure_applied)
+        self.active_exposure_task.error_occurred.connect(self._on_exposure_error)
+        self.active_exposure_task.finished.connect(self._on_exposure_finished)
+        self.active_exposure_task.start()
+
+    def _on_exposure_applied(self, exposure_s: float) -> None:
+        """Display verified exposure seconds and retain a command record."""
+        self._exposure_change_succeeded = True
+        self.spn_exposure.blockSignals(True)
+        self.spn_exposure.setValue(exposure_s * 1000)
+        self.spn_exposure.blockSignals(False)
+        self._append_log(f"[EXPOSURE] Camera confirmed {exposure_s:.6f} s.")
+
+    def _on_exposure_error(self, error: str) -> None:
+        """Report failed readback; do not automatically resume acquisition."""
+        if getattr(self.camera, "state_unknown", False):
+            self._hardware_state_unknown = True
+            self.lbl_system_status.setText("Status: Camera state unknown; reconnect required")
+        self._append_log(f"[EXPOSURE ERROR] {error}")
+        self.spn_exposure.blockSignals(True)
+        self.spn_exposure.setValue(self.camera._exposure_time_s * 1000)
+        self.spn_exposure.blockSignals(False)
+        QMessageBox.warning(self, "Exposure Change Failed", error)
+
+    def _on_exposure_finished(self) -> None:
+        """Restore controls immediately when the exposure worker completes."""
+        task, self.active_exposure_task = self.active_exposure_task, None
+        if task is not None:
+            task.deleteLater()
+        self._configuration_controls(False)
+        resume = self._resume_live_after_exposure and self._exposure_change_succeeded
+        self._resume_live_after_exposure = False
+        if self._closing:
+            self.close()
+        elif resume:
+            self._start_live()
 
     # =========================================================================
     # Storage Directory Handlers
@@ -1816,7 +1961,7 @@ class CameraMainWindow(QMainWindow):
             self._on_stop_clicked()
             return
 
-        if self.active_trigger_task is not None or self._trigger_change_pending:
+        if self._configuration_busy() or self.active_preview_task is not None or self._hardware_state_unknown:
             self._append_log("[SCAN] Wait for the trigger mode change to finish.")
             return
 
@@ -1836,7 +1981,7 @@ class CameraMainWindow(QMainWindow):
             self.spn_roi_x1.value(), self.spn_roi_y1.value(),
         )
         try:
-            active_roi = tuple(self.scan_manager.get_roi())
+            active_roi = self._cached_roi()
         except Exception as exc:
             message = f"Cannot verify the camera's active ROI: {exc}"
             self._append_log(f"[SCAN BLOCKED] {message}")
@@ -1858,7 +2003,7 @@ class CameraMainWindow(QMainWindow):
             if self.chk_external_trigger.isChecked() else TriggerMode.AUTO_SEQUENCE
         )
         try:
-            actual_trigger = self.scan_manager.get_trigger_mode()
+            actual_trigger = self.camera._trigger_mode
         except Exception as exc:
             message = f"Cannot verify the camera's active trigger mode: {exc}"
             self._append_log(f"[SCAN BLOCKED] {message}")
@@ -1951,6 +2096,7 @@ class CameraMainWindow(QMainWindow):
             num_frames=num_frames,
             start_step=start_step,
             run_id=self._current_run_id,
+            expected_roi=active_roi, expected_trigger=requested_trigger,
         )
         self.active_scan_task.step_started.connect(self._on_scan_step_started)
         self.active_scan_task.step_completed.connect(self._on_scan_step_completed)
@@ -2202,12 +2348,15 @@ class CameraMainWindow(QMainWindow):
             event.ignore()
             return
 
-        try:
-            if self.camera.is_connected:
-                self.camera.close()
-                self._append_log("[CLOSE] Camera disconnected cleanly.")
-        except Exception as exc:
-            self._append_log(f"[CLOSE] Warning during camera disconnect: {exc}")
+        if self.active_exposure_task is not None or self._exposure_change_pending:
+            self._closing = True
+            event.ignore()
+            return
+        if not self._close_disconnect_done and (self.camera.is_connected or self._hardware_state_unknown):
+            self._closing = True
+            self._begin_camera_disconnect()
+            event.ignore()
+            return
 
         # A queued Matplotlib draw_idle callback can otherwise try to repaint
         # this canvas after Qt deletes its native widget.

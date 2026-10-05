@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Tuple, List, Dict, Any
 import numpy as np
 from .base_camera import BaseCamera, CameraSafetyError, ReadoutMode, TriggerMode
+from ..safe_io import check_stack_memory
 
 
 class MockPcoCamera(BaseCamera):
@@ -92,9 +93,9 @@ class MockPcoCamera(BaseCamera):
     # ------------------------------------------------------------------
 
     def set_exposure_time(self, exposure_s: float) -> None:
-        self.validate_exposure_time(exposure_s)
         if self._readout_mode == ReadoutMode.GLOBAL_SHUTTER and exposure_s > 0.1:
             raise CameraSafetyError("Global Shutter exposure must be at most 0.1 s (100 ms).")
+        self.validate_exposure_time(exposure_s)
         self._exposure_time_s = float(exposure_s)
 
     def get_exposure_time(self) -> float:
@@ -169,6 +170,9 @@ class MockPcoCamera(BaseCamera):
             raise RuntimeError("Cannot acquire frames: Mock camera is not connected.")
         if num_frames < 1:
             raise ValueError("num_frames must be >= 1.")
+
+        roi = self.get_roi()
+        check_stack_memory(num_frames, roi[3] - roi[1], roi[2] - roi[0])
 
         if self._gaussian_profile is None or self._dark_bank is None:
             raise RuntimeError("Mock camera simulation data was not initialized.")

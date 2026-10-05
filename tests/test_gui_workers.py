@@ -610,11 +610,12 @@ def test_source_can_switch_after_stop_without_touching_real_hardware(qtbot, monk
     from hhg_control.drivers import pco_edge
 
     class FakePhysicalCamera(MockPcoCamera):
-        def __init__(self):
+        def __init__(self, *, serial):
             super().__init__()
 
     monkeypatch.setattr(pco_edge, "PcoEdgeCamera", FakePhysicalCamera)
     window = CameraMainWindow()
+    window._physical_serial = "12345"
     qtbot.addWidget(window)
     window.camera = MockPcoCamera()
     window.camera.connect()

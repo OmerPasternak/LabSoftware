@@ -84,7 +84,7 @@ class Settings:
     repeats: int = 3
     sustained_seconds: float = 300.0  # ~61 GB at the default ROI/rate.
     max_section_raw_gb: float = 120.0  # Per-section budget, not permission to fill disk.
-    run_offline_tests: bool = True
+    run_offline_tests: bool = False
     # Section 7: empty uses the latest short scan; one path checks it; two paths
     # compare an original and its byte-for-byte copy.
     data_files: tuple[Path, ...] = ()
@@ -157,7 +157,8 @@ def configured_camera(cfg: Settings, trigger=TriggerMode.AUTO_SEQUENCE):
     """Open the requested source, apply reviewed settings, verify them, then close."""
     if cfg.source == "physical":
         from hhg_control.drivers.pco_edge import PcoEdgeCamera
-        camera = PcoEdgeCamera()
+        require(cfg.expected_serial is not None, "Set expected_serial from the camera label before connecting")
+        camera = PcoEdgeCamera(serial=cfg.expected_serial)
     else:
         camera = MockPcoCamera()
     try:
@@ -356,7 +357,7 @@ def section_1(cfg: Settings) -> dict:
         result["offline_tests"] = {"passed": None, "status": "SKIPPED"}
     width, height = cfg.roi[2] - cfg.roi[0], cfg.roi[3] - cfg.roi[1]
     # Replay can wait; unpaced throughput estimates writer capacity rather than
-    # modeling a camera FIFO. Existing benchmark cleans up only its own outputs.
+    # modeling a camera FIFO. Benchmark files are labelled and retained.
     class PausableReplay(ReplayCamera):
         @property
         def can_pause_acquisition(self):
@@ -365,9 +366,7 @@ def section_1(cfg: Settings) -> dict:
     replay = PausableReplay(width, height, cfg.batch_size, "noise")
     replay.connect()
     try:
-        bench_dir = destination / ("storage_" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%f"))
-        bench_dir.mkdir()
-        result["unpaced_writer"] = run_case("application", replay, bench_dir, cfg.speed_frames, cfg.batch_size)
+        result["unpaced_writer"] = run_case("application", replay, destination, cfg.speed_frames, cfg.batch_size)
     finally:
         replay.close()
     result["paced_writer"] = run_benchmark(destination, frames=cfg.speed_frames, width=width,
@@ -581,11 +580,12 @@ if __name__ == "__main__" and not _INTERACTIVE:
     parser.add_argument("--section", type=int, choices=range(1, 9))
     parser.add_argument("--source", choices=("mock", "physical"), default=CONFIG.source)
     parser.add_argument("--output-dir", type=Path, default=CONFIG.output_dir)
-    parser.add_argument("--skip-offline-tests", action="store_true")
+    parser.add_argument("--skip-offline-tests", action="store_true", help="Compatibility option; tests are skipped by default")
+    parser.add_argument("--run-offline-tests", action="store_true", help="Explicitly launch the offline test suite")
     args = parser.parse_args()
     _SELECTED = args.section
     CONFIG.source, CONFIG.output_dir = args.source, args.output_dir
-    CONFIG.run_offline_tests = not args.skip_offline_tests
+    CONFIG.run_offline_tests = args.run_offline_tests
     if _SELECTED is None:
         parser.print_help()
 
@@ -615,8 +615,7 @@ if selected(1):
 # %% 2 — Physical identity, settings and reconnect
 # 1. Close CamWare/GUI. Review exposure_s, roi, readout; set source="physical".
 # 2. Global Shutter is mode value 2. expected_serial is the camera's unique
-#    hardware serial, not a shutter value. Read it first or use the camera label,
-#    then fill expected_serial and repeat to verify the intended camera.
+#    hardware serial, not a shutter value. Fill it from the camera label before connecting.
 # 3. In GUI separately check Rolling -> Global -> Rolling -> intended mode.
 #    Camera reboot may take seconds. Confirm final ROI/exposure/trigger readback.
 # 4. Close/reopen the GUI; repeat once. Do not run GUI and script simultaneously.

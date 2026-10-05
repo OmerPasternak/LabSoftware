@@ -69,34 +69,29 @@ def _measure_capture_only(camera) -> dict:
     }
 
 
-def _measure_saved(camera, case_name: str, run_id: str) -> dict:
-    """Time two complete uncompressed HDF5 steps, then remove only own files."""
-    manager = CameraScanManager(camera, OUT_DIR)
+def _measure_saved(camera, case_name: str, run_id: str, output_dir: Path) -> dict:
+    """Time two complete uncompressed HDF5 steps, retaining labelled benchmark files."""
+    manager = CameraScanManager(camera, output_dir)
     saved_paths = []
     wall_start = time.perf_counter()
     cpu_start = time.process_time()
-    try:
-        for step in range(STEPS):
-            path, _ = manager.acquire_and_save_step(
-                f"simulation_overhead_{case_name}", step, "synthetic_step", float(step),
-                FRAMES_PER_STEP, run_id=run_id, batch_size=4,
-            )
-            saved_paths.append(path)
-        elapsed = time.perf_counter() - wall_start
-        cpu_s = time.process_time() - cpu_start
-        assert len(saved_paths) == STEPS
-        total_bytes = sum(path.stat().st_size for path in saved_paths)
-        return {"wall_s": elapsed, "cpu_s": cpu_s, "hdf5_bytes": total_bytes}
-    finally:
-        for path in saved_paths:
-            path.unlink(missing_ok=True)
-        for path in OUT_DIR.glob(f"simulation_overhead_{case_name}_{run_id}_step_*.h5.partial"):
-            path.unlink(missing_ok=True)
+    for step in range(STEPS):
+        path, _ = manager.acquire_and_save_step(
+            f"BENCHMARK_ONLY_simulation_overhead_{case_name}", step, "synthetic_step", float(step),
+            FRAMES_PER_STEP, run_id=run_id, batch_size=4,
+        )
+        saved_paths.append(path)
+    elapsed = time.perf_counter() - wall_start
+    cpu_s = time.process_time() - cpu_start
+    assert len(saved_paths) == STEPS
+    total_bytes = sum(path.stat().st_size for path in saved_paths)
+    return {"wall_s": elapsed, "cpu_s": cpu_s, "hdf5_bytes": total_bytes}
 
 
 def main() -> None:
     """Run matched software timings at one ROI and 1 ms simulated exposure."""
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    from hhg_control.safe_io import benchmark_directory
+    output_dir = benchmark_directory(OUT_DIR, "simulation_overhead")
     free = shutil.disk_usage(OUT_DIR).free
     expected = FRAMES_PER_STEP * STEPS * (ROI[2] - ROI[0]) * (ROI[3] - ROI[1]) * 2
     if free < expected * 3:
@@ -127,7 +122,7 @@ def main() -> None:
                 camera.acquire_wall_s = camera.acquire_cpu_s = 0.0
             else:
                 camera.acquire_s = 0.0
-            saved = _measure_saved(camera, name, run_id)
+            saved = _measure_saved(camera, name, run_id, output_dir)
             if isinstance(camera, TimedMock):
                 saved["source_acquire_wall_s"] = camera.acquire_wall_s
                 saved["source_acquire_cpu_s"] = camera.acquire_cpu_s
@@ -137,9 +132,9 @@ def main() -> None:
             print(f"{name}: capture {capture['wall_s']:.3f}s, saved {saved['wall_s']:.3f}s", flush=True)
         finally:
             camera.close()
-    report_path = OUT_DIR / f"simulation_overhead_{run_id}.json"
+    report_path = output_dir / f"BENCHMARK_ONLY_simulation_overhead_{run_id}.json"
     report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    print(f"Report: data/test_data/{report_path.name}", flush=True)
+    print(f"Report: {report_path}", flush=True)
 
 
 if __name__ == "__main__":

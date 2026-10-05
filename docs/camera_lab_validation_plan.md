@@ -39,7 +39,7 @@ is not a hardware acceptance result. The notebook now defaults to a centered
   It times 2 x 1,000 frames at 1740 x 128, 1 ms, using the production HDF5
   scan writer for the exposure-paced mock and prepared-frame replay. Mock
   image synthesis always follows the full requested exposure wait. Reports go
-  to `data/test_data`; its own HDF5 files are removed after measurement. The
+  to `data/test_data/benchmark_runs` in `BENCHMARK_ONLY_*` run folders; HDF5 files are retained for manual deletion. The
   replay isolates storage and has no exposure, USB, or camera SDK cost.
 
 ## Before the lab session
@@ -100,3 +100,20 @@ use emulator scan duration or the 455 fps paced replay alone as acceptance.
 
 The current sequencer records scan setpoints as metadata; it does not command
 a physical delay stage. Validate any stage integration separately.
+
+## Approved software safeguards
+
+The GUI owns camera configuration; the vendor SDK default reset on connection is intentional.
+Enter the physical camera serial from its label before connecting. Shutter changes reboot
+that same camera and restore verified ROI, exposure and triggering. Physical commands
+run in workers under the sequencer lock. Failed cleanup is reported as an unknown state.
+Exposure is limited to 2 s in rolling/global-reset and 100 ms in Global Shutter,
+and intersected with reported SDK limits. Scan and export creation refuses overwrites.
+
+Saved acquisition uses bounded batches, a disk preflight and a once-per-second free-space
+check reserving 100 MB. Whole-stack acquisition checks RAM before allocation. Synthetic
+benchmarks retain labelled output, and notebook test-process launch is opt-in
+(`CONFIG.run_offline_tests = True` or `--run-offline-tests`).
+
+These are offline-verified software protections; physical timing and device behaviour
+still require the controlled bench validation above.

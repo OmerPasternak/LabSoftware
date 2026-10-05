@@ -113,10 +113,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{path.name}: step {row['step_index']}, {row['frames']} frames, "
                   f"{row['height']}x{row['width']}, mean {row['mean_adu']:.3f} ADU")
             if args.mean_dir:
-                np.save(args.mean_dir / f"{path.stem}_mean.npy", mean_frame)
+                with (args.mean_dir / f"{path.stem}_mean.npy").open("xb") as handle:
+                    np.save(handle, mean_frame)
         if args.csv:
             args.csv.parent.mkdir(parents=True, exist_ok=True)
-            with args.csv.open("w", newline="", encoding="utf-8") as handle:
+            with args.csv.open("x", newline="", encoding="utf-8") as handle:
                 writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
                 writer.writeheader()
                 writer.writerows(rows)

@@ -18,10 +18,13 @@ class CameraConnectTask(QThread):
     connected = pyqtSignal(object, bool, float)
     error_occurred = pyqtSignal(str)
 
-    def __init__(self, source: str, exposure_s: float) -> None:
+    def __init__(self, source: str, exposure_s: float, *, serial: str | None = None,
+                 mode: ReadoutMode | None = None, roi=None,
+                 trigger: TriggerMode = TriggerMode.AUTO_SEQUENCE) -> None:
         super().__init__()
         self.source = source
         self.exposure_s = exposure_s
+        self.serial, self.mode, self.roi, self.trigger = serial, mode, roi, trigger
 
     def run(self) -> None:
         started = time.perf_counter()
@@ -32,19 +35,25 @@ class CameraConnectTask(QThread):
                 simulated = True
             elif self.source == "physical":
                 from hhg_control.drivers.pco_edge import PcoEdgeCamera
-                camera = PcoEdgeCamera()
+                camera = PcoEdgeCamera(serial=self.serial)
                 simulated = False
             else:
                 raise ValueError(f"Unknown camera source: {self.source}")
             camera.connect()
+            if self.mode is not None:
+                camera.set_readout_mode(self.mode)
             camera.set_exposure_time(self.exposure_s)
+            if self.roi is not None:
+                camera.set_roi(self.roi)
+            camera.set_trigger_mode(self.trigger)
             self.connected.emit(camera, simulated, time.perf_counter() - started)
         except Exception as exc:
             if camera is not None:
                 try:
                     camera.close()
-                except Exception:
-                    pass
+                except Exception as cleanup:
+                    self.error_occurred.emit(f"{exc}; cleanup failed, camera state unknown: {cleanup}")
+                    return
             self.error_occurred.emit(str(exc))
 
 
@@ -54,13 +63,17 @@ class CameraDisconnectTask(QThread):
     disconnected = pyqtSignal()
     error_occurred = pyqtSignal(str)
 
-    def __init__(self, camera: BaseCamera) -> None:
+    def __init__(self, camera: BaseCamera, scan_manager: CameraScanManager | None = None) -> None:
         super().__init__()
         self.camera = camera
+        self.scan_manager = scan_manager
 
     def run(self) -> None:
         try:
-            self.camera.close()
+            if self.scan_manager is None:
+                self.camera.close()
+            else:
+                self.scan_manager.disconnect()
             if self.camera.is_connected:
                 raise RuntimeError("Camera still reports connected after close.")
             self.disconnected.emit()
@@ -74,15 +87,32 @@ class CameraModeTask(QThread):
     mode_applied = pyqtSignal(object)
     error_occurred = pyqtSignal(str)
 
-    def __init__(self, camera: BaseCamera, mode: ReadoutMode) -> None:
+    def __init__(self, scan_manager: CameraScanManager, mode: ReadoutMode) -> None:
         super().__init__()
-        self.camera = camera
+        self.scan_manager = scan_manager
         self.mode = mode
 
     def run(self) -> None:
         try:
-            self.camera.set_readout_mode(self.mode)
+            self.scan_manager.set_readout_mode(self.mode)
             self.mode_applied.emit(self.mode)
+        except Exception as exc:
+            self.error_occurred.emit(str(exc))
+
+
+class CameraExposureTask(QThread):
+    """Apply and read back exposure seconds without blocking the GUI."""
+
+    exposure_applied = pyqtSignal(float)
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self, scan_manager: CameraScanManager, exposure_s: float) -> None:
+        super().__init__()
+        self.scan_manager, self.exposure_s = scan_manager, exposure_s
+
+    def run(self) -> None:
+        try:
+            self.exposure_applied.emit(self.scan_manager.set_exposure_time(self.exposure_s))
         except Exception as exc:
             self.error_occurred.emit(str(exc))
 
@@ -206,8 +236,7 @@ class LiveStreamTask(QThread):
             try:
                 self.scan_manager.stop_live()
             except Exception as exc:
-                if self._running:
-                    self.error_occurred.emit(f"Failed to stop live acquisition: {exc}")
+                self.error_occurred.emit(f"Failed to stop live acquisition; camera state unknown: {exc}")
 
 
 class ScanSequenceTask(QThread):
@@ -230,6 +259,8 @@ class ScanSequenceTask(QThread):
         num_frames: int,
         start_step: int = 0,
         run_id: str | None = None,
+        expected_roi=None,
+        expected_trigger=None,
     ) -> None:
         super().__init__()
         self.scan_mgr = scan_mgr
@@ -241,6 +272,7 @@ class ScanSequenceTask(QThread):
         self.num_frames = num_frames
         self.start_step = start_step
         self.run_id = run_id
+        self.expected_roi, self.expected_trigger = expected_roi, expected_trigger
         self._abort_requested = False
         self._current_step = start_step
 
@@ -254,6 +286,10 @@ class ScanSequenceTask(QThread):
 
     def run(self) -> None:
         try:
+            if self.expected_roi is not None and self.scan_mgr.get_roi() != self.expected_roi:
+                raise RuntimeError("Camera ROI changed since the GUI configuration was verified.")
+            if self.expected_trigger is not None and self.scan_mgr.get_trigger_mode() != self.expected_trigger:
+                raise RuntimeError("Camera trigger changed since the GUI configuration was verified.")
             def on_start(step: int, value: float) -> None:
                 self._current_step = step
                 self.step_started.emit(step, self.num_steps, value, self.param_name)

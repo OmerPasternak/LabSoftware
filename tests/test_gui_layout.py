@@ -127,7 +127,7 @@ def test_camera_controls_name_counts_and_show_exposure_range():
         window.show()
         app.processEvents()
         labels = {label.text() for label in window.findChildren(QLabel)}
-        assert window.lbl_exposure.text() == "Exposure (ms, 0.5–10,000):"
+        assert window.lbl_exposure.text() == "Exposure (ms, 0.5–2,000):"
         assert "Frames/step:" in labels
         assert "Steps:" in labels
         assert "N:" not in labels

@@ -10,7 +10,6 @@ import argparse
 from datetime import datetime, timezone
 import json
 from pathlib import Path
-import secrets
 import shutil
 import sys
 import time
@@ -111,14 +110,16 @@ def run_case(case: str, camera: ReplayCamera, run_dir: Path, frames: int,
     """
     camera.acquire_s = 0.0
     camera.acquire_calls = 0
-    path = run_dir / f"{case}.dat"
+    from hhg_control.safe_io import benchmark_directory
+    run_dir = benchmark_directory(run_dir, case)
+    path = run_dir / f"BENCHMARK_ONLY_{case}.dat"
     started = time.perf_counter()
     cpu_started = time.process_time()
     created: list[Path] = []
     if case == "application":
         manager = CameraScanManager(camera, run_dir)
         path, _ = manager.acquire_and_save_step(
-            "storage_stress", 0, "synthetic_step", 0.0, frames,
+            "BENCHMARK_ONLY_storage_stress", 0, "synthetic_step", 0.0, frames,
             run_id="benchmark", batch_size=batch_size,
         )
         created.append(path)
@@ -129,7 +130,7 @@ def run_case(case: str, camera: ReplayCamera, run_dir: Path, frames: int,
         assert count == frames
     elif case in ("hdf5_plain", "hdf5_gzip"):
         path = path.with_suffix(".h5")
-        with h5py.File(path, "w") as h5f:
+        with h5py.File(path, "x") as h5f:
             filters = {"compression": "gzip", "compression_opts": 1, "shuffle": True} \
                 if case == "hdf5_gzip" else {}
             dset = h5f.create_dataset(
@@ -144,7 +145,7 @@ def run_case(case: str, camera: ReplayCamera, run_dir: Path, frames: int,
         assert offset == frames
         created.append(path)
     elif case == "raw_single":
-        with path.open("wb") as handle:
+        with path.open("xb") as handle:
             for images, _ in camera.iter_frames(frames, batch_size=batch_size):
                 handle.write(images.tobytes(order="C"))
         created.append(path)
@@ -152,8 +153,8 @@ def run_case(case: str, camera: ReplayCamera, run_dir: Path, frames: int,
         index = 0
         for images, _ in camera.iter_frames(frames, batch_size=batch_size):
             for image in images:
-                frame_path = run_dir / f"raw_frame_{index:08d}.bin"
-                with frame_path.open("wb") as handle:
+                frame_path = run_dir / f"BENCHMARK_ONLY_raw_frame_{index:08d}.bin"
+                with frame_path.open("xb") as handle:
                     handle.write(image.tobytes(order="C"))
                 created.append(frame_path)
                 index += 1
@@ -192,10 +193,8 @@ def run_case(case: str, camera: ReplayCamera, run_dir: Path, frames: int,
         "acquire_calls": camera.acquire_calls,
         "raw_MB_per_s": raw_bytes / 1_000_000 / elapsed_s,
     }
-    # Delete only files created by this case. The user-supplied directory is
-    # never recursively removed and no pre-existing files are touched.
-    for item in created:
-        item.unlink()
+    result["data_directory"] = str(run_dir)
+    result["retained_files"] = [str(item) for item in created]
     return result
 
 
@@ -219,16 +218,16 @@ def main() -> None:
     # Uncompressed HDF5 can allocate padded edge chunks, exceeding raw bytes.
     # Leave additional room for filesystem metadata and the result file.
     free_bytes = shutil.disk_usage(args.output_dir).free
-    if free_bytes < int(raw_bytes * 1.5) + 100_000_000:
-        parser.error("Less than 1.5x raw output size plus 100 MB is free on the target drive")
+    if free_bytes < int(raw_bytes * 1.5 * sum(case != "discard" for case in args.cases)) + 100_000_000:
+        parser.error("Insufficient space to retain all selected benchmark cases plus 100 MB")
     print(f"Synthetic batch RAM: {bank_bytes / 2**20:.1f} MiB; "
           f"raw output per case: {raw_bytes / 2**30:.2f} GiB")
     camera = ReplayCamera(args.width, args.height, min(args.batch_size, args.frames), args.pattern)
     camera.connect()
     # tempfile.mkdtemp can inherit restrictive ACLs in some Windows execution
     # contexts. Use ordinary directory creation within the chosen destination.
-    run_dir = args.output_dir / f"camera_storage_stress_{secrets.token_hex(6)}"
-    run_dir.mkdir()
+    from hhg_control.safe_io import benchmark_directory
+    run_dir = benchmark_directory(args.output_dir, "storage_stress")
     results: list[dict[str, Any]] = []
     try:
         for case in args.cases:
@@ -247,17 +246,12 @@ def main() -> None:
             "note": "Synthetic replay only. File close is timed, OS cache may defer physical writes.",
             "results": results,
         }
-        report_path = args.output_dir / f"camera_storage_stress_{datetime.now(timezone.utc):%Y%m%dT%H%M%S_%fZ}.json"
+        report_path = run_dir / f"BENCHMARK_ONLY_camera_storage_stress_{datetime.now(timezone.utc):%Y%m%dT%H%M%S_%fZ}.json"
         report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
         print(f"Report: {report_path}")
     finally:
         camera.close()
-        # rmdir removes only an empty directory. Keep incomplete files after
-        # an exception and do not mask the original error with cleanup errors.
-        try:
-            run_dir.rmdir()
-        except OSError:
-            pass
+
 
 
 if __name__ == "__main__":

@@ -51,9 +51,10 @@ def parse_args():
     )
     parser.add_argument(
         "--output",
+        nargs="?", const="",
         type=str,
         default=None,
-        help="Optional path to save the 2D g^(2) map (.npy or .h5).",
+        help="Save the map (.npy or .h5). Omit the filename for a unique default; existing files are refused.",
     )
     return parser.parse_args()
 
@@ -118,24 +119,31 @@ def main():
             print("  Physical Consistency Check: WARNING (deviation > 5%)")
 
     # Optional saving of the g2_map
-    if args.output:
-        out_path = Path(args.output)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        if out_path.suffix == ".npy":
-            np.save(out_path, g2_map)
-            print(f"\n[INFO] Saved g^(2) array to: {out_path.resolve()}")
-        elif out_path.suffix in [".h5", ".hdf5"]:
-            import h5py
-            with h5py.File(out_path, "w") as h5f:
-                dset = h5f.create_dataset("g2_map", data=g2_map, compression="gzip")
-                dset.attrs["description"] = "2D normalized intensity autocorrelation map g^(2)(x, y)"
-                dset.attrs["epsilon"] = args.epsilon
-                dset.attrs["background_subtracted"] = args.background
-                dset.attrs["total_frames"] = stats["total_frames"]
-            print(f"\n[INFO] Saved g^(2) HDF5 dataset to: {out_path.resolve()}")
-        else:
-            np.save(out_path.with_suffix(".npy"), g2_map)
-            print(f"\n[INFO] Saved g^(2) array to: {out_path.with_suffix('.npy').resolve()}")
+    try:
+        if args.output is not None:
+            from hhg_control.safe_io import unique_output
+            out_path = Path(args.output) if args.output else unique_output(data_path / f"{args.prefix}_g2_map.npy")
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            if out_path.suffix == ".npy":
+                with out_path.open("xb") as handle:
+                    np.save(handle, g2_map)
+                print(f"\n[INFO] Saved g^(2) array to: {out_path.resolve()}")
+            elif out_path.suffix in [".h5", ".hdf5"]:
+                import h5py
+                with h5py.File(out_path, "x") as h5f:
+                    dset = h5f.create_dataset("g2_map", data=g2_map, compression="gzip")
+                    dset.attrs["description"] = "2D normalized intensity autocorrelation map g^(2)(x, y)"
+                    dset.attrs["epsilon"] = args.epsilon
+                    dset.attrs["background_subtracted"] = args.background
+                    dset.attrs["total_frames"] = stats["total_frames"]
+                print(f"\n[INFO] Saved g^(2) HDF5 dataset to: {out_path.resolve()}")
+            else:
+                with out_path.with_suffix(".npy").open("xb") as handle:
+                    np.save(handle, g2_map)
+                print(f"\n[INFO] Saved g^(2) array to: {out_path.with_suffix('.npy').resolve()}")
+    except FileExistsError:
+        print("[ERROR] Output already exists. Choose a different filename; no existing data was changed.")
+        return 1
 
     print("=" * 65)
     return 0

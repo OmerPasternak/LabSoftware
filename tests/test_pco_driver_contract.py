@@ -12,17 +12,14 @@ class FakePcoCamera:
     def __init__(self, interface: str):
         self.interface = interface
         self.description = {"max_width": 2560, "max_height": 2160}
-        self.camera_name = "fake pco.edge"
-        self.camera_serial = "FAKE-1"
+        self.camera_name = "pco.edge 5.5 TEST DOUBLE"
+        self.camera_serial = "12345"
         self.exposure_time = 0.01
         self.configuration = {"roi": (1, 1073, 64, 1088)}
         self.is_recording = False
         self.record_calls = []
         self.image_metadata = {"recorder image number": 9}
         self.sdk = FakeSdk()
-
-    def set_exposure_time(self, value):
-        self.exposure_time = value
 
     def record(self, number_of_images=1, mode="sequence"):
         self.record_calls.append((number_of_images, mode))
@@ -79,9 +76,9 @@ def test_pco_sdk_symbol_is_always_defined():
 def test_pco_external_trigger_uses_sdk_and_checks_readback(monkeypatch):
     """External Exposure Start is confirmed by the PCO SDK before use."""
     fake = FakePcoCamera("USB 3.0")
-    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface: fake))
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface, serial: fake))
     monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
-    camera = pco_edge.PcoEdgeCamera()
+    camera = pco_edge.PcoEdgeCamera(serial="12345")
     camera.connect()
     mode = pco_edge.TriggerMode.EXTERNAL_EXPOSURE_START
     camera.set_trigger_mode(mode)
@@ -99,9 +96,9 @@ def test_pco_external_trigger_rejects_failed_sdk_readback(monkeypatch):
     """Never treat an unconfirmed trigger command as a successful change."""
     fake = FakePcoCamera("USB 3.0")
     fake.sdk.set_trigger_mode = lambda mode: None
-    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface: fake))
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface, serial: fake))
     monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
-    camera = pco_edge.PcoEdgeCamera()
+    camera = pco_edge.PcoEdgeCamera(serial="12345")
     camera.connect()
     with pytest.raises(RuntimeError, match="readback did not match"):
         camera.set_trigger_mode(pco_edge.TriggerMode.EXTERNAL_EXPOSURE_START)
@@ -110,9 +107,9 @@ def test_pco_external_trigger_rejects_failed_sdk_readback(monkeypatch):
 
 def test_pco_live_uses_persistent_ring_buffer(monkeypatch):
     fake = FakePcoCamera("USB 3.0")
-    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface: fake))
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface, serial: fake))
     monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
-    camera = pco_edge.PcoEdgeCamera()
+    camera = pco_edge.PcoEdgeCamera(serial="12345")
     camera.connect()
     camera.start_live(buffer_size=4)
     frame, metadata = camera.acquire_live_frame(timeout_s=0.25)
@@ -128,9 +125,9 @@ def test_pco_live_uses_persistent_ring_buffer(monkeypatch):
 def test_pco_live_preserves_sdk_timestamp(monkeypatch):
     fake = FakePcoCamera("USB 3.0")
     fake.image_metadata["timestamp"] = "2026-09-23T12:34:56.789Z"
-    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface: fake))
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface, serial: fake))
     monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
-    camera = pco_edge.PcoEdgeCamera()
+    camera = pco_edge.PcoEdgeCamera(serial="12345")
     camera.connect()
     camera.start_live()
 
@@ -143,7 +140,7 @@ def test_pco_live_preserves_sdk_timestamp(monkeypatch):
 def test_pco_readout_mode_adapts_to_sdk_dictionary(monkeypatch):
     created = []
 
-    def make_camera(interface):
+    def make_camera(interface, serial):
         camera = FakePcoCamera(interface)
         if created:
             camera.sdk.setup = created[-1].sdk.setup
@@ -153,7 +150,7 @@ def test_pco_readout_mode_adapts_to_sdk_dictionary(monkeypatch):
     monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=make_camera))
     monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
     monkeypatch.setattr(pco_edge.time, "sleep", lambda _: None)
-    camera = pco_edge.PcoEdgeCamera()
+    camera = pco_edge.PcoEdgeCamera(serial="12345")
     camera.connect()
     camera.set_trigger_mode(pco_edge.TriggerMode.EXTERNAL_EXPOSURE_START)
     camera.set_readout_mode(pco_edge.ReadoutMode.GLOBAL_SHUTTER)
@@ -168,7 +165,7 @@ def test_pco_mode_switch_rejects_mismatched_hardware_readback(monkeypatch):
     """A completed reboot is not success unless the SDK reports the new mode."""
     created = []
 
-    def make_camera(interface):
+    def make_camera(interface, serial):
         camera = FakePcoCamera(interface)
         created.append(camera)
         return camera
@@ -176,7 +173,7 @@ def test_pco_mode_switch_rejects_mismatched_hardware_readback(monkeypatch):
     monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=make_camera))
     monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
     monkeypatch.setattr(pco_edge.time, "sleep", lambda _: None)
-    camera = pco_edge.PcoEdgeCamera()
+    camera = pco_edge.PcoEdgeCamera(serial="12345")
     camera.connect()
     with pytest.raises(RuntimeError, match="not verified"):
         camera.set_readout_mode(pco_edge.ReadoutMode.GLOBAL_SHUTTER)
@@ -186,9 +183,9 @@ def test_pco_mode_switch_rejects_mismatched_hardware_readback(monkeypatch):
 
 def test_pco_global_shutter_rejects_long_exposure_before_sdk_command(monkeypatch):
     fake = FakePcoCamera("USB 3.0")
-    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface: fake))
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface, serial: fake))
     monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
-    camera = pco_edge.PcoEdgeCamera()
+    camera = pco_edge.PcoEdgeCamera(serial="12345")
     camera.connect()
     camera.set_exposure_time(0.2)
     with pytest.raises(pco_edge.CameraSafetyError, match="Reduce exposure"):
@@ -207,9 +204,9 @@ def test_pco_connect_requires_shutter_readback_and_closes_failed_handle(monkeypa
         raise RuntimeError("readback failed")
 
     fake.sdk.get_camera_setup = fail_readback
-    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface: fake))
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface, serial: fake))
     monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
-    camera = pco_edge.PcoEdgeCamera()
+    camera = pco_edge.PcoEdgeCamera(serial="12345")
     with pytest.raises(ConnectionError, match="Could not verify PCO shutter mode"):
         camera.connect()
     assert fake.closed
@@ -224,9 +221,9 @@ def test_pco_saved_scan_uses_one_fifo_and_preserves_recorder_numbers(monkeypatch
     fake.image = lambda image_index=0: (
         np.ones((16, 64), dtype=np.uint16), {"recorder image number": next(numbers)}
     )
-    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface: fake))
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface, serial: fake))
     monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
-    camera = pco_edge.PcoEdgeCamera()
+    camera = pco_edge.PcoEdgeCamera(serial="12345")
     camera.connect()
     batches = list(camera.iter_frames(5, batch_size=2))
     assert [len(images) for images, _ in batches] == [2, 2, 1]
@@ -248,9 +245,9 @@ def test_pco_saved_scan_reads_roi_only_once(monkeypatch):
     fake.image = lambda image_index=0: (
         np.ones((16, 64), dtype=np.uint16), {"recorder image number": next(numbers)}
     )
-    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface: fake))
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface, serial: fake))
     monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
-    camera = pco_edge.PcoEdgeCamera()
+    camera = pco_edge.PcoEdgeCamera(serial="12345")
     camera.connect()
     roi_reads = []
 
@@ -273,9 +270,9 @@ def test_pco_fifo_fails_on_a_missing_recorder_frame(monkeypatch):
     fake.image = lambda image_index=0: (
         np.ones((16, 64), dtype=np.uint16), {"recorder image number": next(numbers)}
     )
-    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface: fake))
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface, serial: fake))
     monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
-    camera = pco_edge.PcoEdgeCamera()
+    camera = pco_edge.PcoEdgeCamera(serial="12345")
     camera.connect()
     with pytest.raises(RuntimeError, match="frame gap"):
         list(camera.iter_frames(2, batch_size=1))
@@ -287,9 +284,9 @@ def test_pco_fifo_fails_on_sdk_overflow(monkeypatch):
     """The SDK overflow flag is an acquisition failure even before copying."""
     fake = FakePcoCamera("USB 3.0")
     fake.rec = SimpleNamespace(get_status=lambda: {"bFIFOOverflow": True, "dwLastError": 0})
-    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface: fake))
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface, serial: fake))
     monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
-    camera = pco_edge.PcoEdgeCamera()
+    camera = pco_edge.PcoEdgeCamera(serial="12345")
     camera.connect()
     with pytest.raises(RuntimeError, match="FIFO overflow"):
         list(camera.iter_frames(1))
@@ -304,9 +301,9 @@ def test_pco_fifo_rejects_frame_shape_that_disagrees_with_roi(monkeypatch):
     fake.image = lambda image_index=0: (
         np.ones((5, 8), dtype=np.uint16), {"recorder image number": 1}
     )
-    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface: fake))
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface, serial: fake))
     monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
-    camera = pco_edge.PcoEdgeCamera()
+    camera = pco_edge.PcoEdgeCamera(serial="12345")
     camera.connect()
     with pytest.raises(RuntimeError, match="expected \\(16, 64\\) and uint16"):
         list(camera.iter_frames(1))

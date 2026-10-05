@@ -55,7 +55,7 @@ class BaseCamera(ABC):
     """Universal Camera Interface."""
 
     MIN_EXPOSURE_S: float = 0.0005  # 500 microseconds
-    MAX_EXPOSURE_S: float = 10.0    # 10 seconds safety ceiling
+    MAX_EXPOSURE_S: float = 2.0     # pco.edge 5.5 USB rolling/global-reset limit
 
     def __init__(self) -> None:
         self._is_connected: bool = False
@@ -84,12 +84,18 @@ class BaseCamera(ABC):
 
     def validate_exposure_time(self, exposure_s: float) -> None:
         """Check whether exposure time is within safe physical limits."""
-        if not (self.MIN_EXPOSURE_S <= exposure_s <= self.MAX_EXPOSURE_S):
+        minimum, maximum = self.get_exposure_limits()
+        if not (minimum <= exposure_s <= maximum):
             raise CameraSafetyError(
                 f"Requested exposure time {exposure_s * 1e3:.2f} ms is outside "
-                f"safe limits [{self.MIN_EXPOSURE_S * 1e3:.2f} ms, "
-                f"{self.MAX_EXPOSURE_S * 1e3:.2f} ms]."
+                f"safe limits [{minimum * 1e3:.2f} ms, "
+                f"{maximum * 1e3:.2f} ms]."
             )
+
+    def get_exposure_limits(self) -> tuple[float, float]:
+        """Return allowed exposure seconds for the current shutter mode."""
+        maximum = 0.1 if self._readout_mode == ReadoutMode.GLOBAL_SHUTTER else self.MAX_EXPOSURE_S
+        return self.MIN_EXPOSURE_S, maximum
 
     @abstractmethod
     def set_exposure_time(self, exposure_s: float) -> None:

@@ -6,16 +6,19 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
+import math
 import os
 from pathlib import Path
 from queue import Empty, Full, Queue
 import re
 import threading
+import time
 from typing import Any, Optional
 
 import numpy as np
 
 from ..drivers.base_camera import BaseCamera, TriggerMode
+from ..safe_io import check_disk_space
 
 
 HDF5_SCHEMA_VERSION = "2.0"
@@ -114,8 +117,29 @@ class CameraScanManager:
 
     def set_roi(self, roi: tuple[int, int, int, int]) -> None:
         """Set hardware ROI bounds in unbinned sensor pixels."""
-        with self._camera_lock:
+        with self._operation("CONFIGURING"), self._camera_lock:
             self.camera.set_roi(roi)
+
+    def set_readout_mode(self, mode) -> None:
+        """Configure and verify shutter mode while acquisition is idle."""
+        with self._operation("CONFIGURING"), self._camera_lock:
+            self.camera.set_readout_mode(mode)
+            if self.camera.get_readout_mode() != mode:
+                raise RuntimeError("Shutter readback differs from request.")
+
+    def set_exposure_time(self, exposure_s: float) -> float:
+        """Configure exposure seconds while idle, returning verified readback."""
+        with self._operation("CONFIGURING"), self._camera_lock:
+            self.camera.set_exposure_time(exposure_s)
+            actual = self.camera.get_exposure_time()
+            if not math.isclose(actual, exposure_s, rel_tol=1e-5, abs_tol=1e-9):
+                raise RuntimeError("Exposure readback differs from request.")
+            return actual
+
+    def disconnect(self) -> None:
+        """Release the camera under the same lock used by acquisition."""
+        with self._operation("DISCONNECTING"), self._camera_lock:
+            self.camera.close()
 
     def get_roi(self) -> tuple[int, int, int, int]:
         """Get zero-based, upper-exclusive hardware ROI bounds in pixels."""
@@ -158,7 +182,11 @@ class CameraScanManager:
         if self.state != "LIVE":
             return
         with self._camera_lock:
-            self.camera.stop_live()
+            try:
+                self.camera.stop_live()
+            except Exception:
+                self.camera.state_unknown = True
+                raise
         with self._state_lock:
             self._state = "IDLE"
 
@@ -238,6 +266,7 @@ class CameraScanManager:
         clean_exp = sanitize_filename_component(experiment_name)
         clean_param = str(param_name).strip() or "Setpoint"
         roi = self.camera.get_roi()
+        check_disk_space(self.storage_dir, int(num_frames * (roi[2] - roi[0]) * (roi[3] - roi[1]) * 2 * 1.1))
 
         attrs = {
                 "experiment_name": clean_exp,
@@ -284,7 +313,7 @@ class CameraScanManager:
             """Own the HDF5 handle and drain copied frame batches in order."""
             nonlocal written
             try:
-                with h5py.File(partial_path, "w") as h5f:
+                with h5py.File(partial_path, "x") as h5f:
                     h5f.attrs["schema_version"] = HDF5_SCHEMA_VERSION
                     h5f.attrs["complete"] = False
                     for key, value in attrs.items():
@@ -300,6 +329,7 @@ class CameraScanManager:
                     )
                     image_dset = None
                     batches_written = 0
+                    next_space_check = 0.0
                     while True:
                         try:
                             images, metadata = pending.get(timeout=0.05)
@@ -327,6 +357,9 @@ class CameraScanManager:
                                 "Raw 16-bit sCMOS image stack recorded at this scan step"
                             )
                         end = written + len(images)
+                        if time.monotonic() >= next_space_check:
+                            check_disk_space(self.storage_dir, images.nbytes)
+                            next_space_check = time.monotonic() + 1.0
                         self._write_batch(image_dset, metadata_dset, written, images, metadata)
                         written = end
                         batches_written += 1
@@ -412,7 +445,13 @@ class CameraScanManager:
             raise producer_error
         if not producer_complete or written != num_frames or latest_frame is None:
             raise RuntimeError("Acquisition incomplete; partial file retained.")
-        os.replace(partial_path, filepath)
+        # Windows rename fails if the destination exists. Other hosts use an
+        # exclusive hard link to publish, so a concurrent writer cannot be replaced.
+        if os.name == "nt":
+            os.rename(partial_path, filepath)
+        else:
+            os.link(partial_path, filepath)
+            partial_path.unlink()
         return filepath, latest_frame
 
     def _write_batch(

@@ -4,11 +4,13 @@ Wraps the official `pco` Python SDK (pco.Camera).
 """
 
 import time
+import math
 from collections.abc import Callable, Iterator
 from datetime import datetime
 from typing import Tuple, List, Dict, Any
 import numpy as np
 from .base_camera import BaseCamera, CameraSafetyError, ReadoutMode, TriggerMode
+from ..safe_io import check_stack_memory
 
 try:
     import pco as _pco
@@ -32,7 +34,7 @@ def _frame_time_fields(metadata: Dict[str, Any]) -> tuple[Any, str, str]:
 class PcoEdgeCamera(BaseCamera):
     """Driver for pco.edge 5.5 sCMOS using the official Excelitas `pco` SDK."""
 
-    def __init__(self, interface: str = "USB 3.0") -> None:
+    def __init__(self, interface: str = "USB 3.0", *, serial: str | None = None) -> None:
         super().__init__()
         if not PCO_AVAILABLE:
             raise ImportError(
@@ -40,15 +42,22 @@ class PcoEdgeCamera(BaseCamera):
                 "Ensure 'pip install pco' is executed and PCO CamWare / USB drivers are installed."
             )
         self._interface_name = interface
+        self._serial = serial
+        self.state_unknown = False
         self._cam: Any = None
         self._info: Dict[str, Any] = {}
+        self._description: Dict[str, Any] = {}
 
     def connect(self) -> None:
         if self._is_connected:
             return
+        if not self._serial or not str(self._serial).isdigit():
+            raise ValueError("Enter the intended physical camera's numeric serial before connecting.")
         try:
-            self._cam = pco.Camera(interface=self._interface_name)
+            # The GUI owns configuration; the vendor's default reset is intentional.
+            self._cam = pco.Camera(interface=self._interface_name, serial=int(self._serial))
             description = getattr(self._cam, "description", {})
+            self._description = description
             self._info = {
                 "model": getattr(self._cam, "camera_name", "pco.edge"),
                 "serial_number": str(getattr(self._cam, "camera_serial", "UNKNOWN")),
@@ -57,43 +66,80 @@ class PcoEdgeCamera(BaseCamera):
                 "height": description.get("max_height", 2160),
                 "bit_depth": 16
             }
+            if self._info["serial_number"] != str(int(self._serial)):
+                raise RuntimeError("Connected camera serial does not match the requested camera.")
+            if "edge 5.5" not in self._info["model"].lower():
+                raise RuntimeError("This driver requires a pco.edge 5.5 camera.")
             self.get_readout_mode()
             self.get_trigger_mode()
             self.set_exposure_time(self._exposure_time_s)
+            self._roi = self.get_roi()
             self._is_connected = True
+            self.state_unknown = False
         except Exception as exc:
             if self._cam is not None:
                 try:
                     self._cam.close()
-                except Exception:
-                    pass
+                except Exception as cleanup:
+                    self.state_unknown = True
+                    raise ConnectionError(f"Connection failed: {exc}; close failed, camera state unknown: {cleanup}") from exc
             self._cam = None
             self._is_connected = False
             raise ConnectionError(f"Failed to connect to PCO camera: {exc}") from exc
 
     def close(self) -> None:
+        """Attempt stop and close independently; report any uncertain cleanup."""
         if self._cam is not None:
+            errors = []
             try:
-                self.stop_live()
+                self._cam.stop()
                 if getattr(self._cam, "is_recording", False):
-                    self._cam.stop()
+                    raise RuntimeError("Camera still reports recording after stop.")
+            except Exception as exc:
+                errors.append(f"stop: {exc}")
+            try:
                 self._cam.close()
-            except Exception:
-                pass
-            finally:
+            except Exception as exc:
+                errors.append(f"close: {exc}")
+            else:
                 self._cam = None
                 self._is_connected = False
+                self._live_active = False
+            self.state_unknown = bool(errors)
+            if errors:
+                raise RuntimeError("Camera state unknown after cleanup: " + "; ".join(errors))
+
+    def get_exposure_limits(self) -> tuple[float, float]:
+        """Intersect documented model/mode limits with SDK description seconds."""
+        minimum, maximum = super().get_exposure_limits()
+        if self._cam is not None:
+            desc = self._description
+            minimum = max(minimum, float(desc.get("min exposure time", minimum)))
+            maximum = min(maximum, float(desc.get("max exposure time", maximum)))
+        return minimum, maximum
 
     def set_exposure_time(self, exposure_s: float) -> None:
-        self.validate_exposure_time(exposure_s)
+        """Set and verify seconds within model/mode/SDK limits while idle."""
         if self._readout_mode == ReadoutMode.GLOBAL_SHUTTER and exposure_s > 0.1:
             raise CameraSafetyError("Global Shutter exposure must be at most 0.1 s (100 ms).")
+        self.validate_exposure_time(exposure_s)
         if self._cam is not None:
-            self._cam.set_exposure_time(exposure_s)
-        self._exposure_time_s = float(exposure_s)
+            if getattr(self._cam, "is_recording", False):
+                raise RuntimeError("Stop recording before changing exposure.")
+            try:
+                self._cam.exposure_time = float(exposure_s)
+                actual = float(self._cam.exposure_time)
+                if not math.isclose(actual, exposure_s, rel_tol=1e-5, abs_tol=1e-9):
+                    raise RuntimeError(f"Exposure readback {actual} s differs from request {exposure_s} s.")
+            except Exception:
+                self.state_unknown = True
+                raise
+            self._exposure_time_s = actual
+        else:
+            self._exposure_time_s = float(exposure_s)
 
     def get_exposure_time(self) -> float:
-        if self._cam is not None and hasattr(self._cam, "exposure_time"):
+        if self._cam is not None:
             return float(self._cam.exposure_time)
         return self._exposure_time_s
 
@@ -125,20 +171,23 @@ class PcoEdgeCamera(BaseCamera):
             raise RuntimeError("Camera is not connected; cannot change trigger mode.")
         if getattr(self._cam, "is_recording", False) or getattr(self, "_live_active", False):
             raise RuntimeError("Stop camera recording before changing trigger mode.")
-        if self.get_trigger_mode() != mode:
-            self._cam.sdk.set_trigger_mode(mode.value)
-            # pco.Camera.configuration performs this arm after changing trigger.
-            self._cam.sdk.arm_camera()
-        if self.get_trigger_mode() != mode:
-            raise RuntimeError(f"PCO trigger mode readback did not match {mode.value!r}.")
+        try:
+            if self.get_trigger_mode() != mode:
+                self._cam.sdk.set_trigger_mode(mode.value)
+                self._cam.sdk.arm_camera()
+            if self.get_trigger_mode() != mode:
+                raise RuntimeError(f"PCO trigger mode readback did not match {mode.value!r}.")
+        except Exception:
+            self.state_unknown = True
+            raise
 
     def get_sensor_info(self) -> Dict[str, Any]:
         return self._info
 
     def get_roi_limits(self) -> Dict[str, Any]:
         """Read hardware ROI steps, minimum dimensions, and symmetry from pco SDK."""
-        if self._cam is not None and hasattr(self._cam, "description"):
-            desc = getattr(self._cam, "description", {})
+        if self._cam is not None:
+            desc = self._description
             return {
                 "steps": desc.get("roi steps", (4, 1)),
                 "minimum": (desc.get("min width", 64), desc.get("min height", 16)),
@@ -148,7 +197,7 @@ class PcoEdgeCamera(BaseCamera):
 
     def get_roi(self) -> tuple[int, int, int, int]:
         """Translate SDK one-based inclusive ROI (x0, y0, x1, y1) to zero-based exclusive bounds."""
-        if self._cam is not None and hasattr(self._cam, "configuration"):
+        if self._cam is not None:
             cfg = self._cam.configuration
             if "roi" in cfg and cfg["roi"]:
                 x0, y0, x1, y1 = cfg["roi"]
@@ -160,10 +209,15 @@ class PcoEdgeCamera(BaseCamera):
         self.validate_roi(roi)
         if self._cam is not None:
             if getattr(self._cam, "is_recording", False):
-                self._cam.stop()
-            x0, y0, x1, y1 = roi
-            # PCO SDK expects 1-based (x0+1, y0+1, x1, y1)
-            self._cam.configuration = {"roi": (x0 + 1, y0 + 1, x1, y1)}
+                raise RuntimeError("Stop recording before changing ROI.")
+            try:
+                x0, y0, x1, y1 = roi
+                self._cam.configuration = {"roi": (x0 + 1, y0 + 1, x1, y1)}
+                if self.get_roi() != tuple(roi):
+                    raise RuntimeError("Camera ROI readback differs from the requested bounds.")
+            except Exception:
+                self.state_unknown = True
+                raise
         self._roi = tuple(roi)
 
     def get_readout_mode(self) -> ReadoutMode:
@@ -245,10 +299,12 @@ class PcoEdgeCamera(BaseCamera):
             self._is_connected = False
 
         except AttributeError as exc:
+            self.state_unknown = True
             raise RuntimeError(
                 f"PCO SDK method 'set_camera_setup' not found — verify pco package version ≥ 0.1.3: {exc}"
             ) from exc
         except Exception as exc:
+            self.state_unknown = True
             raise RuntimeError(
                 f"Failed to configure readout mode {mode.name} (SDK value {mode.value}): {exc}"
             ) from exc
@@ -267,6 +323,7 @@ class PcoEdgeCamera(BaseCamera):
                     f"Camera reported setup {actual_setup} after reboot; expected {mode.value}."
                 )
         except Exception as exc:
+            self.state_unknown = True
             raise RuntimeError(
                 f"Camera mode switch to {mode.name} was not verified after reboot: {exc}"
             ) from exc
@@ -274,6 +331,9 @@ class PcoEdgeCamera(BaseCamera):
         self._readout_mode = mode
 
     def acquire_frames(self, num_frames: int) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
+        """Acquire a RAM-checked uint16 stack; long saved runs use iter_frames."""
+        if self.state_unknown:
+            raise RuntimeError("Camera state unknown; close and reconnect before acquisition.")
         if not self._is_connected or self._cam is None:
             raise RuntimeError("Camera is not connected.")
         if num_frames < 1:
@@ -281,6 +341,8 @@ class PcoEdgeCamera(BaseCamera):
         if getattr(self, "_live_active", False):
             raise RuntimeError("Stop live acquisition before recording a measurement sequence.")
 
+        roi = self.get_roi()
+        check_stack_memory(num_frames, roi[3] - roi[1], roi[2] - roi[0])
         self._cam.record(number_of_images=num_frames, mode="sequence")
         raw_images, metadata_list = self._cam.images()
         images_array = np.ascontiguousarray(np.stack(raw_images, axis=0), dtype=np.uint16)
@@ -315,6 +377,8 @@ class PcoEdgeCamera(BaseCamera):
         or skipped frame ID fails the step instead of silently saving a gap.
         The FIFO is stopped when iteration ends or its generator is closed.
         """
+        if self.state_unknown:
+            raise RuntimeError("Camera state unknown; close and reconnect before acquisition.")
         if not self._is_connected or self._cam is None:
             raise RuntimeError("Camera is not connected.")
         if getattr(self, "_live_active", False):
@@ -382,6 +446,8 @@ class PcoEdgeCamera(BaseCamera):
 
     def start_live(self, buffer_size: int = 4) -> None:
         """Start a persistent PCO ring buffer for efficient live display."""
+        if self.state_unknown:
+            raise RuntimeError("Camera state unknown; close and reconnect before acquisition.")
         if not self._is_connected or self._cam is None:
             raise RuntimeError("Camera is not connected.")
         if buffer_size < 4:

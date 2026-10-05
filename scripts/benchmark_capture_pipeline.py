@@ -62,12 +62,15 @@ class PacedReplayCamera(ReplayCamera):
 
 def run_benchmark(
     output_dir: Path, *, frames: int, width: int, height: int,
-    fps: float, batch_size: int = 4, keep_data: bool = False,
+    fps: float, batch_size: int = 4, keep_data: bool = True,
 ) -> dict:
     """Save and verify one paced scan; dimensions are pixels and rate is fps."""
     if min(frames, width, height, batch_size) < 1:
         raise ValueError("frames, width, height, and batch_size must be positive.")
-    output_dir = output_dir.resolve()
+    from hhg_control.safe_io import benchmark_directory
+    if not keep_data:
+        raise ValueError("Benchmark data is retained; delete its BENCHMARK_ONLY run folder manually.")
+    output_dir = benchmark_directory(output_dir.resolve(), "paced_pipeline")
     output_dir.mkdir(parents=True, exist_ok=True)
     raw_bytes = frames * width * height * 2
     free_bytes = shutil.disk_usage(output_dir).free
@@ -80,7 +83,7 @@ def run_benchmark(
     started = time.perf_counter()
     try:
         path, _ = manager.acquire_and_save_step(
-            "paced_pipeline", 0, "synthetic_step", 0.0, frames,
+            "BENCHMARK_ONLY_paced_pipeline", 0, "synthetic_step", 0.0, frames,
             batch_size=batch_size, run_id=datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ"),
         )
         pipeline_s = time.perf_counter() - started
@@ -118,10 +121,7 @@ def run_benchmark(
             "kept_data": keep_data,
             "note": "No camera/USB/trigger is exercised; OS and device caching may still affect timing.",
         }
-        if not keep_data:
-            path.unlink()
-        else:
-            result["data_path"] = str(path)
+        result["data_path"] = str(path)
         return result
     finally:
         camera.close()
@@ -141,9 +141,9 @@ def main() -> None:
     result = run_benchmark(
         args.output_dir, frames=args.frames, width=args.width,
         height=args.height, fps=args.fps, batch_size=args.batch_size,
-        keep_data=args.keep_data,
+        keep_data=True,
     )
-    report = args.output_dir / f"paced_pipeline_{datetime.now(timezone.utc):%Y%m%dT%H%M%S_%fZ}.json"
+    report = Path(result["data_path"]).parent / f"BENCHMARK_ONLY_paced_pipeline_{datetime.now(timezone.utc):%Y%m%dT%H%M%S_%fZ}.json"
     report.write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps(result, indent=2))
     print(f"Report: {report.name}")
