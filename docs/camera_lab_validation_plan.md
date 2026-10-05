@@ -110,7 +110,8 @@ an unavailable saved camera produces an error rather than selecting another devi
 Shutter changes reboot
 that same camera and restore verified ROI, exposure and triggering. Physical commands
 run in workers under the sequencer lock. Failed cleanup is reported as an unknown state.
-Configuration disables conflicting controls while retaining the image and live labels.
+Configuration disables command buttons while retaining the image, live labels and
+settings-field appearance. Conflicting mouse/keyboard edits are ignored until completion.
 The camera reader briefly pauses where required; Qt painting and STOP remain responsive.
 Exposure is limited to 2 s in rolling/global-reset and 100 ms in Global Shutter,
 and intersected with reported SDK limits. Scan and export creation refuses overwrites.

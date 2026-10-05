@@ -17,7 +17,7 @@ from datetime import datetime
 import numpy as np
 
 from PyQt6 import sip
-from PyQt6.QtCore import Qt, QPointF
+from PyQt6.QtCore import Qt, QPointF, QEvent
 from PyQt6.QtGui import QColor, QPainter
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -155,6 +155,8 @@ class CameraMainWindow(QMainWindow):
         self._camera_selection_path = default_storage / "camera_selection.json"
         self._physical_serial = load_camera_serial(self._camera_selection_path)
         self._configuration_display_preserved = False
+        self._command_input_locked = False
+        self._go_visual_active = None
         self._mode_change_pending = False
         self._mode_change_succeeded = False
         self._roi_change_succeeded = False
@@ -217,6 +219,29 @@ class CameraMainWindow(QMainWindow):
         self._is_dragging_roi: bool = False
 
         self._build_ui()
+        # Block competing edits without greying out the entire settings area.
+        inputs = (self.spn_exposure, self.cmb_readout_mode, self.chk_external_trigger,
+                  self.cmb_camera_source, self.spn_roi_x0, self.spn_roi_x1,
+                  self.spn_roi_y0, self.spn_roi_y1)
+        self._command_inputs = set(inputs)
+        for control in inputs:
+            self._command_inputs.update(control.findChildren(QWidget))
+        for control in self._command_inputs:
+            control.installEventFilter(self)
+
+    def eventFilter(self, watched, event) -> bool:
+        """Ignore conflicting user edits during a command, preserving widget appearance."""
+        if (self._command_input_locked and watched in self._command_inputs
+                and event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease,
+                                     QEvent.Type.MouseButtonDblClick, QEvent.Type.Wheel,
+                                     QEvent.Type.KeyPress, QEvent.Type.KeyRelease,
+                                     QEvent.Type.Shortcut, QEvent.Type.ShortcutOverride,
+                                     QEvent.Type.ContextMenu, QEvent.Type.InputMethod,
+                                     QEvent.Type.TouchBegin, QEvent.Type.TouchUpdate,
+                                     QEvent.Type.TouchEnd)):
+            event.accept()
+            return True
+        return super().eventFilter(watched, event)
 
     def _build_ui(self) -> None:
         central_widget = QWidget()
@@ -388,6 +413,8 @@ class CameraMainWindow(QMainWindow):
             "font-size: 11px; font-weight: bold; padding: 3px 6px; background: #f8f9fa; "
             "border: 1px solid #dee2e6; border-radius: 3px; color: #212529;"
         )
+        # Reserve both lines so changing numbers/warnings cannot relayout the window.
+        self.lbl_intensity_metrics.setFixedHeight(max(36, 2 * self.lbl_intensity_metrics.fontMetrics().lineSpacing() + 8))
         left_pane.addWidget(self.lbl_intensity_metrics)
         left_pane.addStretch(1)
         root_layout.addLayout(left_pane, stretch=2)
@@ -672,6 +699,9 @@ class CameraMainWindow(QMainWindow):
     # GO and STOP Controls (Top-Left Docked)
     # =========================================================================
     def _set_go_button_style(self, active: bool) -> None:
+        if self._go_visual_active == active:
+            return
+        self._go_visual_active = active
         if active:
             self.btn_go.setText("RUNNING")
             self.btn_go.setToolTip("Live view is running. Use STOP to end it.")
@@ -701,6 +731,7 @@ class CameraMainWindow(QMainWindow):
 
     def _configuration_controls(self, busy: bool) -> None:
         """Disable only conflicting controls while leaving painting and STOP responsive."""
+        self._command_input_locked = busy
         if busy and self._is_live_active:
             # A temporary SDK pause must not flash GO/Stopping/Running labels.
             self._configuration_display_preserved = True
@@ -714,11 +745,14 @@ class CameraMainWindow(QMainWindow):
                 self._set_go_button_style(active=False)
                 if not self._hardware_state_unknown:
                     self.lbl_system_status.setText("Status: Live Paused")
-        for control in (self.btn_go, self.btn_take_measurement, self.spn_exposure,
-                        self.cmb_readout_mode, self.btn_apply_roi, self.btn_full_sensor, self.btn_draw_roi):
+        for control in (self.btn_go, self.btn_take_measurement,
+                        self.btn_apply_roi, self.btn_full_sensor, self.btn_draw_roi):
             control.setEnabled(not busy and not self._hardware_state_unknown)
-        self.chk_external_trigger.setEnabled(not busy and self.camera.is_connected and not self._hardware_state_unknown)
-        self.cmb_camera_source.setEnabled(not busy and not self._is_live_active and not self._hardware_state_unknown)
+        self.spn_exposure.setEnabled(not self._hardware_state_unknown)
+        self.cmb_readout_mode.setEnabled(not self._hardware_state_unknown)
+        self.chk_external_trigger.setEnabled(self.camera.is_connected and not self._hardware_state_unknown)
+        self.cmb_camera_source.setEnabled(not (self._is_live_active or self._configuration_display_preserved)
+                                          and not self._hardware_state_unknown)
 
     def _on_go_clicked(self) -> None:
         """Connect if disconnected, then start continuous live camera view."""
@@ -747,8 +781,9 @@ class CameraMainWindow(QMainWindow):
         self._is_live_active = True
         self._set_go_button_style(active=True)
         self.cmb_camera_source.setEnabled(False)
-        self.lbl_system_status.setText("Status: Live View Active (Streaming)")
-        self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #198754; padding-left: 8px;")
+        if not self._configuration_display_preserved:
+            self.lbl_system_status.setText("Status: Live View Active (Streaming)")
+            self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #198754; padding-left: 8px;")
 
         self.active_live_task = LiveStreamTask(scan_manager=self.scan_manager, target_fps=20.0)
         self.active_live_task.frame_ready.connect(self._on_live_frame_ready)
@@ -931,9 +966,7 @@ class CameraMainWindow(QMainWindow):
         if self._is_live_active or self.active_live_task is not None:
             self._restore_connected_source_selection()
             return
-        if (self.active_connect_task is not None or self.active_disconnect_task is not None
-                or self.active_mode_task is not None or self.active_roi_task is not None
-                or self.active_trigger_task is not None):
+        if self._configuration_busy():
             self._restore_connected_source_selection()
             return
         if self.active_scan_task is not None and self.active_scan_task.isRunning():
@@ -1073,9 +1106,6 @@ class CameraMainWindow(QMainWindow):
         self._after_connect = after_mode
         self._mode_change_succeeded = False
         self._configuration_controls(True)
-        self.cmb_readout_mode.setEnabled(False)
-        self.chk_external_trigger.setEnabled(False)
-        self.cmb_camera_source.setEnabled(False)
         self.active_mode_task = CameraModeTask(self.scan_manager, mode)
         self.active_mode_task.mode_applied.connect(self._on_mode_applied)
         self.active_mode_task.error_occurred.connect(self._on_mode_error)
@@ -1177,9 +1207,6 @@ class CameraMainWindow(QMainWindow):
         self._trigger_change_succeeded = False
         self._append_log(f"[TRIGGER REQUEST] {self.camera._trigger_mode.value} -> {mode.value}")
         self._configuration_controls(True)
-        self.chk_external_trigger.setEnabled(False)
-        self.cmb_readout_mode.setEnabled(False)
-        self.cmb_camera_source.setEnabled(False)
         self.active_trigger_task = CameraTriggerTask(self.scan_manager, mode)
         self.active_trigger_task.trigger_applied.connect(self._on_trigger_applied)
         self.active_trigger_task.error_occurred.connect(self._on_trigger_error)
@@ -1416,10 +1443,12 @@ class CameraMainWindow(QMainWindow):
             c_mean = float(sample.mean())
             sat_warning = " [WARNING: SENSOR SATURATION DETECTED!]" if c_max >= 65530 else ""
             sat_color = "#dc3545" if sat_warning else "#212529"
-            self.lbl_intensity_metrics.setStyleSheet(
+            metrics_style = (
                 f"font-size: 11px; font-weight: bold; padding: 3px 6px; background: #f8f9fa; "
                 f"border: 1px solid #dee2e6; border-radius: 3px; color: {sat_color};"
             )
+            if self.lbl_intensity_metrics.styleSheet() != metrics_style:
+                self.lbl_intensity_metrics.setStyleSheet(metrics_style)
             self.lbl_intensity_metrics.setText(
                 f"Pixel Intensity Metrics | Minimum: {c_min:,} ADU | Maximum: {c_max:,} ADU | Mean: {c_mean:,.1f} ADU{sat_warning}"
             )
@@ -1711,7 +1740,6 @@ class CameraMainWindow(QMainWindow):
         self.btn_apply_roi.setEnabled(False)
         self.btn_full_sensor.setEnabled(False)
         self.btn_draw_roi.setEnabled(False)
-        self.cmb_camera_source.setEnabled(False)
         if self.active_live_task is not None:
             self._stop_live(after_stop=lambda: self._start_roi_task(roi))
         else:

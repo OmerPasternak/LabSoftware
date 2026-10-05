@@ -6,11 +6,48 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
+from PyQt6.QtCore import QObject, QEvent
 from PyQt6.QtWidgets import QApplication, QLabel
 
 from hhg_control.drivers.base_camera import ReadoutMode
 from hhg_control.drivers.mock_camera import MockPcoCamera
 from hhg_control.ui.camera.camera_panel import CameraMainWindow
+
+
+def test_live_metrics_do_not_repaint_right_control_panel(qtbot):
+    """Streaming frames must not invalidate the stationary right-hand controls."""
+    class PaintCounter(QObject):
+        def __init__(self):
+            super().__init__()
+            self.paints = 0
+            self.layouts = 0
+
+        def eventFilter(self, watched, event):
+            if event.type() == QEvent.Type.Paint:
+                self.paints += 1
+            if event.type() == QEvent.Type.LayoutRequest:
+                self.layouts += 1
+            return False
+
+    window = CameraMainWindow()
+    qtbot.addWidget(window)
+    window.show()
+    window._update_display(np.zeros((216, 256), dtype=np.uint16),
+                           {"roi": (0, 0, 2560, 2160)})
+    qtbot.wait(150)
+    counter = PaintCounter()
+    window.control_panel.installEventFilter(counter)
+    window.btn_take_measurement.installEventFilter(counter)
+    layout_counter = PaintCounter()
+    window.centralWidget().installEventFilter(layout_counter)
+    for value in (10, 100, 65535, 20):
+        for _ in range(5):
+            window._update_display(np.full((216, 256), value, dtype=np.uint16),
+                                   {"roi": (0, 0, 2560, 2160)})
+            qtbot.wait(10)
+    assert counter.paints == 0
+    assert layout_counter.layouts == 0
+    window.close()
 
 
 def test_roi_draw_mode_ends_after_one_completed_rectangle():

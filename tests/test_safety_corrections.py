@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QTimer, QObject, QEvent, Qt
 
 from hhg_control import safe_io
 from hhg_control.drivers.base_camera import CameraSafetyError, ReadoutMode, TriggerMode
@@ -128,6 +128,16 @@ def test_slow_commands_keep_gui_responsive_and_block_overlap(qtbot, tmp_path):
 
 @pytest.mark.parametrize("change", ["exposure", "mode", "trigger", "roi"])
 def test_configuration_pauses_live_without_label_flicker(qtbot, tmp_path, change):
+    class SettingsAppearanceCounter(QObject):
+        def __init__(self):
+            super().__init__()
+            self.changes = []
+
+        def eventFilter(self, watched, event):
+            if event.type() in (QEvent.Type.EnabledChange, QEvent.Type.StyleChange):
+                self.changes.append(event.type())
+            return False
+
     class GuardedMock(SmallMock):
         def _idle_delay(self):
             assert not getattr(self, "_live_active", False)
@@ -153,6 +163,10 @@ def test_configuration_pauses_live_without_label_flicker(qtbot, tmp_path, change
     window._start_live()
     qtbot.waitUntil(lambda: window._frame_count > 0)
     original = (window.btn_go.text(), window.btn_go.styleSheet(), window.lbl_system_status.text())
+    appearances = SettingsAppearanceCounter()
+    for field in (window.spn_exposure, window.cmb_readout_mode, window.chk_external_trigger,
+                  window.cmb_camera_source, window.spn_roi_x0, window.spn_roi_x1):
+        field.installEventFilter(appearances)
     observed = []
     timer = QTimer(window)
     timer.timeout.connect(lambda: observed.append(
@@ -167,9 +181,14 @@ def test_configuration_pauses_live_without_label_flicker(qtbot, tmp_path, change
     else:
         window._request_roi_change((0, 0, 64, 32), full_sensor=True)
     assert not window.btn_go.isEnabled() and window.btn_stop.isEnabled()
+    assert window.spn_exposure.isEnabled() and window.cmb_readout_mode.isEnabled()
+    committed_value = window.spn_exposure.value()
+    qtbot.keyClick(window.spn_exposure, Qt.Key.Key_Up)
+    assert window.spn_exposure.value() == committed_value
     qtbot.waitUntil(lambda: not window._configuration_busy() and window.scan_manager.state == "LIVE")
     timer.stop()
     assert len(observed) >= 10 and all(item == original for item in observed)
+    assert appearances.changes == []
     if change == "exposure":
         assert camera._exposure_time_s == 0.02
     elif change == "mode":
