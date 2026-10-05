@@ -111,7 +111,7 @@ def test_slow_commands_keep_gui_responsive_and_block_overlap(qtbot, tmp_path):
     window._on_go_clicked()
     window._on_exposure_changed(20)
     assert window.active_live_task is None and window.active_exposure_task is None
-    assert not window.btn_go.isEnabled()
+    assert window.btn_go.isEnabled() and window._command_input_locked
     qtbot.waitUntil(lambda: window.active_mode_task is None and window.active_preview_task is None)
     assert len(ticks) >= 8
     before = len(ticks)
@@ -165,7 +165,9 @@ def test_configuration_pauses_live_without_label_flicker(qtbot, tmp_path, change
     original = (window.btn_go.text(), window.btn_go.styleSheet(), window.lbl_system_status.text())
     appearances = SettingsAppearanceCounter()
     for field in (window.spn_exposure, window.cmb_readout_mode, window.chk_external_trigger,
-                  window.cmb_camera_source, window.spn_roi_x0, window.spn_roi_x1):
+                  window.cmb_camera_source, window.spn_roi_x0, window.spn_roi_x1,
+                  window.btn_go, window.btn_take_measurement, window.btn_apply_roi,
+                  window.btn_full_sensor, window.btn_draw_roi):
         field.installEventFilter(appearances)
     observed = []
     timer = QTimer(window)
@@ -180,7 +182,12 @@ def test_configuration_pauses_live_without_label_flicker(qtbot, tmp_path, change
         window.chk_external_trigger.setChecked(True)
     else:
         window._request_roi_change((0, 0, 64, 32), full_sensor=True)
-    assert not window.btn_go.isEnabled() and window.btn_stop.isEnabled()
+    assert window.btn_go.isEnabled() and window.btn_stop.isEnabled()
+    qtbot.mouseClick(window.btn_take_measurement, Qt.MouseButton.LeftButton)
+    qtbot.mouseClick(window.btn_apply_roi, Qt.MouseButton.LeftButton)
+    assert window.active_scan_task is None
+    if change != "roi":
+        assert window.active_roi_task is None
     assert window.spn_exposure.isEnabled() and window.cmb_readout_mode.isEnabled()
     committed_value = window.spn_exposure.value()
     qtbot.keyClick(window.spn_exposure, Qt.Key.Key_Up)

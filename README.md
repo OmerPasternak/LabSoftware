@@ -46,6 +46,10 @@ Run offline tests before each lab deployment:
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
+Pytest keeps its cache and temporary files under `data/test_artifacts/pytest/`.
+The `legacy/` subfolder preserves earlier temporary test directories moved out
+of the project root; it is separate from saved scans and benchmark data.
+
 The physical driver, readout-mode switching, timing, trigger behavior, and ROI
 must additionally be verified on the benchtop with conservative settings before
 automated scans. Offline tests are not hardware acceptance.

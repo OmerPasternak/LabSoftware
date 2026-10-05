@@ -222,7 +222,9 @@ class CameraMainWindow(QMainWindow):
         # Block competing edits without greying out the entire settings area.
         inputs = (self.spn_exposure, self.cmb_readout_mode, self.chk_external_trigger,
                   self.cmb_camera_source, self.spn_roi_x0, self.spn_roi_x1,
-                  self.spn_roi_y0, self.spn_roi_y1)
+                  self.spn_roi_y0, self.spn_roi_y1, self.btn_go,
+                  self.btn_take_measurement, self.btn_apply_roi,
+                  self.btn_full_sensor, self.btn_draw_roi)
         self._command_inputs = set(inputs)
         for control in inputs:
             self._command_inputs.update(control.findChildren(QWidget))
@@ -730,7 +732,7 @@ class CameraMainWindow(QMainWindow):
                     or self._mode_change_pending)
 
     def _configuration_controls(self, busy: bool) -> None:
-        """Disable only conflicting controls while leaving painting and STOP responsive."""
+        """Block competing input without flashing disabled widget styles; STOP stays usable."""
         self._command_input_locked = busy
         if busy and self._is_live_active:
             # A temporary SDK pause must not flash GO/Stopping/Running labels.
@@ -747,7 +749,7 @@ class CameraMainWindow(QMainWindow):
                     self.lbl_system_status.setText("Status: Live Paused")
         for control in (self.btn_go, self.btn_take_measurement,
                         self.btn_apply_roi, self.btn_full_sensor, self.btn_draw_roi):
-            control.setEnabled(not busy and not self._hardware_state_unknown)
+            control.setEnabled(not self._hardware_state_unknown)
         self.spn_exposure.setEnabled(not self._hardware_state_unknown)
         self.cmb_readout_mode.setEnabled(not self._hardware_state_unknown)
         self.chk_external_trigger.setEnabled(self.camera.is_connected and not self._hardware_state_unknown)
@@ -863,7 +865,6 @@ class CameraMainWindow(QMainWindow):
         self._after_connect = after_connect
         self.lbl_system_status.setText("Status: Connecting to camera...")
         self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #d97706; padding-left: 8px;")
-        self.btn_go.setEnabled(False)
         self.cmb_camera_source.setEnabled(False)
         source = self.cmb_camera_source.currentData()
         if source == "physical" and self._physical_serial is None:
@@ -973,7 +974,6 @@ class CameraMainWindow(QMainWindow):
             self._restore_connected_source_selection()
             return
         self._source_switch_pending = True
-        self.btn_go.setEnabled(False)
         self.cmb_camera_source.setEnabled(False)
         if self.active_preview_task is not None and self.active_preview_task.isRunning():
             self.lbl_system_status.setText("Status: Waiting for preview before switching camera...")
@@ -1737,9 +1737,6 @@ class CameraMainWindow(QMainWindow):
         self._append_log(f"[ROI REQUEST] {self._cached_roi()} -> {roi}")
         self._roi_change_full_sensor = full_sensor
         self._resume_live_after_roi = self._is_live_active
-        self.btn_apply_roi.setEnabled(False)
-        self.btn_full_sensor.setEnabled(False)
-        self.btn_draw_roi.setEnabled(False)
         if self.active_live_task is not None:
             self._stop_live(after_stop=lambda: self._start_roi_task(roi))
         else:

@@ -567,7 +567,7 @@ def test_repeated_roi_and_full_sensor_during_live_stays_open(qtbot, tmp_path):
     ]:
         change()
         assert window._roi_change_pending
-        assert not window.btn_apply_roi.isEnabled()
+        assert window.btn_apply_roi.isEnabled() and window._command_input_locked
         qtbot.waitUntil(
             lambda: not window._roi_change_pending and window.scan_manager.state == "LIVE",
             timeout=6000,
