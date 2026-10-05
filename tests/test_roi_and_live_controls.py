@@ -15,7 +15,7 @@ from hhg_control.sequencer.scan_manager import CameraScanManager
 
 def test_base_camera_roi_symmetry_and_step_validation():
     """Test that BaseCamera enforces pco.edge 5.5 vertical symmetry and 4-px step rules."""
-    cam = MockPcoCamera(fast_simulation=True)
+    cam = MockPcoCamera()
     cam.connect()
 
     # Full sensor (0, 0, 2560, 2160) is valid (0 + 2160 = 2160, 0 and 2560 % 4 == 0)
@@ -44,7 +44,7 @@ def test_base_camera_roi_symmetry_and_step_validation():
 
 def test_mock_camera_roi_cropping_and_timestamps():
     """Test that MockPcoCamera returns cropped frames and includes camera metadata timestamps."""
-    cam = MockPcoCamera(fast_simulation=True)
+    cam = MockPcoCamera()
     cam.connect()
 
     # Apply centered ROI: 800 x 540 pixels (Y centered at 1080 -> [810, 1350])
@@ -72,7 +72,7 @@ def test_mock_camera_roi_cropping_and_timestamps():
 
 def test_scan_manager_preview_and_step_saving_with_roi(tmp_path: Path):
     """Test that CameraScanManager properly captures preview and saves HDF5 datasets with ROI bounds."""
-    cam = MockPcoCamera(fast_simulation=True)
+    cam = MockPcoCamera()
     cam.connect()
 
     scan_mgr = CameraScanManager(camera=cam, storage_dir=tmp_path)

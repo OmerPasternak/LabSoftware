@@ -4,10 +4,11 @@ Wraps the official `pco` Python SDK (pco.Camera).
 """
 
 import time
+from collections.abc import Callable, Iterator
 from datetime import datetime
 from typing import Tuple, List, Dict, Any
 import numpy as np
-from .base_camera import BaseCamera, ReadoutMode
+from .base_camera import BaseCamera, CameraSafetyError, ReadoutMode, TriggerMode
 
 try:
     import pco as _pco
@@ -56,9 +57,16 @@ class PcoEdgeCamera(BaseCamera):
                 "height": description.get("max_height", 2160),
                 "bit_depth": 16
             }
+            self.get_readout_mode()
+            self.get_trigger_mode()
             self.set_exposure_time(self._exposure_time_s)
             self._is_connected = True
         except Exception as exc:
+            if self._cam is not None:
+                try:
+                    self._cam.close()
+                except Exception:
+                    pass
             self._cam = None
             self._is_connected = False
             raise ConnectionError(f"Failed to connect to PCO camera: {exc}") from exc
@@ -78,6 +86,8 @@ class PcoEdgeCamera(BaseCamera):
 
     def set_exposure_time(self, exposure_s: float) -> None:
         self.validate_exposure_time(exposure_s)
+        if self._readout_mode == ReadoutMode.GLOBAL_SHUTTER and exposure_s > 0.1:
+            raise CameraSafetyError("Global Shutter exposure must be at most 0.1 s (100 ms).")
         if self._cam is not None:
             self._cam.set_exposure_time(exposure_s)
         self._exposure_time_s = float(exposure_s)
@@ -86,6 +96,41 @@ class PcoEdgeCamera(BaseCamera):
         if self._cam is not None and hasattr(self._cam, "exposure_time"):
             return float(self._cam.exposure_time)
         return self._exposure_time_s
+
+    def get_trigger_mode(self) -> TriggerMode:
+        """Read PCO trigger mode from the SDK; reject modes outside this GUI's contract."""
+        if self._cam is None:
+            raise RuntimeError("Camera is not connected; trigger mode cannot be verified.")
+        raw_mode = self._cam.sdk.get_trigger_mode()["trigger mode"]
+        try:
+            mode = TriggerMode(raw_mode)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Unsupported PCO trigger mode {raw_mode!r}; select Auto Sequence or "
+                "External Exposure Start in camera settings before using this GUI."
+            ) from exc
+        self._trigger_mode = mode
+        return mode
+
+    def set_trigger_mode(self, mode: TriggerMode) -> None:
+        """Select Auto Sequence or fixed-duration external exposure starts.
+
+        The PCO SDK's External Exposure Start mode accepts external frame
+        pulses; exposure duration remains the separately configured seconds.
+        Recording must be idle, and hardware readback must match the request.
+        """
+        if not isinstance(mode, TriggerMode):
+            raise ValueError("mode must be a TriggerMode value.")
+        if self._cam is None or not self._is_connected:
+            raise RuntimeError("Camera is not connected; cannot change trigger mode.")
+        if getattr(self._cam, "is_recording", False) or getattr(self, "_live_active", False):
+            raise RuntimeError("Stop camera recording before changing trigger mode.")
+        if self.get_trigger_mode() != mode:
+            self._cam.sdk.set_trigger_mode(mode.value)
+            # pco.Camera.configuration performs this arm after changing trigger.
+            self._cam.sdk.arm_camera()
+        if self.get_trigger_mode() != mode:
+            raise RuntimeError(f"PCO trigger mode readback did not match {mode.value!r}.")
 
     def get_sensor_info(self) -> Dict[str, Any]:
         return self._info
@@ -125,23 +170,23 @@ class PcoEdgeCamera(BaseCamera):
         """Query the current shutter mode from the PCO SDK.
 
         Returns:
-            ReadoutMode enum value.  Falls back to the cached ``_readout_mode``
-            if the SDK call is unavailable (e.g. not yet connected).
+            ReadoutMode enum value. Before connection, return the cached mode.
+            Once connected, fail if hardware readback cannot be verified.
         """
-        if self._cam is not None:
-            try:
-                result = self._cam.sdk.get_camera_setup()
-                if isinstance(result, dict):
-                    setup_values = result.get("setup", ())
-                    setup_type = setup_values[0] if setup_values else result.get("type")
-                elif isinstance(result, (tuple, list)):
-                    setup_type = result[0]
-                else:
-                    setup_type = result
-                if setup_type is not None:
-                    self._readout_mode = ReadoutMode(int(setup_type))
-            except Exception:
-                pass   # return cached value on any SDK error
+        if self._cam is None:
+            return self._readout_mode
+        try:
+            result = self._cam.sdk.get_camera_setup()
+            if isinstance(result, dict):
+                setup_values = result.get("setup", ())
+                setup_type = setup_values[0] if setup_values else result.get("type")
+            elif isinstance(result, (tuple, list)):
+                setup_type = result[0]
+            else:
+                setup_type = result
+            self._readout_mode = ReadoutMode(int(setup_type))
+        except Exception as exc:
+            raise RuntimeError(f"Could not verify PCO shutter mode: {exc}") from exc
         return self._readout_mode
 
     def set_readout_mode(self, mode: ReadoutMode) -> None:
@@ -157,21 +202,19 @@ class PcoEdgeCamera(BaseCamera):
         After this returns the camera is fully operational in the new mode.
 
         Args:
-            mode: ReadoutMode.ROLLING_SHUTTER (1) or ReadoutMode.GLOBAL_RESET (4).
-                  ReadoutMode.GLOBAL_SHUTTER (2) is not available on pco.edge 5.5.
+            mode: ROLLING_SHUTTER (1), GLOBAL_SHUTTER (2), or GLOBAL_RESET (4).
 
         Raises:
             RuntimeError: Camera not connected, mode switch SDK call failed,
                           or reconnect after reboot failed.
-            ValueError:   If ``mode`` is ReadoutMode.GLOBAL_SHUTTER.
+            ValueError:   If ``mode`` is not a ReadoutMode value.
         """
-        if mode == ReadoutMode.GLOBAL_SHUTTER:
-            raise ValueError(
-                "ReadoutMode.GLOBAL_SHUTTER is not available on the pco.edge 5.5 sCMOS sensor. "
-                "Supported modes: ROLLING_SHUTTER (1), GLOBAL_RESET (4)."
-            )
+        if not isinstance(mode, ReadoutMode):
+            raise ValueError("mode must be a ReadoutMode value.")
         if self._cam is None:
             raise RuntimeError("Camera is not connected — cannot change readout mode.")
+        if mode == ReadoutMode.GLOBAL_SHUTTER and self._exposure_time_s > 0.1:
+            raise CameraSafetyError("Reduce exposure to at most 0.1 s before Global Shutter.")
 
         current = self.get_readout_mode()
         if current == mode:
@@ -183,10 +226,12 @@ class PcoEdgeCamera(BaseCamera):
                 self._cam.stop()
 
             previous_roi = self.get_roi()
+            previous_trigger = self.get_trigger_mode()
 
             # ---- Step 2: write the new shutter mode and request firmware reboot
             setup_name = {
                 ReadoutMode.ROLLING_SHUTTER: "rolling shutter",
+                ReadoutMode.GLOBAL_SHUTTER: "global shutter",
                 ReadoutMode.GLOBAL_RESET: "global reset",
             }[mode]
             if hasattr(self._cam.sdk, "set_timeouts"):
@@ -215,9 +260,15 @@ class PcoEdgeCamera(BaseCamera):
         try:
             self.connect()
             self.set_roi(previous_roi)
+            self.set_trigger_mode(previous_trigger)
+            actual_setup = self._cam.sdk.get_camera_setup()["setup"][0]
+            if int(actual_setup) != mode.value:
+                raise RuntimeError(
+                    f"Camera reported setup {actual_setup} after reboot; expected {mode.value}."
+                )
         except Exception as exc:
             raise RuntimeError(
-                f"Readout mode changed to {mode.name} but camera failed to reconnect after reboot: {exc}"
+                f"Camera mode switch to {mode.name} was not verified after reboot: {exc}"
             ) from exc
 
         self._readout_mode = mode
@@ -233,6 +284,7 @@ class PcoEdgeCamera(BaseCamera):
         self._cam.record(number_of_images=num_frames, mode="sequence")
         raw_images, metadata_list = self._cam.images()
         images_array = np.ascontiguousarray(np.stack(raw_images, axis=0), dtype=np.uint16)
+        roi = self.get_roi()
         
         metas = []
         for i, meta in enumerate(metadata_list):
@@ -246,10 +298,87 @@ class PcoEdgeCamera(BaseCamera):
                 "timestamp_source": timestamp_source,
                 "raw_meta": str(meta),
                 "exposure_s": self._exposure_time_s,
-                "roi": self.get_roi()
+                "roi": roi
             })
 
         return images_array, metas
+
+    def iter_frames(
+        self,
+        num_frames: int,
+        batch_size: int = 4,
+        stop_check: Callable[[], bool] | None = None,
+    ) -> Iterator[Tuple[np.ndarray, List[Dict[str, Any]]]]:
+        """Read one continuous PCO FIFO recording in bounded uint16 batches.
+
+        Frame IDs come from the SDK recorder. A FIFO overflow, recorder error,
+        or skipped frame ID fails the step instead of silently saving a gap.
+        The FIFO is stopped when iteration ends or its generator is closed.
+        """
+        if not self._is_connected or self._cam is None:
+            raise RuntimeError("Camera is not connected.")
+        if getattr(self, "_live_active", False):
+            raise RuntimeError("Stop live acquisition before recording a measurement sequence.")
+        if num_frames < 1 or batch_size < 1:
+            raise ValueError("num_frames and batch_size must be >= 1.")
+
+        fifo_size = max(4, min(64, batch_size * 4))
+        previous_id: int | None = None
+        images: list[np.ndarray] = []
+        metas: list[Dict[str, Any]] = []
+        try:
+            self._cam.record(number_of_images=fifo_size, mode="fifo")
+            # pco.Camera.configuration queries several SDK settings. Read the
+            # ROI once for the sequence rather than doing those calls per frame.
+            roi = self.get_roi()
+            for _ in range(num_frames):
+                if stop_check is not None and stop_check():
+                    return
+                self._cam.wait_for_new_image(
+                    delay=True, timeout=max(1.0, self._exposure_time_s + 1.0)
+                )
+                status = self._cam.rec.get_status()
+                if status.get("bFIFOOverflow") or status.get("dwLastError"):
+                    raise RuntimeError(f"PCO FIFO overflow or recorder error: {status}")
+                frame, raw_meta = self._cam.image(image_index=0)
+                host_frame_read_ns = time.perf_counter_ns()
+                frame = np.asarray(frame)
+                expected_shape = (roi[3] - roi[1], roi[2] - roi[0])
+                if frame.dtype != np.uint16 or frame.shape != expected_shape:
+                    raise RuntimeError(
+                        f"PCO FIFO frame has shape {frame.shape} and dtype {frame.dtype}; "
+                        f"expected {expected_shape} and uint16 for ROI {roi}."
+                    )
+                if not isinstance(raw_meta, dict) or "recorder image number" not in raw_meta:
+                    raise RuntimeError("PCO FIFO image lacks a recorder frame number.")
+                frame_id = int(raw_meta["recorder image number"])
+                if previous_id is not None and frame_id != (previous_id + 1) % (2**32):
+                    raise RuntimeError(
+                        f"PCO FIFO frame gap: expected {previous_id + 1}, got {frame_id}."
+                    )
+                previous_id = frame_id
+                cam_time, time_text, timestamp_source = _frame_time_fields(raw_meta)
+                images.append(np.ascontiguousarray(frame))
+                metas.append({
+                    "frame_id": frame_id,
+                    "camera_timestamp": cam_time,
+                    "camera_time_str": time_text,
+                    "timestamp_source": timestamp_source,
+                    "host_frame_read_monotonic_ns": host_frame_read_ns,
+                    "raw_meta": str(raw_meta),
+                    "exposure_s": self._exposure_time_s,
+                    "roi": roi,
+                })
+                if len(images) == batch_size:
+                    yield np.stack(images, axis=0), metas
+                    images, metas = [], []
+            if images:
+                yield np.stack(images, axis=0), metas
+            status = self._cam.rec.get_status()
+            if status.get("bFIFOOverflow") or status.get("dwLastError"):
+                raise RuntimeError(f"PCO FIFO overflow or recorder error: {status}")
+        finally:
+            self._cam.stop()
 
     def start_live(self, buffer_size: int = 4) -> None:
         """Start a persistent PCO ring buffer for efficient live display."""

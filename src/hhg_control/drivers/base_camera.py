@@ -4,9 +4,9 @@ All camera drivers (real hardware or mocks) must conform strictly to this contra
 """
 
 from abc import ABC, abstractmethod
-from enum import IntEnum
+from enum import Enum, IntEnum
 from collections.abc import Iterator
-from typing import Tuple, List, Dict, Any
+from typing import Tuple, List, Dict, Any, Callable
 import numpy as np
 
 
@@ -27,17 +27,28 @@ class ReadoutMode(IntEnum):
             different times.  Gives the highest frame rate but produces a
             **light-sheet artefact** with pulsed laser sources (HHG) where
             only the rows open during the laser pulse receive signal.
-        GLOBAL_SHUTTER:  True global shutter — all pixels expose and read out
-            simultaneously.  Not available on the pco.edge 5.5 (sCMOS
-            architecture); listed here for completeness and future cameras.
+        GLOBAL_SHUTTER: All pixels start and stop exposure together. Available
+            on the pco.edge 5.5 USB, at a lower maximum rate than rolling mode.
         GLOBAL_RESET:    All rows reset (start of exposure) simultaneously so
             every pixel integrates the same laser pulse.  Readout is still
             sequential (rolling), but there is no light-sheet artefact.
-            **Recommended mode for HHG / pulsed-laser experiments.**
+            This mode remains available for existing scripts, but differs from
+            true global shutter because exposure ends row by row.
     """
     ROLLING_SHUTTER = 1
-    GLOBAL_SHUTTER  = 2   # Not supported on pco.edge 5.5 sCMOS
-    GLOBAL_RESET    = 4   # Recommended for pulsed laser / HHG
+    GLOBAL_SHUTTER  = 2
+    GLOBAL_RESET    = 4
+
+
+class TriggerMode(str, Enum):
+    """Supported camera acquisition triggers from the PCO SDK.
+
+    External Exposure Start takes one fixed-duration exposure per accepted
+    input pulse; the exposure duration remains in seconds on the camera.
+    """
+
+    AUTO_SEQUENCE = "auto sequence"
+    EXTERNAL_EXPOSURE_START = "external exposure start & software trigger"
 
 
 class BaseCamera(ABC):
@@ -50,10 +61,16 @@ class BaseCamera(ABC):
         self._is_connected: bool = False
         self._exposure_time_s: float = 0.010  # default 10 ms
         self._readout_mode: ReadoutMode = ReadoutMode.ROLLING_SHUTTER
+        self._trigger_mode: TriggerMode = TriggerMode.AUTO_SEQUENCE
 
     @property
     def is_connected(self) -> bool:
         return self._is_connected
+
+    @property
+    def can_pause_acquisition(self) -> bool:
+        """Whether waiting for storage can safely pause frame production."""
+        return False
 
     @abstractmethod
     def connect(self) -> None:
@@ -85,6 +102,16 @@ class BaseCamera(ABC):
         pass
 
     @abstractmethod
+    def set_trigger_mode(self, mode: TriggerMode) -> None:
+        """Select free-running or one fixed exposure per external trigger."""
+        pass
+
+    @abstractmethod
+    def get_trigger_mode(self) -> TriggerMode:
+        """Read the active hardware trigger mode, not only a cached request."""
+        pass
+
+    @abstractmethod
     def acquire_frames(self, num_frames: int) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
         """
         Acquire a sequence of frames.
@@ -98,12 +125,14 @@ class BaseCamera(ABC):
         self,
         num_frames: int,
         batch_size: int = 4,
+        stop_check: Callable[[], bool] | None = None,
     ) -> Iterator[Tuple[np.ndarray, List[Dict[str, Any]]]]:
         """Yield bounded frame batches for memory-safe storage.
 
         Args:
             num_frames: Total number of frames to acquire.
             batch_size: Maximum frames returned per batch. Units are frames.
+            stop_check: Return true to stop before starting another batch.
         """
         if num_frames < 1:
             raise ValueError("num_frames must be >= 1.")
@@ -111,6 +140,8 @@ class BaseCamera(ABC):
             raise ValueError("batch_size must be >= 1.")
         remaining = num_frames
         while remaining:
+            if stop_check is not None and stop_check():
+                return
             count = min(batch_size, remaining)
             yield self.acquire_frames(count)
             remaining -= count

@@ -17,7 +17,7 @@ from hhg_control.analysis import (
 
 
 def test_analysis_hdf5_loaders_and_beam_profiling(tmp_path):
-    cam = MockPcoCamera(fast_simulation=True)
+    cam = MockPcoCamera()
     cam.connect()
     scan_mgr = CameraScanManager(camera=cam, storage_dir=tmp_path)
 

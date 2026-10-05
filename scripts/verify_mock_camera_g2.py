@@ -20,7 +20,7 @@ def main():
     print("=" * 60)
 
     # 1. Initialize and connect to the mock camera
-    cam = MockPcoCamera(fast_simulation=True)
+    cam = MockPcoCamera()
     cam.connect()
     cam.set_exposure_time(0.020)  # 20 ms
     info = cam.get_sensor_info()

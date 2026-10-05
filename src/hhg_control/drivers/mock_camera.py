@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 from typing import Tuple, List, Dict, Any
 import numpy as np
-from .base_camera import BaseCamera, ReadoutMode
+from .base_camera import BaseCamera, CameraSafetyError, ReadoutMode, TriggerMode
 
 
 class MockPcoCamera(BaseCamera):
@@ -16,12 +16,28 @@ class MockPcoCamera(BaseCamera):
     WIDTH: int  = 2560
     HEIGHT: int = 2160
 
-    def __init__(self, fast_simulation: bool = False) -> None:
+    @property
+    def can_pause_acquisition(self) -> bool:
+        """Synthetic frames can wait for storage without losing camera frames."""
+        return True
+
+    def __init__(self) -> None:
         super().__init__()
-        self.fast_simulation = fast_simulation
         self._model  = "pco.edge 5.5 USB (EMULATOR)"
         self._serial = "MOCK-EDGE-5501"
         self._rng = np.random.default_rng(42)
+
+        # Keep construction cheap so the GUI can appear before GO is pressed.
+        # Simulation arrays are prepared by the connection worker, not the UI thread.
+        self._gaussian_profile: np.ndarray | None = None
+        self._dark_bank: np.ndarray | None = None
+        self._dark_idx = 0
+        self._frame_count = 0
+
+    def _prepare_simulation_data(self) -> None:
+        """Build synthetic full-sensor patterns when the mock connects."""
+        if self._gaussian_profile is not None and self._dark_bank is not None:
+            return
 
         # Precompute static 2D spatial Gaussian beam profile (sigma = 120 px, centred at (1280, 1080))
         y, x = np.ogrid[:self.HEIGHT, :self.WIDTH]
@@ -42,14 +58,14 @@ class MockPcoCamera(BaseCamera):
             self._rng.normal(loc=100.0, scale=3.0, size=(4, self.HEIGHT, self.WIDTH)),
             0, 65535
         ).astype(np.uint16)
-        self._dark_idx = 0
-        self._frame_count = 0
 
     # ------------------------------------------------------------------
     # Connection
     # ------------------------------------------------------------------
 
     def connect(self) -> None:
+        """Prepare synthetic data and mark the mock connected; no hardware is used."""
+        self._prepare_simulation_data()
         self._is_connected = True
 
     def close(self) -> None:
@@ -77,10 +93,26 @@ class MockPcoCamera(BaseCamera):
 
     def set_exposure_time(self, exposure_s: float) -> None:
         self.validate_exposure_time(exposure_s)
+        if self._readout_mode == ReadoutMode.GLOBAL_SHUTTER and exposure_s > 0.1:
+            raise CameraSafetyError("Global Shutter exposure must be at most 0.1 s (100 ms).")
         self._exposure_time_s = float(exposure_s)
 
     def get_exposure_time(self) -> float:
         return self._exposure_time_s
+
+    def set_trigger_mode(self, mode: TriggerMode) -> None:
+        """Select simulated auto or external triggering without controlling hardware.
+
+        The mock records the setting but does not wait for physical pulses.
+        Exposure remains in seconds.
+        """
+        if not isinstance(mode, TriggerMode):
+            raise ValueError("mode must be a TriggerMode value.")
+        self._trigger_mode = mode
+
+    def get_trigger_mode(self) -> TriggerMode:
+        """Return the simulated acquisition trigger selection."""
+        return self._trigger_mode
 
     # ------------------------------------------------------------------
     # Sensor information & ROI
@@ -116,18 +148,11 @@ class MockPcoCamera(BaseCamera):
         return self._readout_mode
 
     def set_readout_mode(self, mode: ReadoutMode) -> None:
-        """Switch the simulated readout mode immediately (no reboot required in the mock).
-
-        Args:
-            mode: ReadoutMode.ROLLING_SHUTTER or ReadoutMode.GLOBAL_RESET.
-                  ReadoutMode.GLOBAL_SHUTTER is not supported by the pco.edge 5.5
-                  sCMOS sensor and will raise ValueError.
-        """
-        if mode == ReadoutMode.GLOBAL_SHUTTER:
-            raise ValueError(
-                "ReadoutMode.GLOBAL_SHUTTER is not supported by the pco.edge 5.5 sCMOS sensor. "
-                "Use ROLLING_SHUTTER or GLOBAL_RESET."
-            )
+        """Switch the simulated shutter mode without a hardware reboot."""
+        if not isinstance(mode, ReadoutMode):
+            raise ValueError("mode must be a ReadoutMode value.")
+        if mode == ReadoutMode.GLOBAL_SHUTTER and self._exposure_time_s > 0.1:
+            raise CameraSafetyError("Reduce exposure to at most 0.1 s before Global Shutter.")
         self._readout_mode = mode
 
     # ------------------------------------------------------------------
@@ -135,14 +160,23 @@ class MockPcoCamera(BaseCamera):
     # ------------------------------------------------------------------
 
     def acquire_frames(self, num_frames: int) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
-        """Acquire ``num_frames`` synthetic frames directly in requested ROI bounds."""
+        """Wait one configured exposure per frame, then synthesize ROI images.
+
+        Exposure is in seconds; generation time adds to the simulated capture
+        duration. No camera hardware or external trigger pulse is involved.
+        """
         if not self._is_connected:
             raise RuntimeError("Cannot acquire frames: Mock camera is not connected.")
         if num_frames < 1:
             raise ValueError("num_frames must be >= 1.")
 
-        if not self.fast_simulation:
-            time.sleep(self._exposure_time_s * num_frames)
+        if self._gaussian_profile is None or self._dark_bank is None:
+            raise RuntimeError("Mock camera simulation data was not initialized.")
+
+        # Synthetic image generation is additional work, not a substitute for
+        # the configured exposure. Every requested frame contributes its full
+        # exposure duration, even when the image is generated quickly.
+        time.sleep(self._exposure_time_s * num_frames)
 
         x0, y0, x1, y1 = self.get_roi()
         roi_h = y1 - y0
@@ -189,7 +223,7 @@ class MockPcoCamera(BaseCamera):
 
             t_now = time.time()
             metadata.append({
-                "frame_id":          i,
+                "frame_id":          self._frame_count,
                 "timestamp":         t_now,
                 "camera_timestamp":  t_now,
                 "camera_time_str":   datetime.now().strftime("%H:%M:%S.%f")[:-3],
@@ -197,6 +231,7 @@ class MockPcoCamera(BaseCamera):
                 "exposure_s":        self._exposure_time_s,
                 "roi":               (x0, y0, x1, y1),
                 "readout_mode":      self._readout_mode.name,
+                "trigger_mode":      self._trigger_mode.value,
                 "data_type":         "Synthetic 2D Gaussian + Poisson shot noise + dark pedestal",
                 "simulated":         True,
             })

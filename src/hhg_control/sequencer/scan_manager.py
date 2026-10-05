@@ -8,14 +8,14 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+from queue import Empty, Full, Queue
 import re
 import threading
 from typing import Any, Optional
 
-import h5py
 import numpy as np
 
-from ..drivers.base_camera import BaseCamera
+from ..drivers.base_camera import BaseCamera, TriggerMode
 
 
 HDF5_SCHEMA_VERSION = "2.0"
@@ -27,6 +27,23 @@ _WINDOWS_RESERVED_NAMES = {
 
 class AcquisitionAborted(RuntimeError):
     """Raised after a requested abort leaves an intentionally incomplete step."""
+
+
+class AcquisitionBackpressure(RuntimeError):
+    """Raised when storage cannot accept frames within the bounded queue."""
+
+
+def _frame_chunk_shape(height: int, width: int) -> tuple[int, int, int]:
+    """Tile a uint16 frame with chunks at most 1 MiB and no edge padding."""
+    max_pixels = (1024 * 1024) // np.dtype("uint16").itemsize
+    rows = [size for size in range(1, height + 1) if height % size == 0]
+    cols = [size for size in range(1, width + 1) if width % size == 0]
+    best_rows, best_cols = 1, 1
+    for row in rows:
+        for col in cols:
+            if row * col <= max_pixels and row * col > best_rows * best_cols:
+                best_rows, best_cols = row, col
+    return 1, best_rows, best_cols
 
 
 def sanitize_filename_component(value: str, fallback: str = "HHG_Scan") -> str:
@@ -53,8 +70,19 @@ def _json_safe(value: Any) -> Any:
 class CameraScanManager:
     """Serialize camera access and write versioned, MATLAB-readable HDF5 files."""
 
-    def __init__(self, camera: BaseCamera, storage_dir: Path | str) -> None:
+    def __init__(
+        self, camera: BaseCamera, storage_dir: Path | str,
+        *, compression: str | None = None,
+    ) -> None:
+        """Configure scan storage; use no compression for fast acquisition.
+
+        ``compression='gzip'`` keeps the older compact format for slow scans.
+        Both modes use the same HDF5 schema and raw 16-bit ADU units.
+        """
+        if compression not in (None, "gzip"):
+            raise ValueError("compression must be None or 'gzip'.")
         self.camera = camera
+        self.compression = compression
         self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self._camera_lock = threading.RLock()
@@ -93,6 +121,16 @@ class CameraScanManager:
         """Get zero-based, upper-exclusive hardware ROI bounds in pixels."""
         with self._camera_lock:
             return self.camera.get_roi()
+
+    def set_trigger_mode(self, mode: TriggerMode) -> None:
+        """Change camera triggering only while live and scan acquisition are idle."""
+        with self._operation("CONFIGURING"), self._camera_lock:
+            self.camera.set_trigger_mode(mode)
+
+    def get_trigger_mode(self) -> TriggerMode:
+        """Read the active camera trigger mode under the camera access lock."""
+        with self._camera_lock:
+            return self.camera.get_trigger_mode()
 
     def start_live(self, buffer_size: int = 4) -> None:
         """Enter LIVE state and start the camera's persistent preview buffer."""
@@ -151,16 +189,21 @@ class CameraScanManager:
         *,
         run_id: str | None = None,
         batch_size: int = 4,
+        queue_batches: int = 4,
         abort_check: Optional[Callable[[], bool]] = None,
     ) -> tuple[Path, np.ndarray]:
         """Acquire and atomically save one scan step in bounded frame batches.
 
         Units are raw 16-bit ADU, seconds for exposure, and sensor pixels for ROI.
+        The bounded queue overlaps camera capture with HDF5 writing. A mock
+        waits for storage; a physical camera fails the step on backpressure
+        instead of silently losing frames.
         """
         with self._operation("SCANNING"):
             return self._acquire_and_save_step(
                 experiment_name, step_index, param_name, param_value, num_frames,
-                run_id=run_id, batch_size=batch_size, abort_check=abort_check,
+                run_id=run_id, batch_size=batch_size, queue_batches=queue_batches,
+                abort_check=abort_check,
             )
 
     def _acquire_and_save_step(
@@ -173,12 +216,18 @@ class CameraScanManager:
         *,
         run_id: str | None,
         batch_size: int,
+        queue_batches: int,
         abort_check: Optional[Callable[[], bool]],
     ) -> tuple[Path, np.ndarray]:
         if not self.camera.is_connected:
             raise RuntimeError("Cannot execute scan step: Camera is disconnected.")
         if num_frames < 1:
             raise ValueError("num_frames must be >= 1.")
+        if batch_size < 1 or queue_batches < 1:
+            raise ValueError("batch_size and queue_batches must be >= 1.")
+
+        # HDF5 is only needed for a saved scan, not for opening the GUI or live view.
+        import h5py
 
         run_id = run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
         filepath = self._unique_filepath(experiment_name, run_id, step_index)
@@ -190,57 +239,7 @@ class CameraScanManager:
         clean_param = str(param_name).strip() or "Setpoint"
         roi = self.camera.get_roi()
 
-        latest_frame: np.ndarray | None = None
-        frame_metadata: list[dict[str, Any]] = []
-        written = 0
-
-        with self._camera_lock, h5py.File(partial_path, "w") as h5f:
-            h5f.attrs["schema_version"] = HDF5_SCHEMA_VERSION
-            h5f.attrs["complete"] = False
-            dset = None
-            for images, metadata in self.camera.iter_frames(num_frames, batch_size=batch_size):
-                if abort_check is not None and abort_check():
-                    h5f.attrs["frames_written"] = written
-                    h5f.flush()
-                    raise AcquisitionAborted(
-                        f"Acquisition stopped after {written} of {num_frames} frames; partial file retained."
-                    )
-                if images.ndim != 3 or images.dtype != np.uint16:
-                    raise ValueError("Camera batches must have shape [frame, y, x] and dtype uint16.")
-                if dset is None:
-                    height, width = images.shape[1:]
-                    dset = h5f.create_dataset(
-                        "images",
-                        shape=(num_frames, height, width),
-                        dtype="uint16",
-                        chunks=(1, min(512, height), min(512, width)),
-                        compression="gzip",
-                        compression_opts=1,
-                        shuffle=True,
-                    )
-                    dset.attrs["units"] = "16-bit digital counts (ADU)"
-                    dset.attrs["physical_units"] = "16-bit digital counts (ADU)"
-                    dset.attrs["dimension_order"] = "[frame, y, x]"
-                    dset.attrs["data_dimension_ordering"] = "[frame_index, sensor_height_y, sensor_width_x]"
-                    dset.attrs["description"] = "Raw 16-bit sCMOS image stack recorded at this scan step"
-                end = written + images.shape[0]
-                if end > num_frames:
-                    raise ValueError("Camera returned more frames than requested.")
-                dset[written:end, :, :] = images
-                latest_frame = images[-1].copy()
-                frame_metadata.extend(metadata)
-                written = end
-
-            if written != num_frames or dset is None or latest_frame is None:
-                raise RuntimeError(f"Camera returned {written} frames; expected {num_frames}.")
-
-            meta_group = h5f.create_group("frame_metadata")
-            string_dtype = h5py.string_dtype(encoding="utf-8")
-            metadata_json = [json.dumps(item, default=_json_safe, sort_keys=True) for item in frame_metadata]
-            meta_group.create_dataset("json", data=np.asarray(metadata_json, dtype=object), dtype=string_dtype)
-            meta_group.attrs["description"] = "One JSON object per acquired frame; timestamps may be camera or host supplied."
-
-            attrs = {
+        attrs = {
                 "experiment_name": clean_exp,
                 "experiment_identifier": clean_exp,
                 "run_id": run_id,
@@ -254,30 +253,178 @@ class CameraScanManager:
                 "exposure_duration_seconds": float(exposure_s),
                 "num_frames": int(num_frames),
                 "frame_accumulation_count": int(num_frames),
-                "frames_written": int(written),
+                "frames_written": 0,
                 "timestamp_utc": timestamp_str,
                 "acquisition_timestamp_utc_iso8601": timestamp_str,
                 "camera_model": str(sensor_info.get("model", "pco.edge")),
                 "camera_manufacturer_and_model": str(sensor_info.get("model", "pco.edge")),
                 "camera_serial": str(sensor_info.get("serial_number", "UNKNOWN")),
                 "camera_hardware_serial_number": str(sensor_info.get("serial_number", "UNKNOWN")),
-                "sensor_width": int(sensor_info.get("width", latest_frame.shape[1])),
-                "sensor_pixel_width": int(sensor_info.get("width", latest_frame.shape[1])),
-                "sensor_height": int(sensor_info.get("height", latest_frame.shape[0])),
-                "sensor_pixel_height": int(sensor_info.get("height", latest_frame.shape[0])),
+                "sensor_width": int(sensor_info.get("width", roi[2] - roi[0])),
+                "sensor_pixel_width": int(sensor_info.get("width", roi[2] - roi[0])),
+                "sensor_height": int(sensor_info.get("height", roi[3] - roi[1])),
+                "sensor_pixel_height": int(sensor_info.get("height", roi[3] - roi[1])),
                 "roi_bounds": roi,
-            }
-            for key, value in attrs.items():
-                h5f.attrs[key] = value
-            if hasattr(self.camera, "get_readout_mode"):
-                mode = self.camera.get_readout_mode()
-                h5f.attrs["readout_mode"] = mode.name
-                h5f.attrs["readout_mode_value"] = int(mode.value)
-            h5f.attrs["complete"] = True
-            h5f.flush()
+                "storage_compression": self.compression or "none",
+                "trigger_mode": self.camera.get_trigger_mode().value,
+        }
+        mode = self.camera.get_readout_mode()
+        attrs["readout_mode"] = mode.name
+        attrs["readout_mode_value"] = int(mode.value)
+        pending: Queue[tuple[np.ndarray, list[dict[str, Any]]]] = Queue(maxsize=queue_batches)
+        producer_done = threading.Event()
+        writer_errors: list[BaseException] = []
+        latest_frame: np.ndarray | None = None
+        captured = 0
+        written = 0
+        producer_error: BaseException | None = None
+        producer_complete = False
 
+        def write_batches() -> None:
+            """Own the HDF5 handle and drain copied frame batches in order."""
+            nonlocal written
+            try:
+                with h5py.File(partial_path, "w") as h5f:
+                    h5f.attrs["schema_version"] = HDF5_SCHEMA_VERSION
+                    h5f.attrs["complete"] = False
+                    for key, value in attrs.items():
+                        h5f.attrs[key] = value
+                    metadata_group = h5f.create_group("frame_metadata")
+                    metadata_group.attrs["description"] = (
+                        "One JSON object per acquired frame; timestamps may be camera or host supplied."
+                    )
+                    metadata_dset = metadata_group.create_dataset(
+                        "json", shape=(num_frames,),
+                        dtype=h5py.string_dtype(encoding="utf-8"),
+                        chunks=(min(256, num_frames),),
+                    )
+                    image_dset = None
+                    batches_written = 0
+                    while True:
+                        try:
+                            images, metadata = pending.get(timeout=0.05)
+                        except Empty:
+                            if producer_done.is_set():
+                                break
+                            continue
+                        if image_dset is None:
+                            height, width = images.shape[1:]
+                            options = (
+                                {"compression": "gzip", "compression_opts": 1, "shuffle": True}
+                                if self.compression == "gzip" else {}
+                            )
+                            image_dset = h5f.create_dataset(
+                                "images", shape=(num_frames, height, width), dtype="uint16",
+                                chunks=_frame_chunk_shape(height, width), **options,
+                            )
+                            image_dset.attrs["units"] = "16-bit digital counts (ADU)"
+                            image_dset.attrs["physical_units"] = "16-bit digital counts (ADU)"
+                            image_dset.attrs["dimension_order"] = "[frame, y, x]"
+                            image_dset.attrs["data_dimension_ordering"] = (
+                                "[frame_index, sensor_height_y, sensor_width_x]"
+                            )
+                            image_dset.attrs["description"] = (
+                                "Raw 16-bit sCMOS image stack recorded at this scan step"
+                            )
+                        end = written + len(images)
+                        self._write_batch(image_dset, metadata_dset, written, images, metadata)
+                        written = end
+                        batches_written += 1
+                        if batches_written % 32 == 0:
+                            h5f.attrs["frames_written"] = written
+                            h5f.flush()
+                    h5f.attrs["frames_written"] = written
+                    if producer_complete and written == num_frames and image_dset is not None:
+                        h5f.attrs["complete"] = True
+                    h5f.flush()
+            except BaseException as exc:
+                writer_errors.append(exc)
+
+        with self._camera_lock:
+            writer = threading.Thread(target=write_batches, name="camera-hdf5-writer")
+            writer.start()
+            iterator = None
+            try:
+                iterator = self.camera.iter_frames(
+                    num_frames, batch_size=batch_size,
+                    stop_check=lambda: bool(writer_errors) or (
+                        abort_check is not None and abort_check()
+                    ),
+                )
+                for images, metadata in iterator:
+                    if abort_check is not None and abort_check():
+                        raise AcquisitionAborted(
+                            f"Acquisition stopped after {captured} of {num_frames} frames."
+                        )
+                    if writer_errors:
+                        raise RuntimeError("HDF5 writer failed during acquisition.") from writer_errors[0]
+                    if images.ndim != 3 or images.dtype != np.uint16:
+                        raise ValueError("Camera batches must have shape [frame, y, x] and dtype uint16.")
+                    if len(images) < 1 or captured + len(images) > num_frames:
+                        raise ValueError("Camera returned an empty or oversized frame batch.")
+                    if len(metadata) != len(images):
+                        raise ValueError("Camera metadata count does not match frame count.")
+                    copied_batch = (images.copy(), list(metadata))
+                    while True:
+                        try:
+                            pending.put(copied_batch, timeout=0.05)
+                            break
+                        except Full as exc:
+                            if writer_errors:
+                                raise RuntimeError("HDF5 writer failed during acquisition.") from writer_errors[0]
+                            if abort_check is not None and abort_check():
+                                raise AcquisitionAborted(
+                                    f"Acquisition stopped after {captured} of {num_frames} frames."
+                                ) from exc
+                            if not self.camera.can_pause_acquisition:
+                                raise AcquisitionBackpressure(
+                                    f"HDF5 writer queue filled after {captured} frames "
+                                    f"at {images.shape[2]}x{images.shape[1]} pixels; "
+                                    "acquisition stopped to avoid frame loss. "
+                                    "Use a smaller applied ROI or faster storage."
+                                ) from exc
+                    captured += len(images)
+                    latest_frame = images[-1].copy()
+                if abort_check is not None and abort_check() and captured != num_frames:
+                    raise AcquisitionAborted(
+                        f"Acquisition stopped after {captured} of {num_frames} frames."
+                    )
+                if captured != num_frames:
+                    raise RuntimeError(f"Camera returned {captured} frames; expected {num_frames}.")
+                producer_complete = True
+            except BaseException as exc:
+                producer_error = exc
+            finally:
+                try:
+                    close_iterator = getattr(iterator, "close", None)
+                    if close_iterator is not None:
+                        close_iterator()
+                except BaseException as exc:
+                    if producer_error is None:
+                        producer_error = exc
+                        producer_complete = False
+                producer_done.set()
+                writer.join()
+
+        if writer_errors:
+            raise RuntimeError("HDF5 writer failed; partial file retained.") from writer_errors[0]
+        if producer_error is not None:
+            raise producer_error
+        if not producer_complete or written != num_frames or latest_frame is None:
+            raise RuntimeError("Acquisition incomplete; partial file retained.")
         os.replace(partial_path, filepath)
         return filepath, latest_frame
+
+    def _write_batch(
+        self, image_dset: Any, metadata_dset: Any, start: int,
+        images: np.ndarray, metadata: list[dict[str, Any]],
+    ) -> None:
+        """Write one ordered batch of raw ADU frames and per-frame JSON."""
+        end = start + len(images)
+        image_dset[start:end] = images
+        metadata_dset[start:end] = [
+            json.dumps(item, default=_json_safe, sort_keys=True) for item in metadata
+        ]
 
     def execute_scan(
         self,
@@ -311,7 +458,8 @@ class CameraScanManager:
                 try:
                     filepath, latest_frame = self._acquire_and_save_step(
                         experiment_name, step, param_name, value, num_frames,
-                        run_id=run_id, batch_size=4, abort_check=abort_check,
+                        run_id=run_id, batch_size=4, queue_batches=4,
+                        abort_check=abort_check,
                     )
                 except AcquisitionAborted:
                     break
