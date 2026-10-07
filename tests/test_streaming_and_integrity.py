@@ -185,12 +185,13 @@ def test_camera_can_capture_while_writer_is_busy(tmp_path):
     """The camera producer advances before a blocked HDF5 write completes."""
     writing = threading.Event()
     release = threading.Event()
+    second_capture = threading.Event()
 
     class GatedWriter(CameraScanManager):
         def _write_batch(self, image_dset, metadata_dset, start, images, metadata):
             if start == 0:
                 writing.set()
-                if not release.wait(timeout=3):
+                if not release.wait(timeout=10):
                     raise TimeoutError("Test writer was not released.")
             super()._write_batch(image_dset, metadata_dset, start, images, metadata)
 
@@ -201,6 +202,8 @@ def test_camera_can_capture_while_writer_is_busy(tmp_path):
 
         def acquire_frames(self, num_frames):
             self.calls += 1
+            if self.calls > 1:
+                second_capture.set()
             return super().acquire_frames(num_frames)
 
     camera = CountedCamera()
@@ -221,10 +224,10 @@ def test_camera_can_capture_while_writer_is_busy(tmp_path):
     thread.start()
     try:
         assert writing.wait(timeout=3)
-        assert camera.calls > 1
+        assert second_capture.wait(timeout=5), "Camera capture did not overlap the blocked write"
     finally:
         release.set()
-        thread.join(timeout=5)
+        thread.join(timeout=12)
         camera.close()
     assert not thread.is_alive()
     assert errors == []
