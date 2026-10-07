@@ -32,5 +32,6 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+# The tracked .gitkeep creates this parent directory in a fresh checkout.
 cache_dir = "data/test_artifacts/pytest/cache"
 addopts = "--basetemp=data/test_artifacts/pytest/tmp"
