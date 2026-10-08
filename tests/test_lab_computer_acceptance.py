@@ -125,7 +125,10 @@ def test_camera_is_closed_on_settings_mismatch(config, monkeypatch):
             super().close()
 
     monkeypatch.setattr(lab, "MockPcoCamera", WrongExposure)
-    with pytest.raises(AssertionError, match="Exposure readback differs"):
+    with pytest.raises(
+        AssertionError,
+        match=r"Exposure readback 0\.01 s differs from requested 0\.001 s",
+    ):
         lab.section_2(config)
     assert closed == [True]
 

@@ -178,8 +178,11 @@ def configured_camera(cfg: Settings, trigger=TriggerMode.AUTO_SEQUENCE):
         camera.set_trigger_mode(trigger)
         actual = snapshot(camera)
         require(actual["roi"] == list(cfg.roi), f"Applied ROI differs: {actual['roi']}")
-        require(math.isclose(actual["exposure_s"], cfg.exposure_s, rel_tol=1e-5, abs_tol=1e-9),
-                "Exposure readback differs")
+        require(
+            math.isclose(actual["exposure_s"], cfg.exposure_s, rel_tol=1e-5, abs_tol=1e-9),
+            f"Exposure readback {actual['exposure_s']!r} s differs from requested "
+            f"{cfg.exposure_s!r} s",
+        )
         require(actual["readout"] == cfg.readout.name, "Shutter readback differs")
         require(actual["trigger"] == trigger.value, "Trigger readback differs")
         print(json.dumps(actual, indent=2, default=json_default))
