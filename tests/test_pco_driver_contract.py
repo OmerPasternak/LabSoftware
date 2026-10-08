@@ -232,7 +232,8 @@ def test_pco_saved_scan_uses_one_fifo_and_preserves_recorder_numbers(monkeypatch
         isinstance(meta["host_frame_read_monotonic_ns"], int)
         for _, metas in batches for meta in metas
     )
-    assert fake.record_calls == [(8, "fifo")]
+    assert fake.record_calls == [(5, "fifo")]
+    assert camera.last_fifo_capacity_frames == 5
     assert not fake.is_recording
     camera.close()
 
@@ -260,6 +261,20 @@ def test_pco_saved_scan_reads_roi_only_once(monkeypatch):
     assert len(roi_reads) == 1
     assert all(meta["roi"] == (0, 0, 64, 16) for _, metas in batches for meta in metas)
     camera.close()
+
+
+def test_pco_fifo_capacity_is_byte_bounded_for_acceptance_roi():
+    frames = pco_edge._fifo_buffer_frames(10_000, height=128, width=2560)
+    allocated_bytes = frames * 128 * 2560 * 2
+    assert frames == 409
+    assert allocated_bytes <= pco_edge.PCO_FIFO_BUFFER_BYTES
+    assert allocated_bytes > pco_edge.PCO_FIFO_BUFFER_BYTES - (128 * 2560 * 2)
+
+
+def test_pco_fifo_capacity_stays_bounded_for_full_sensor():
+    frames = pco_edge._fifo_buffer_frames(10_000, height=2160, width=2560)
+    assert frames >= 4
+    assert frames * 2160 * 2560 * 2 <= pco_edge.PCO_FIFO_BUFFER_BYTES
 
 
 def test_pco_fifo_fails_on_a_missing_recorder_frame(monkeypatch):

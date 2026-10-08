@@ -12,6 +12,25 @@ import numpy as np
 from .base_camera import BaseCamera, CameraSafetyError, ReadoutMode, TriggerMode
 from ..safe_io import check_stack_memory
 
+
+PCO_FIFO_BUFFER_BYTES = 256 * 2**20
+PCO_FIFO_MAX_FRAMES = 1024
+
+
+def _fifo_buffer_frames(
+    num_frames: int, height: int, width: int,
+    byte_budget: int = PCO_FIFO_BUFFER_BYTES,
+) -> int:
+    """Return a bounded PCO recorder FIFO size for uint16 camera frames.
+
+    The vendor FIFO requires at least four buffers. The allocation is capped
+    by bytes so a large ROI cannot silently reserve several gigabytes.
+    """
+    frame_bytes = height * width * np.dtype("uint16").itemsize
+    frames_by_bytes = max(4, byte_budget // frame_bytes)
+    desired = min(PCO_FIFO_MAX_FRAMES, frames_by_bytes, max(4, num_frames))
+    return max(4, int(desired))
+
 try:
     import pco as _pco
     pco = _pco
@@ -386,15 +405,22 @@ class PcoEdgeCamera(BaseCamera):
         if num_frames < 1 or batch_size < 1:
             raise ValueError("num_frames and batch_size must be >= 1.")
 
-        fifo_size = max(4, min(64, batch_size * 4))
         previous_id: int | None = None
         images: list[np.ndarray] = []
         metas: list[Dict[str, Any]] = []
         try:
+            # Size the SDK recorder independently of the Python yield batch.
+            # A four-frame batch previously created only 16 FIFO slots, which
+            # is about 35 ms at 455 fps and can overflow during a brief host
+            # scheduling or memory-copy stall.
+            roi = self.get_roi()
+            height, width = roi[3] - roi[1], roi[2] - roi[0]
+            fifo_size = _fifo_buffer_frames(num_frames, height, width)
+            self.last_fifo_capacity_frames = fifo_size
+            self.last_fifo_capacity_bytes = fifo_size * height * width * 2
             self._cam.record(number_of_images=fifo_size, mode="fifo")
             # pco.Camera.configuration queries several SDK settings. Read the
             # ROI once for the sequence rather than doing those calls per frame.
-            roi = self.get_roi()
             for _ in range(num_frames):
                 if stop_check is not None and stop_check():
                     return
@@ -403,7 +429,11 @@ class PcoEdgeCamera(BaseCamera):
                 )
                 status = self._cam.rec.get_status()
                 if status.get("bFIFOOverflow") or status.get("dwLastError"):
-                    raise RuntimeError(f"PCO FIFO overflow or recorder error: {status}")
+                    raise RuntimeError(
+                        "PCO FIFO overflow or recorder error with "
+                        f"{fifo_size} allocated frames "
+                        f"({self.last_fifo_capacity_bytes / 2**20:.1f} MiB): {status}"
+                    )
                 frame, raw_meta = self._cam.image(image_index=0)
                 host_frame_read_ns = time.perf_counter_ns()
                 frame = np.asarray(frame)
@@ -440,7 +470,11 @@ class PcoEdgeCamera(BaseCamera):
                 yield np.stack(images, axis=0), metas
             status = self._cam.rec.get_status()
             if status.get("bFIFOOverflow") or status.get("dwLastError"):
-                raise RuntimeError(f"PCO FIFO overflow or recorder error: {status}")
+                raise RuntimeError(
+                    "PCO FIFO overflow or recorder error with "
+                    f"{fifo_size} allocated frames "
+                    f"({self.last_fifo_capacity_bytes / 2**20:.1f} MiB): {status}"
+                )
         finally:
             self._cam.stop()
 
