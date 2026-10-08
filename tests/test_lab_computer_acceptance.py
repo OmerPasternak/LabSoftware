@@ -56,6 +56,27 @@ def test_sections_use_production_writer_and_preserve_copy_hashes(config, capsys)
         lab.inspect_file(copy)
 
 
+def test_section_3_review_displays_first_middle_and_last_frames(config, monkeypatch):
+    import matplotlib.pyplot as plt
+
+    report = {"result": lab.section_3(config)}
+    shown = []
+    monkeypatch.setattr(plt, "show", lambda: shown.append(True))
+    figure = lab.show_section_3_review_images(report)
+    try:
+        image_axes = [axis for axis in figure.axes if axis.images]
+        assert shown == [True]
+        assert len(image_axes) == 6
+        assert "frame 1/3" in image_axes[0].get_title()
+        assert "frame 2/3" in image_axes[1].get_title()
+        assert "frame 3/3" in image_axes[2].get_title()
+        assert "frame 1/9" in image_axes[3].get_title()
+        assert "frame 5/9" in image_axes[4].get_title()
+        assert "frame 9/9" in image_axes[5].get_title()
+    finally:
+        plt.close(figure)
+
+
 def test_copy_pixel_change_fails_even_with_valid_frame_ids(config):
     source = lab.section_3(config)["runs"][0]["file"]
     copy = config.output_dir / "copy.h5"

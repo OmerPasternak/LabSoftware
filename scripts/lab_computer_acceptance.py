@@ -427,6 +427,63 @@ def section_3(cfg: Settings) -> dict:
     return {"runs": runs}
 
 
+def show_section_3_review_images(report: dict):
+    """Display the first, middle and last saved frame from every Section 3 run.
+
+    The three panels in each row share one percentile-based ADU scale so that
+    brightness changes remain visible. Only the review frames are read from
+    disk; the full acquisitions are not loaded into memory.
+    """
+    import matplotlib.pyplot as plt
+
+    result = report.get("result", report)
+    runs = result.get("runs", [])
+    require(runs, "Section 3 produced no completed runs to display")
+    figure, axes = plt.subplots(
+        len(runs), 3, figsize=(16, max(3.2, 3.2 * len(runs))),
+        squeeze=False, constrained_layout=True,
+    )
+    labels = ("first", "middle", "last")
+    for row, run in enumerate(runs):
+        path = Path(run["file"])
+        with h5py.File(path, "r") as h5:
+            images = h5["images"]
+            count = int(images.shape[0])
+            require(count > 0, f"No images found in {path}")
+            indices = (0, count // 2, count - 1)
+            review_frames = [images[index] for index in indices]
+
+        combined = np.stack(review_frames)
+        low, high = np.percentile(combined, (0.5, 99.5))
+        if high <= low:
+            low, high = float(combined.min()), float(combined.max())
+        if high <= low:
+            high = low + 1.0
+        last_image = None
+        for column, (label, index, frame) in enumerate(zip(labels, indices, review_frames)):
+            axis = axes[row, column]
+            last_image = axis.imshow(
+                frame, cmap="gray", vmin=low, vmax=high, aspect="auto",
+                interpolation="nearest",
+            )
+            saturated = 100.0 * float(np.mean(frame == np.iinfo(np.uint16).max))
+            axis.set_title(
+                f"{label}: frame {index + 1}/{count}\n"
+                f"min {int(frame.min())}, max {int(frame.max())}, "
+                f"mean {float(frame.mean()):.1f} ADU, sat {saturated:.3f}%"
+            )
+            axis.set_xlabel("ROI x pixel")
+            axis.set_ylabel("ROI y pixel")
+        figure.colorbar(last_image, ax=list(axes[row]), label="ADU (shared scale for this run)")
+        print(f"Review row {row + 1}: {path} — frames {[index + 1 for index in indices]}")
+    figure.suptitle(
+        "Section 3 visual review — first, middle and last saved frames\n"
+        "Each row shares an ADU scale; the thin 2560×128 ROI is stretched vertically for inspection."
+    )
+    plt.show()
+    return figure
+
+
 def section_4(cfg: Settings) -> dict:
     """Compare repeated capture-only and saved scans with a matched manual baseline."""
     prepare(cfg, cfg.speed_frames * cfg.repeats)
@@ -826,13 +883,14 @@ if selected(2):
 
 # %% 3 — Short acquisition: 20 frames, then 1,000
 # 1. Complete section 2 first, then run this cell.
-# 2. Inspect first/middle/last images in the GUI/analysis viewer.
-# 3. Check actual scene, sensor orientation and intended ROI coverage.
+# 2. The notebook displays first/middle/last images from both saved runs.
+# 3. Check scene, orientation, ROI coverage, corruption and saturation values.
 # Benchmarks: complete files, exact counts, uint16 [frame,y,x], all IDs
 # consecutive, no recorder/FIFO/writer errors. Appearance must match the scene;
 # dark/light statistics are observations, not a calibrated noise specification.
 if selected(3):
     REPORT_3 = execute(3, CONFIG)
+    show_section_3_review_images(REPORT_3)
 
 
 # %% 4 — Camera download vs saving speed (3 x 10,000 by default)
