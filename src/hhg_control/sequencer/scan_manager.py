@@ -103,6 +103,7 @@ class CameraScanManager:
         self._camera_lock = threading.RLock()
         self._state_lock = threading.Lock()
         self._state = "IDLE"
+        self.last_step_timing: dict[str, Any] = {}
 
     @property
     def state(self) -> str:
@@ -259,6 +260,8 @@ class CameraScanManager:
         queue_batches: int | None,
         abort_check: Optional[Callable[[], bool]],
     ) -> tuple[Path, np.ndarray]:
+        step_started = time.perf_counter()
+        self.last_step_timing = {}
         if not self.camera.is_connected:
             raise RuntimeError("Cannot execute scan step: Camera is disconnected.")
         if num_frames < 1:
@@ -330,10 +333,21 @@ class CameraScanManager:
         producer_error: BaseException | None = None
         producer_complete = False
         max_pending_batches = 0
+        producer_started = 0.0
+        producer_finished = 0.0
+        producer_copy_s = 0.0
+        queue_put_durations: list[float] = []
+        queue_full_wait_events = 0
+        writer_timing: dict[str, Any] = {}
 
         def write_batches() -> None:
             """Own the HDF5 handle and drain copied frame batches in order."""
             nonlocal written
+            writer_started = time.perf_counter()
+            batch_write_durations: list[float] = []
+            periodic_flush_durations: list[float] = []
+            queue_get_wait_s = 0.0
+            close_started = 0.0
             try:
                 with h5py.File(partial_path, "x") as h5f:
                     h5f.attrs["schema_version"] = HDF5_SCHEMA_VERSION
@@ -366,18 +380,22 @@ class CameraScanManager:
                     image_dset.attrs["description"] = (
                         "Raw 16-bit sCMOS image stack recorded at this scan step"
                     )
+                    writer_timing["hdf5_open_and_setup_s"] = time.perf_counter() - writer_started
                     # Acquisition must not begin while filesystem/HDF5 setup is
                     # consuming the small bounded queue's latency allowance.
                     writer_ready.set()
                     batches_written = 0
                     next_space_check = 0.0
                     while True:
+                        queue_wait_started = time.perf_counter()
                         try:
                             images, metadata = pending.get(timeout=0.05)
                         except Empty:
+                            queue_get_wait_s += time.perf_counter() - queue_wait_started
                             if producer_done.is_set():
                                 break
                             continue
+                        queue_get_wait_s += time.perf_counter() - queue_wait_started
                         if images.shape[1:] != (height, width):
                             raise ValueError(
                                 f"Camera batch shape {images.shape[1:]} differs from applied ROI "
@@ -387,19 +405,50 @@ class CameraScanManager:
                         if time.monotonic() >= next_space_check:
                             check_disk_space(self.storage_dir, images.nbytes)
                             next_space_check = time.monotonic() + 1.0
+                        write_started = time.perf_counter()
                         self._write_batch(image_dset, metadata_dset, written, images, metadata)
+                        batch_write_durations.append(time.perf_counter() - write_started)
                         written = end
                         batches_written += 1
                         if batches_written % 32 == 0:
                             h5f.attrs["frames_written"] = written
+                            flush_started = time.perf_counter()
                             h5f.flush()
+                            periodic_flush_durations.append(time.perf_counter() - flush_started)
                     h5f.attrs["frames_written"] = written
                     h5f.attrs["writer_queue_max_batches_used"] = max_pending_batches
                     if producer_complete and written == num_frames:
                         h5f.attrs["complete"] = True
+                    final_flush_started = time.perf_counter()
                     h5f.flush()
+                    writer_timing["hdf5_final_flush_s"] = time.perf_counter() - final_flush_started
+                    writer_timing["hdf5_batch_write_s"] = float(sum(batch_write_durations))
+                    writer_timing["hdf5_batch_write_max_s"] = (
+                        float(max(batch_write_durations)) if batch_write_durations else 0.0
+                    )
+                    writer_timing["hdf5_batch_write_p50_s"] = (
+                        float(np.percentile(batch_write_durations, 50)) if batch_write_durations else 0.0
+                    )
+                    writer_timing["hdf5_batch_write_p95_s"] = (
+                        float(np.percentile(batch_write_durations, 95)) if batch_write_durations else 0.0
+                    )
+                    writer_timing["hdf5_batch_write_p99_s"] = (
+                        float(np.percentile(batch_write_durations, 99)) if batch_write_durations else 0.0
+                    )
+                    writer_timing["hdf5_periodic_flush_s"] = float(sum(periodic_flush_durations))
+                    writer_timing["hdf5_periodic_flush_max_s"] = (
+                        float(max(periodic_flush_durations)) if periodic_flush_durations else 0.0
+                    )
+                    writer_timing["writer_queue_get_wait_s"] = queue_get_wait_s
+                    for key, value in writer_timing.items():
+                        if key.startswith("hdf5_"):
+                            h5f.attrs[f"timing_{key}"] = value
+                    close_started = time.perf_counter()
+                writer_timing["hdf5_close_s"] = time.perf_counter() - close_started
+                writer_timing["writer_total_s"] = time.perf_counter() - writer_started
             except BaseException as exc:
                 writer_errors.append(exc)
+                writer_timing["writer_total_s"] = time.perf_counter() - writer_started
             finally:
                 # Release the producer on initialization failure so it can
                 # report the writer error rather than waiting indefinitely.
@@ -413,6 +462,7 @@ class CameraScanManager:
                 writer_ready.wait()
                 if writer_errors:
                     raise RuntimeError("HDF5 writer failed during initialization.") from writer_errors[0]
+                producer_started = time.perf_counter()
                 iterator = self.camera.iter_frames(
                     num_frames, batch_size=batch_size,
                     stop_check=lambda: bool(writer_errors) or (
@@ -432,13 +482,17 @@ class CameraScanManager:
                         raise ValueError("Camera returned an empty or oversized frame batch.")
                     if len(metadata) != len(images):
                         raise ValueError("Camera metadata count does not match frame count.")
+                    copy_started = time.perf_counter()
                     copied_batch = (images.copy(), list(metadata))
+                    producer_copy_s += time.perf_counter() - copy_started
+                    queue_put_started = time.perf_counter()
                     while True:
                         try:
                             pending.put(copied_batch, timeout=0.05)
                             max_pending_batches = max(max_pending_batches, pending.qsize())
                             break
                         except Full as exc:
+                            queue_full_wait_events += 1
                             if writer_errors:
                                 raise RuntimeError("HDF5 writer failed during acquisition.") from writer_errors[0]
                             if abort_check is not None and abort_check():
@@ -454,6 +508,7 @@ class CameraScanManager:
                                     "acquisition stopped to avoid frame loss. "
                                     "Use a smaller applied ROI or faster storage."
                                 ) from exc
+                    queue_put_durations.append(time.perf_counter() - queue_put_started)
                     captured += len(images)
                     latest_frame = images[-1].copy()
                 if abort_check is not None and abort_check() and captured != num_frames:
@@ -466,6 +521,7 @@ class CameraScanManager:
             except BaseException as exc:
                 producer_error = exc
             finally:
+                producer_finished = time.perf_counter()
                 try:
                     close_iterator = getattr(iterator, "close", None)
                     if close_iterator is not None:
@@ -475,7 +531,21 @@ class CameraScanManager:
                         producer_error = exc
                         producer_complete = False
                 producer_done.set()
+                drain_started = time.perf_counter()
                 writer.join()
+                writer_drain_s = time.perf_counter() - drain_started
+
+        self.last_step_timing = {
+            "producer_total_s": max(0.0, producer_finished - producer_started),
+            "producer_copy_s": producer_copy_s,
+            "producer_queue_put_s": float(sum(queue_put_durations)),
+            "producer_queue_put_max_s": float(max(queue_put_durations)) if queue_put_durations else 0.0,
+            "producer_queue_full_wait_events": queue_full_wait_events,
+            "writer_drain_after_producer_s": writer_drain_s,
+            "writer_queue_max_batches_used": max_pending_batches,
+            "writer_queue_capacity_batches": queue_batches,
+            **writer_timing,
+        }
 
         if writer_errors:
             raise RuntimeError("HDF5 writer failed; partial file retained.") from writer_errors[0]
@@ -485,11 +555,14 @@ class CameraScanManager:
             raise RuntimeError("Acquisition incomplete; partial file retained.")
         # Windows rename fails if the destination exists. Other hosts use an
         # exclusive hard link to publish, so a concurrent writer cannot be replaced.
+        rename_started = time.perf_counter()
         if os.name == "nt":
             os.rename(partial_path, filepath)
         else:
             os.link(partial_path, filepath)
             partial_path.unlink()
+        self.last_step_timing["publish_rename_s"] = time.perf_counter() - rename_started
+        self.last_step_timing["manager_total_s"] = time.perf_counter() - step_started
         return filepath, latest_frame
 
     def _write_batch(

@@ -303,11 +303,15 @@ def saved_run(camera, cfg: Settings, label: str, frames: int,
     )
     close_s = time.perf_counter() - start
     cpu_s = time.process_time() - cpu_start
+    fsync_started = time.perf_counter()
     with path.open("r+b", buffering=0) as handle:
         os.fsync(handle.fileno())
+    fsync_s = time.perf_counter() - fsync_started
     synced_s = time.perf_counter() - start
     result = inspect_file(path, cfg)
     result.update(total_close_s=close_s, synced_s=synced_s,
+                  final_os_fsync_s=fsync_s,
+                  pipeline_stage_timing_s=manager.last_step_timing,
                   total_fps=frames / close_s, synced_fps=frames / synced_s,
                   file_MB_per_s=path.stat().st_size / 1e6 / close_s,
                   cpu_s=cpu_s, average_cpu_cores=cpu_s / close_s)
@@ -640,6 +644,8 @@ def _saved_run_metrics(run: dict) -> dict:
         "host_interval_p99_ms": run.get("host_interval_p99_ms"),
         "total_close_s": run.get("total_close_s"),
         "durable_sync_s": run.get("synced_s"),
+        "final_os_fsync_s": run.get("final_os_fsync_s"),
+        "pipeline_stage_timing_s": run.get("pipeline_stage_timing_s"),
         "average_cpu_cores": run.get("average_cpu_cores"),
         "writer_queue_batches": run.get("writer_queue_batches"),
         "writer_queue_capacity_frames": run.get("writer_queue_capacity_frames"),
@@ -687,6 +693,13 @@ def important_metrics(number: int, report: dict, cfg: Settings, report_path: Pat
             "paced_durable_fps": paced["durable_fps"],
             "paced_max_schedule_late_ms": paced["max_schedule_late_s"] * 1000,
             "paced_wait_s": paced["pace_wait_s"],
+            "paced_stage_timing_s": paced["stage_timing_s"],
+            "paced_writer_queue_usage": {
+                "max_batches_used": paced["writer_queue_max_batches_used"],
+                "capacity_batches": paced["writer_queue_capacity_batches"],
+                "full_wait_events": paced["producer_queue_full_wait_events"],
+            },
+            "paced_bottleneck_diagnosis": paced["bottleneck_diagnosis"],
             "paced_consecutive_frame_ids": paced["verified_consecutive_frame_ids"],
             "paced_image_markers_verified": paced["verified_image_frame_markers"],
             "limitation": result["storage_note"],
@@ -857,6 +870,8 @@ def selected(number: int) -> bool:
 # 3. Repeat writer measurements after warm-up and with normal background apps.
 # 4. Watch Task Manager > Performance > Disk during a longer write. Short results
 #    can fit in OS/device caches; fsync timings still depend on the storage stack.
+# 5. Review paced_stage_timing_s and paced_bottleneck_diagnosis. Timed stages
+#    overlap because camera/replay production and HDF5 writing run concurrently.
 # Benchmarks: all offline tests pass; sufficient free space; proposed unpaced
 # capacity >= 1.30 * (ROI width * height * 2 bytes * required fps). At 2560x128,
 # 455 fps means 298.19 MB/s raw and a proposed 387.65 MB/s writer-capacity target.

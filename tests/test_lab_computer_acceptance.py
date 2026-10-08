@@ -34,6 +34,9 @@ def test_sections_use_production_writer_and_preserve_copy_hashes(config, capsys)
     assert '"total_fps"' in output and '"consecutive_frame_ids": true' in output
     assert short["important_metrics"]["decision"] == "AUTOMATED_CHECKS_PASS"
     assert len(short["important_metrics"]["runs"]) == 2
+    first_timing = short["important_metrics"]["runs"][0]["pipeline_stage_timing_s"]
+    assert first_timing["hdf5_batch_write_s"] > 0
+    assert short["important_metrics"]["runs"][0]["final_os_fsync_s"] >= 0
     saved_report = json.loads(Path(short["important_metrics"]["report_file"]).read_text())
     assert saved_report["important_metrics"] == short["important_metrics"]
     assert [item["frames"] for item in short["result"]["runs"]] == [3, 9]

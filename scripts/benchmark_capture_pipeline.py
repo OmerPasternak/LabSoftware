@@ -25,6 +25,45 @@ from hhg_control.sequencer.scan_manager import CameraScanManager
 from scripts.stress_camera_storage import ReplayCamera
 
 
+def diagnose_bottleneck(result: dict) -> dict:
+    """Classify the largest measured delay without treating overlaps as additive."""
+    timing = result["stage_timing_s"]
+    direct_stages = {
+        "final_os_fsync": timing["final_os_fsync"],
+        "hdf5_batch_writes": timing["hdf5_batch_writes"],
+        "hdf5_flush_and_close": (
+            timing["hdf5_periodic_flush"]
+            + timing["hdf5_final_flush"]
+            + timing["hdf5_close"]
+        ),
+        "producer_queue_blocking": timing["producer_queue_put"],
+    }
+    dominant = max(direct_stages, key=direct_stages.get)
+    if result["producer_queue_full_wait_events"] > 0:
+        dominant = "writer_backpressure"
+        explanation = "The producer repeatedly waited for a full writer queue."
+    elif direct_stages[dominant] >= 0.05:
+        explanations = {
+            "final_os_fsync": "Windows/storage took longest to make the closed file durable.",
+            "hdf5_batch_writes": "Writing image and metadata batches dominated measured I/O work.",
+            "hdf5_flush_and_close": "HDF5 flush or file close dominated measured I/O work.",
+            "producer_queue_blocking": "The producer spent most measured blocking time waiting for the writer queue.",
+        }
+        explanation = explanations[dominant]
+    elif result["max_schedule_late_s"] > max(0.01, 1.0 / result["target_fps"]):
+        dominant = "producer_or_os_scheduling"
+        explanation = "The replay fell behind without one dominant measured storage call."
+    else:
+        dominant = "no_single_dominant_stage"
+        explanation = "No individual measured stage dominated this short run."
+    return {
+        "dominant_stage": dominant,
+        "explanation": explanation,
+        "direct_stage_seconds": direct_stages,
+        "note": "Stages overlap because capture and writing run concurrently; do not add them together.",
+    }
+
+
 class PacedReplayCamera(ReplayCamera):
     """Deliver prepared frames at a target rate while permitting writer waits.
 
@@ -99,9 +138,12 @@ def run_benchmark(
         )
         pipeline_s = time.perf_counter() - started
         file_bytes = path.stat().st_size
+        fsync_started = time.perf_counter()
         with path.open("r+b", buffering=0) as handle:
             os.fsync(handle.fileno())
+        fsync_s = time.perf_counter() - fsync_started
         durable_s = time.perf_counter() - started
+        verification_started = time.perf_counter()
         with h5py.File(path, "r") as h5f:
             images = h5f["images"]
             if not bool(h5f.attrs["complete"]) or int(h5f.attrs["frames_written"]) != frames:
@@ -117,6 +159,32 @@ def run_benchmark(
                 expected = np.arange(start, end, dtype=np.uint64) % 65536
                 if not np.array_equal(stamps, expected):
                     raise AssertionError(f"Saved image frame markers differ at {start}:{end}.")
+        verification_s = time.perf_counter() - verification_started
+        manager_timing = manager.last_step_timing
+        stage_timing = {
+            "ideal_paced_acquisition": frames / fps,
+            "pipeline_total": pipeline_s,
+            "pipeline_over_ideal": max(0.0, pipeline_s - frames / fps),
+            "source_pacing_sleep": camera.pace_wait_s,
+            "producer_total": manager_timing.get("producer_total_s", 0.0),
+            "producer_copy": manager_timing.get("producer_copy_s", 0.0),
+            "producer_queue_put": manager_timing.get("producer_queue_put_s", 0.0),
+            "producer_queue_put_max": manager_timing.get("producer_queue_put_max_s", 0.0),
+            "hdf5_open_and_setup": manager_timing.get("hdf5_open_and_setup_s", 0.0),
+            "hdf5_batch_writes": manager_timing.get("hdf5_batch_write_s", 0.0),
+            "hdf5_batch_write_p50": manager_timing.get("hdf5_batch_write_p50_s", 0.0),
+            "hdf5_batch_write_p95": manager_timing.get("hdf5_batch_write_p95_s", 0.0),
+            "hdf5_batch_write_p99": manager_timing.get("hdf5_batch_write_p99_s", 0.0),
+            "hdf5_batch_write_max": manager_timing.get("hdf5_batch_write_max_s", 0.0),
+            "hdf5_periodic_flush": manager_timing.get("hdf5_periodic_flush_s", 0.0),
+            "hdf5_periodic_flush_max": manager_timing.get("hdf5_periodic_flush_max_s", 0.0),
+            "hdf5_final_flush": manager_timing.get("hdf5_final_flush_s", 0.0),
+            "hdf5_close": manager_timing.get("hdf5_close_s", 0.0),
+            "writer_drain_after_producer": manager_timing.get("writer_drain_after_producer_s", 0.0),
+            "publish_rename": manager_timing.get("publish_rename_s", 0.0),
+            "final_os_fsync": fsync_s,
+            "verification": verification_s,
+        }
         result = {
             "source": "paced_synthetic_replay",
             "frames": frames, "width": width, "height": height,
@@ -127,6 +195,16 @@ def run_benchmark(
             "durable_fps": frames / durable_s,
             "pace_wait_s": camera.pace_wait_s,
             "max_schedule_late_s": camera.max_late_s,
+            "stage_timing_s": stage_timing,
+            "producer_queue_full_wait_events": manager_timing.get(
+                "producer_queue_full_wait_events", 0
+            ),
+            "writer_queue_max_batches_used": manager_timing.get(
+                "writer_queue_max_batches_used", 0
+            ),
+            "writer_queue_capacity_batches": manager_timing.get(
+                "writer_queue_capacity_batches", 0
+            ),
             "verified_consecutive_frame_ids": True,
             "verified_image_frame_markers": True,
             "kept_data": keep_data,
@@ -136,6 +214,7 @@ def run_benchmark(
                 "OS and device caching may still affect timing."
             ),
         }
+        result["bottleneck_diagnosis"] = diagnose_bottleneck(result)
         result["data_path"] = str(path)
         return result
     finally:
