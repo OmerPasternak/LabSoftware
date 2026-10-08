@@ -153,6 +153,31 @@ def test_bounded_writer_queue_fails_instead_of_silently_losing_frames(tmp_path):
     camera.close()
 
 
+def test_acquisition_waits_for_hdf5_dataset_initialization(tmp_path, monkeypatch):
+    """Slow file setup must not consume the live frame queue's small buffer."""
+    from scripts.benchmark_capture_pipeline import PacedReplayCamera
+
+    original_create_dataset = h5py.Group.create_dataset
+
+    def delayed_create_dataset(group, name, *args, **kwargs):
+        if name == "images":
+            time.sleep(0.2)
+        return original_create_dataset(group, name, *args, **kwargs)
+
+    monkeypatch.setattr(h5py.Group, "create_dataset", delayed_create_dataset)
+    camera = PacedReplayCamera(width=16, height=8, batch_size=1, fps=100.0)
+    camera.connect()
+    manager = CameraScanManager(camera, tmp_path)
+    path, _ = manager.acquire_and_save_step(
+        "slow_startup", 0, "delay_mm", 0.0, 20,
+        batch_size=1, queue_batches=1,
+    )
+    with h5py.File(path) as h5f:
+        assert bool(h5f.attrs["complete"])
+        assert h5f.attrs["frames_written"] == 20
+    camera.close()
+
+
 def test_mock_waits_for_slow_writer_without_unbounded_queue(tmp_path):
     """Synthetic capture may slow down to storage speed without losing frames."""
     class SlowWriter(CameraScanManager):

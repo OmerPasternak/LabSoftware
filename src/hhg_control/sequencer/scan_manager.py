@@ -302,6 +302,7 @@ class CameraScanManager:
         attrs["readout_mode_value"] = int(mode.value)
         pending: Queue[tuple[np.ndarray, list[dict[str, Any]]]] = Queue(maxsize=queue_batches)
         producer_done = threading.Event()
+        writer_ready = threading.Event()
         writer_errors: list[BaseException] = []
         latest_frame: np.ndarray | None = None
         captured = 0
@@ -327,7 +328,27 @@ class CameraScanManager:
                         dtype=h5py.string_dtype(encoding="utf-8"),
                         chunks=(min(256, num_frames),),
                     )
-                    image_dset = None
+                    height, width = roi[3] - roi[1], roi[2] - roi[0]
+                    options = (
+                        {"compression": "gzip", "compression_opts": 1, "shuffle": True}
+                        if self.compression == "gzip" else {}
+                    )
+                    image_dset = h5f.create_dataset(
+                        "images", shape=(num_frames, height, width), dtype="uint16",
+                        chunks=_frame_chunk_shape(height, width), **options,
+                    )
+                    image_dset.attrs["units"] = "16-bit digital counts (ADU)"
+                    image_dset.attrs["physical_units"] = "16-bit digital counts (ADU)"
+                    image_dset.attrs["dimension_order"] = "[frame, y, x]"
+                    image_dset.attrs["data_dimension_ordering"] = (
+                        "[frame_index, sensor_height_y, sensor_width_x]"
+                    )
+                    image_dset.attrs["description"] = (
+                        "Raw 16-bit sCMOS image stack recorded at this scan step"
+                    )
+                    # Acquisition must not begin while filesystem/HDF5 setup is
+                    # consuming the small bounded queue's latency allowance.
+                    writer_ready.set()
                     batches_written = 0
                     next_space_check = 0.0
                     while True:
@@ -337,24 +358,10 @@ class CameraScanManager:
                             if producer_done.is_set():
                                 break
                             continue
-                        if image_dset is None:
-                            height, width = images.shape[1:]
-                            options = (
-                                {"compression": "gzip", "compression_opts": 1, "shuffle": True}
-                                if self.compression == "gzip" else {}
-                            )
-                            image_dset = h5f.create_dataset(
-                                "images", shape=(num_frames, height, width), dtype="uint16",
-                                chunks=_frame_chunk_shape(height, width), **options,
-                            )
-                            image_dset.attrs["units"] = "16-bit digital counts (ADU)"
-                            image_dset.attrs["physical_units"] = "16-bit digital counts (ADU)"
-                            image_dset.attrs["dimension_order"] = "[frame, y, x]"
-                            image_dset.attrs["data_dimension_ordering"] = (
-                                "[frame_index, sensor_height_y, sensor_width_x]"
-                            )
-                            image_dset.attrs["description"] = (
-                                "Raw 16-bit sCMOS image stack recorded at this scan step"
+                        if images.shape[1:] != (height, width):
+                            raise ValueError(
+                                f"Camera batch shape {images.shape[1:]} differs from applied ROI "
+                                f"shape {(height, width)}."
                             )
                         end = written + len(images)
                         if time.monotonic() >= next_space_check:
@@ -367,17 +374,24 @@ class CameraScanManager:
                             h5f.attrs["frames_written"] = written
                             h5f.flush()
                     h5f.attrs["frames_written"] = written
-                    if producer_complete and written == num_frames and image_dset is not None:
+                    if producer_complete and written == num_frames:
                         h5f.attrs["complete"] = True
                     h5f.flush()
             except BaseException as exc:
                 writer_errors.append(exc)
+            finally:
+                # Release the producer on initialization failure so it can
+                # report the writer error rather than waiting indefinitely.
+                writer_ready.set()
 
         with self._camera_lock:
             writer = threading.Thread(target=write_batches, name="camera-hdf5-writer")
             writer.start()
             iterator = None
             try:
+                writer_ready.wait()
+                if writer_errors:
+                    raise RuntimeError("HDF5 writer failed during initialization.") from writer_errors[0]
                 iterator = self.camera.iter_frames(
                     num_frames, batch_size=batch_size,
                     stop_check=lambda: bool(writer_errors) or (
