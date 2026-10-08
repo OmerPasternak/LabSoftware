@@ -187,7 +187,22 @@ def test_notebook_setup_and_cells_are_executable():
     assert namespace["CONFIG"].source == "mock"
     assert namespace["CONFIG"].trigger_bench_ready is False
     assert namespace["CONFIG"].roi == (0, 1016, 2560, 1144)
+    assert namespace["USE_SHORT_STORAGE_DIAGNOSTIC"] is False
+    assert namespace["CONFIG"].batch_size == 4
+    assert namespace["CONFIG"].speed_frames == 10000
+    assert namespace["CONFIG"].repeats == 3
     assert namespace["CONFIG"].max_section_raw_gb == 120.0
+    short_namespace = {}
+    exec(
+        code_cells[0].replace(
+            "USE_SHORT_STORAGE_DIAGNOSTIC = False",
+            "USE_SHORT_STORAGE_DIAGNOSTIC = True",
+        ),
+        short_namespace,
+    )
+    assert short_namespace["CONFIG"].batch_size == 16
+    assert short_namespace["CONFIG"].speed_frames == 2000
+    assert short_namespace["CONFIG"].repeats == 1
     assert code_cells[-1] == "REPORT_8 = lab.execute(8, CONFIG)\n"
 
 
