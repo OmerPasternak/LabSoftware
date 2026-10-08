@@ -6,6 +6,30 @@ import os
 import shutil
 
 
+def available_physical_memory_bytes() -> int:
+    """Return currently available physical RAM in bytes.
+
+    Uses the Windows memory-status API on the lab PC and ``sysconf`` on
+    POSIX test/development hosts. Failure is explicit because callers use the
+    value to prevent large image buffers from exhausting system memory.
+    """
+    if os.name == "nt":
+        class MemoryStatus(ctypes.Structure):
+            _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong),
+                        *[(name, ctypes.c_ulonglong) for name in
+                          ("total_phys", "avail_phys", "total_page", "avail_page",
+                           "total_virtual", "avail_virtual", "avail_extended")]]
+        status = MemoryStatus()
+        status.length = ctypes.sizeof(status)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            raise OSError("Could not verify available physical memory.")
+        return int(status.avail_phys)
+    try:
+        return int(os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE"))
+    except (AttributeError, OSError, ValueError) as exc:
+        raise OSError("Could not verify available physical memory.") from exc
+
+
 def unique_output(path: Path) -> Path:
     """Suggest a numbered filename when an output already exists."""
     path = Path(path)
@@ -24,19 +48,7 @@ def check_disk_space(directory: Path, required_bytes: int = 0) -> None:
 
 def check_stack_memory(num_frames: int, height: int, width: int) -> None:
     """Check available RAM before a whole-stack allocation (uint16, two copies)."""
-    if os.name == "nt":
-        class MemoryStatus(ctypes.Structure):
-            _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong),
-                        *[(name, ctypes.c_ulonglong) for name in
-                          ("total_phys", "avail_phys", "total_page", "avail_page",
-                           "total_virtual", "avail_virtual", "avail_extended")]]
-        status = MemoryStatus()
-        status.length = ctypes.sizeof(status)
-        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-            raise OSError("Could not verify available memory before allocating an image stack.")
-        available = status.avail_phys
-    else:
-        available = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    available = available_physical_memory_bytes()
     needed = num_frames * height * width * 4
     if needed > available // 2:
         raise MemoryError("Image stack exceeds half the available RAM; use iter_frames for bounded streaming.")

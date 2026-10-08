@@ -8,6 +8,8 @@ import h5py
 import numpy as np
 import pytest
 
+import hhg_control.sequencer.scan_manager as scan_manager_module
+
 from hhg_control.analysis.correlation import StreamingPixelG2, compute_g2_map
 from hhg_control.analysis.hdf5_io import iter_scan_step_frames
 from hhg_control.drivers.mock_camera import MockPcoCamera
@@ -186,6 +188,80 @@ def test_automatic_writer_queue_is_bounded_by_bytes():
     capacity_bytes = batches * batch_bytes
     assert capacity_bytes <= DEFAULT_WRITER_QUEUE_BYTES
     assert capacity_bytes > DEFAULT_WRITER_QUEUE_BYTES - batch_bytes
+
+
+def test_expanded_writer_queue_refuses_to_consume_the_memory_reserve(tmp_path, monkeypatch):
+    """A large configured backlog must fail before starting when RAM is insufficient."""
+    from scripts.stress_camera_storage import ReplayCamera
+
+    camera = ReplayCamera(width=2560, height=128, batch_size=16, pattern="noise")
+    camera.connect()
+    manager = CameraScanManager(
+        camera, tmp_path,
+        writer_queue_byte_budget=1 * 2**30,
+        writer_memory_reserve_bytes=1 * 2**30,
+    )
+    monkeypatch.setattr(
+        scan_manager_module, "available_physical_memory_bytes", lambda: int(1.25 * 2**30)
+    )
+    with pytest.raises(MemoryError, match="preflight failed"):
+        manager.acquire_and_save_step(
+            "ram_preflight", 0, "x", 0.0, 1000, batch_size=16,
+        )
+    assert not list(tmp_path.glob("*.partial"))
+    camera.close()
+
+
+def test_owned_camera_batches_skip_the_redundant_writer_copy(tmp_path):
+    """The PCO-style ownership contract removes one full image-batch copy."""
+    from scripts.stress_camera_storage import ReplayCamera
+
+    class OwnedReplay(ReplayCamera):
+        @property
+        def yields_owned_batches(self):
+            return True
+
+    owned = OwnedReplay(width=16, height=8, batch_size=2, pattern="noise")
+    owned.connect()
+    owned_manager = CameraScanManager(owned, tmp_path / "owned")
+    owned_manager.acquire_and_save_step("owned", 0, "x", 0.0, 4, batch_size=2)
+    assert owned_manager.last_step_timing["producer_copied_image_bytes"] == 0
+    owned.close()
+
+    reusable = ReplayCamera(width=16, height=8, batch_size=2, pattern="noise")
+    reusable.connect()
+    reusable_manager = CameraScanManager(reusable, tmp_path / "reusable")
+    reusable_manager.acquire_and_save_step("reusable", 0, "x", 0.0, 4, batch_size=2)
+    assert reusable_manager.last_step_timing["producer_copied_image_bytes"] == 4 * 16 * 8 * 2
+    reusable.close()
+
+
+def test_large_queue_bridges_a_finite_writer_stall_for_unpausable_source(tmp_path):
+    """A finite RAM backlog keeps a physical-style source from hitting backpressure."""
+    from scripts.stress_camera_storage import ReplayCamera
+
+    class UnpausableReplay(ReplayCamera):
+        @property
+        def can_pause_acquisition(self):
+            return False
+
+    class InitiallyStalledWriter(CameraScanManager):
+        def _write_batch(self, image_dset, metadata_dset, start, images, metadata):
+            if start == 0:
+                time.sleep(0.2)
+            super()._write_batch(image_dset, metadata_dset, start, images, metadata)
+
+    camera = UnpausableReplay(width=64, height=16, batch_size=1, pattern="noise")
+    camera.connect()
+    manager = InitiallyStalledWriter(camera, tmp_path)
+    path, _ = manager.acquire_and_save_step(
+        "ram_bridge", 0, "x", 0.0, 20, batch_size=1, queue_batches=20,
+    )
+    with h5py.File(path) as h5f:
+        assert bool(h5f.attrs["complete"])
+        assert int(h5f.attrs["frames_written"]) == 20
+        assert int(h5f.attrs["writer_queue_max_batches_used"]) >= 10
+    camera.close()
 
 
 def test_acquisition_waits_for_hdf5_dataset_initialization(tmp_path, monkeypatch):

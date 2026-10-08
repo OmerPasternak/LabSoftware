@@ -113,6 +113,8 @@ class PacedReplayCamera(ReplayCamera):
 def run_benchmark(
     output_dir: Path, *, frames: int, width: int, height: int,
     fps: float, batch_size: int = 4, keep_data: bool = True,
+    writer_queue_byte_budget: int | None = None,
+    writer_memory_reserve_bytes: int | None = None,
 ) -> dict:
     """Save and verify one paced scan; dimensions are pixels and rate is fps."""
     if min(frames, width, height, batch_size) < 1:
@@ -129,7 +131,12 @@ def run_benchmark(
 
     camera = PacedReplayCamera(width, height, min(batch_size, frames), fps)
     camera.connect()
-    manager = CameraScanManager(camera, output_dir)
+    manager_options = {}
+    if writer_queue_byte_budget is not None:
+        manager_options["writer_queue_byte_budget"] = writer_queue_byte_budget
+    if writer_memory_reserve_bytes is not None:
+        manager_options["writer_memory_reserve_bytes"] = writer_memory_reserve_bytes
+    manager = CameraScanManager(camera, output_dir, **manager_options)
     started = time.perf_counter()
     try:
         path, _ = manager.acquire_and_save_step(
@@ -193,6 +200,10 @@ def run_benchmark(
             "pipeline_s": pipeline_s, "durable_s": durable_s,
             "pipeline_fps": frames / pipeline_s,
             "durable_fps": frames / durable_s,
+            "source_acquisition_fps": (
+                frames / manager_timing["producer_total_s"]
+                if manager_timing.get("producer_total_s", 0.0) > 0 else None
+            ),
             "pace_wait_s": camera.pace_wait_s,
             "max_schedule_late_s": camera.max_late_s,
             "stage_timing_s": stage_timing,
@@ -204,6 +215,9 @@ def run_benchmark(
             ),
             "writer_queue_capacity_batches": manager_timing.get(
                 "writer_queue_capacity_batches", 0
+            ),
+            "writer_queue_capacity_MiB": (
+                manager_timing.get("writer_queue_capacity_bytes", 0) / 2**20
             ),
             "verified_consecutive_frame_ids": True,
             "verified_image_frame_markers": True,

@@ -225,6 +225,7 @@ def test_pco_saved_scan_uses_one_fifo_and_preserves_recorder_numbers(monkeypatch
     monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
     camera = pco_edge.PcoEdgeCamera(serial="12345")
     camera.connect()
+    assert camera.yields_owned_batches
     batches = list(camera.iter_frames(5, batch_size=2))
     assert [len(images) for images, _ in batches] == [2, 2, 1]
     assert [meta["frame_id"] for _, metas in batches for meta in metas] == list(range(10, 15))

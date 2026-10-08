@@ -25,6 +25,23 @@ def config(tmp_path, monkeypatch):
                         run_offline_tests=False)
 
 
+def test_ram_buffer_plan_bridges_five_minutes_only_at_the_assumed_hdd_rate():
+    cfg = lab.Settings(
+        roi=(0, 1016, 2560, 1144), target_fps=455.0,
+        sustained_seconds=300.0, writer_queue_gib=16.0,
+        writer_memory_reserve_gib=16.0, estimated_storage_MB_per_s=250.0,
+    )
+    plan = lab.estimate_ram_buffer_plan(cfg)
+    assert plan["camera_minus_storage_MB_per_s"] == pytest.approx(48.1888)
+    assert plan["required_backlog_GiB_for_sustained_run"] == pytest.approx(13.463795185)
+    assert plan["estimated_bridge_seconds"] > 300
+    assert plan["sustained_run_fits_configured_buffer"]
+
+    slow_plan = lab.estimate_ram_buffer_plan(replace(cfg, estimated_storage_MB_per_s=121.0))
+    assert slow_plan["required_backlog_GiB_for_sustained_run"] > 16
+    assert not slow_plan["sustained_run_fits_configured_buffer"]
+
+
 def test_sections_use_production_writer_and_preserve_copy_hashes(config, capsys):
     identity = lab.section_2(config)
     assert identity["reconnect_readbacks"][0]["sensor"]["model"].endswith("(EMULATOR)")

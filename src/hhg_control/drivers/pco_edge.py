@@ -67,6 +67,11 @@ class PcoEdgeCamera(BaseCamera):
         self._info: Dict[str, Any] = {}
         self._description: Dict[str, Any] = {}
 
+    @property
+    def yields_owned_batches(self) -> bool:
+        """Return true because ``iter_frames`` yields a new ``np.stack`` buffer."""
+        return True
+
     def connect(self) -> None:
         if self._is_connected:
             return

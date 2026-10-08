@@ -72,6 +72,15 @@ class BaseCamera(ABC):
         """Whether waiting for storage can safely pause frame production."""
         return False
 
+    @property
+    def yields_owned_batches(self) -> bool:
+        """Whether later reads cannot mutate a previously yielded image batch.
+
+        The scan writer copies reusable driver buffers. A driver may return
+        true only when each yielded NumPy array owns independent storage.
+        """
+        return False
+
     @abstractmethod
     def connect(self) -> None:
         """Establish communication and configure initial camera state."""

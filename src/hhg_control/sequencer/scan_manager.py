@@ -18,11 +18,12 @@ from typing import Any, Optional
 import numpy as np
 
 from ..drivers.base_camera import BaseCamera, TriggerMode
-from ..safe_io import check_disk_space
+from ..safe_io import available_physical_memory_bytes, check_disk_space
 
 
 HDF5_SCHEMA_VERSION = "2.0"
 DEFAULT_WRITER_QUEUE_BYTES = 512 * 2**20
+DEFAULT_WRITER_MEMORY_RESERVE_BYTES = 16 * 2**30
 _WINDOWS_RESERVED_NAMES = {
     "CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
     *(f"LPT{i}" for i in range(1, 10)),
@@ -88,6 +89,8 @@ class CameraScanManager:
     def __init__(
         self, camera: BaseCamera, storage_dir: Path | str,
         *, compression: str | None = None,
+        writer_queue_byte_budget: int = DEFAULT_WRITER_QUEUE_BYTES,
+        writer_memory_reserve_bytes: int = DEFAULT_WRITER_MEMORY_RESERVE_BYTES,
     ) -> None:
         """Configure scan storage; use no compression for fast acquisition.
 
@@ -96,8 +99,12 @@ class CameraScanManager:
         """
         if compression not in (None, "gzip"):
             raise ValueError("compression must be None or 'gzip'.")
+        if writer_queue_byte_budget < 1 or writer_memory_reserve_bytes < 0:
+            raise ValueError("Writer queue budget must be positive and memory reserve non-negative.")
         self.camera = camera
         self.compression = compression
+        self.writer_queue_byte_budget = int(writer_queue_byte_budget)
+        self.writer_memory_reserve_bytes = int(writer_memory_reserve_bytes)
         self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self._camera_lock = threading.RLock()
@@ -127,6 +134,24 @@ class CameraScanManager:
         """Set and create the scan output directory."""
         self.storage_dir = Path(new_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
+
+    def set_writer_queue_memory(
+        self, byte_budget: int, *, reserve_bytes: int | None = None,
+    ) -> None:
+        """Set the lazy RAM backlog budget and physical-memory safety reserve.
+
+        Values are bytes. An expanded queue is checked before capture and
+        while it fills. If the reserve would be consumed, acquisition stops
+        and retains an incomplete file instead of risking system instability.
+        """
+        if byte_budget < 1 or (reserve_bytes is not None and reserve_bytes < 0):
+            raise ValueError("Writer queue budget must be positive and memory reserve non-negative.")
+        with self._state_lock:
+            if self._state != "IDLE":
+                raise RuntimeError("Cannot change writer memory while acquisition is active.")
+            self.writer_queue_byte_budget = int(byte_budget)
+            if reserve_bytes is not None:
+                self.writer_memory_reserve_bytes = int(reserve_bytes)
 
     def set_roi(self, roi: tuple[int, int, int, int]) -> None:
         """Set hardware ROI bounds in unbinned sensor pixels."""
@@ -283,9 +308,24 @@ class CameraScanManager:
         roi = self.camera.get_roi()
         height, width = roi[3] - roi[1], roi[2] - roi[0]
         if queue_batches is None:
-            queue_batches = _writer_queue_batches(num_frames, batch_size, height, width)
+            queue_batches = _writer_queue_batches(
+                num_frames, batch_size, height, width,
+                byte_budget=self.writer_queue_byte_budget,
+            )
         queue_capacity_frames = min(num_frames, queue_batches * batch_size)
         queue_capacity_bytes = queue_capacity_frames * height * width * 2
+        expanded_memory_queue = queue_capacity_bytes > DEFAULT_WRITER_QUEUE_BYTES
+        available_memory_at_start = available_physical_memory_bytes()
+        if expanded_memory_queue:
+            required_memory = queue_capacity_bytes + self.writer_memory_reserve_bytes
+            if available_memory_at_start < required_memory:
+                raise MemoryError(
+                    "Expanded writer queue preflight failed: "
+                    f"{queue_capacity_bytes / 2**30:.1f} GiB queue plus "
+                    f"{self.writer_memory_reserve_bytes / 2**30:.1f} GiB reserve needs "
+                    f"{required_memory / 2**30:.1f} GiB available, but only "
+                    f"{available_memory_at_start / 2**30:.1f} GiB is available."
+                )
         check_disk_space(self.storage_dir, int(num_frames * (roi[2] - roi[0]) * (roi[3] - roi[1]) * 2 * 1.1))
 
         attrs = {
@@ -319,6 +359,10 @@ class CameraScanManager:
                 "writer_queue_batches": int(queue_batches),
                 "writer_queue_capacity_frames": int(queue_capacity_frames),
                 "writer_queue_capacity_bytes": int(queue_capacity_bytes),
+                "writer_queue_configured_byte_budget": int(self.writer_queue_byte_budget),
+                "writer_memory_reserve_bytes": int(self.writer_memory_reserve_bytes),
+                "available_physical_memory_at_start_bytes": int(available_memory_at_start),
+                "camera_yields_owned_batches": bool(self.camera.yields_owned_batches),
         }
         mode = self.camera.get_readout_mode()
         attrs["readout_mode"] = mode.name
@@ -336,6 +380,7 @@ class CameraScanManager:
         producer_started = 0.0
         producer_finished = 0.0
         producer_copy_s = 0.0
+        producer_copied_image_bytes = 0
         queue_put_durations: list[float] = []
         queue_full_wait_events = 0
         writer_timing: dict[str, Any] = {}
@@ -482,8 +527,22 @@ class CameraScanManager:
                         raise ValueError("Camera returned an empty or oversized frame batch.")
                     if len(metadata) != len(images):
                         raise ValueError("Camera metadata count does not match frame count.")
+                    if expanded_memory_queue:
+                        available_now = available_physical_memory_bytes()
+                        if available_now < self.writer_memory_reserve_bytes + images.nbytes:
+                            raise AcquisitionBackpressure(
+                                "Available RAM reached the configured writer reserve after "
+                                f"{captured} frames: {available_now / 2**30:.1f} GiB available, "
+                                f"{self.writer_memory_reserve_bytes / 2**30:.1f} GiB reserved. "
+                                "Acquisition stopped and the partial file was retained."
+                            )
                     copy_started = time.perf_counter()
-                    copied_batch = (images.copy(), list(metadata))
+                    if self.camera.yields_owned_batches:
+                        queued_images = images
+                    else:
+                        queued_images = images.copy()
+                        producer_copied_image_bytes += images.nbytes
+                    copied_batch = (queued_images, list(metadata))
                     producer_copy_s += time.perf_counter() - copy_started
                     queue_put_started = time.perf_counter()
                     while True:
@@ -538,12 +597,14 @@ class CameraScanManager:
         self.last_step_timing = {
             "producer_total_s": max(0.0, producer_finished - producer_started),
             "producer_copy_s": producer_copy_s,
+            "producer_copied_image_bytes": producer_copied_image_bytes,
             "producer_queue_put_s": float(sum(queue_put_durations)),
             "producer_queue_put_max_s": float(max(queue_put_durations)) if queue_put_durations else 0.0,
             "producer_queue_full_wait_events": queue_full_wait_events,
             "writer_drain_after_producer_s": writer_drain_s,
             "writer_queue_max_batches_used": max_pending_batches,
             "writer_queue_capacity_batches": queue_batches,
+            "writer_queue_capacity_bytes": queue_capacity_bytes,
             **writer_timing,
         }
 

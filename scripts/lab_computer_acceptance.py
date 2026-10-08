@@ -79,6 +79,9 @@ class Settings:
     speed_fraction: float = 0.90  # Proposed minimum vs matched physical baseline.
     storage_margin: float = 1.30  # Proposed unpaced writer throughput / target load.
     batch_size: int = 4
+    writer_queue_gib: float = 0.5  # Standard bounded backlog; opt in to 16 GiB on the 64-GB PC.
+    writer_memory_reserve_gib: float = 16.0  # RAM kept clear for Windows, Dropbox and the SDK.
+    estimated_storage_MB_per_s: float = 250.0  # Replace with a durable D: measurement.
     short_frames: tuple[int, ...] = (20, 1000)
     speed_frames: int = 10000
     repeats: int = 3
@@ -129,6 +132,9 @@ def prepare(cfg: Settings, frames: int = 0) -> Path:
     """Check settings, per-section raw-byte budget and free space before saving."""
     require(cfg.source in ("mock", "physical"), "source must be mock or physical")
     require(cfg.target_fps > 0 and cfg.batch_size > 0, "Rate and batch size must be positive")
+    require(cfg.writer_queue_gib > 0 and cfg.writer_memory_reserve_gib >= 0,
+            "Writer queue must be positive and its RAM reserve non-negative")
+    require(cfg.estimated_storage_MB_per_s > 0, "Estimated storage throughput must be positive")
     require(cfg.repeats > 0 and cfg.speed_frames > 0 and cfg.sustained_seconds > 0,
             "Run sizes and duration must be positive")
     require(0 < cfg.speed_fraction <= 1 and cfg.storage_margin >= 1,
@@ -295,7 +301,11 @@ def inspect_file(path: Path, cfg: Settings | None = None, full_read: bool = Fals
 def saved_run(camera, cfg: Settings, label: str, frames: int,
               manager_class=CameraScanManager, abort_check=None) -> dict:
     """Time production capture/file close, then fsync, and verify the saved step."""
-    manager = manager_class(camera, cfg.output_dir)
+    manager = manager_class(
+        camera, cfg.output_dir,
+        writer_queue_byte_budget=int(cfg.writer_queue_gib * 2**30),
+        writer_memory_reserve_bytes=int(cfg.writer_memory_reserve_gib * 2**30),
+    )
     start, cpu_start = time.perf_counter(), time.process_time()
     path, _ = manager.acquire_and_save_step(
         label, 0, "Acceptance setpoint (metadata only)", 0.0, frames,
@@ -346,6 +356,35 @@ def capture_only(camera, cfg: Settings, frames: int) -> dict:
         host_fps = (frames - 1) * 1e9 / (host_times[-1] - host_times[0])
     return {"frames": frames, "elapsed_s": elapsed, "total_fps": frames / elapsed,
             "host_read_fps": host_fps, "consecutive_ids": True}
+
+
+def estimate_ram_buffer_plan(cfg: Settings) -> dict:
+    """Estimate a finite RAM backlog from ROI bytes, fps and durable disk rate.
+
+    This is capacity arithmetic, not a throughput measurement. Decimal MB/s
+    matches the storage benchmark; RAM capacity is reported in binary GiB.
+    """
+    width, height = cfg.roi[2] - cfg.roi[0], cfg.roi[3] - cfg.roi[1]
+    required_mb_s = width * height * 2 * cfg.target_fps / 1e6
+    deficit_mb_s = max(0.0, required_mb_s - cfg.estimated_storage_MB_per_s)
+    configured_buffer_bytes = cfg.writer_queue_gib * 2**30
+    required_backlog_bytes = deficit_mb_s * 1e6 * cfg.sustained_seconds
+    return {
+        "estimated_storage_MB_per_s": cfg.estimated_storage_MB_per_s,
+        "configured_buffer_GiB": cfg.writer_queue_gib,
+        "memory_reserve_GiB": cfg.writer_memory_reserve_gib,
+        "camera_minus_storage_MB_per_s": deficit_mb_s,
+        "required_backlog_GiB_for_sustained_run": required_backlog_bytes / 2**30,
+        "estimated_bridge_seconds": (
+            configured_buffer_bytes / (deficit_mb_s * 1e6)
+            if deficit_mb_s > 0 else None
+        ),
+        "estimated_drain_seconds_after_run": (
+            required_backlog_bytes / (cfg.estimated_storage_MB_per_s * 1e6)
+        ),
+        "sustained_run_fits_configured_buffer": required_backlog_bytes <= configured_buffer_bytes,
+        "note": "Capacity estimate only; the live RAM reserve and frame/FIFO checks remain authoritative.",
+    }
 
 
 def section_1(cfg: Settings) -> dict:
@@ -409,10 +448,15 @@ def section_1(cfg: Settings) -> dict:
         result["unpaced_writer"] = run_case("application", replay, destination, cfg.speed_frames, cfg.batch_size)
     finally:
         replay.close()
-    result["paced_writer"] = run_benchmark(destination, frames=cfg.speed_frames, width=width,
-                                           height=height, fps=cfg.target_fps, batch_size=cfg.batch_size)
+    result["paced_writer"] = run_benchmark(
+        destination, frames=cfg.speed_frames, width=width,
+        height=height, fps=cfg.target_fps, batch_size=cfg.batch_size,
+        writer_queue_byte_budget=int(cfg.writer_queue_gib * 2**30),
+        writer_memory_reserve_bytes=int(cfg.writer_memory_reserve_gib * 2**30),
+    )
     required_mb_s = width * height * 2 * cfg.target_fps / 1e6
     result["required_raw_MB_per_s"] = required_mb_s
+    result["ram_buffer_plan"] = estimate_ram_buffer_plan(cfg)
     result["provisional_writer_margin_met"] = result["unpaced_writer"]["raw_MB_per_s"] >= required_mb_s * cfg.storage_margin
     result["readiness_passed"] = (
         result["offline_tests"]["passed"] is True
@@ -683,6 +727,8 @@ def important_metrics(number: int, report: dict, cfg: Settings, report_path: Pat
         "configured_exposure_ms": cfg.exposure_s * 1000,
         "configured_target_fps": cfg.target_fps,
         "batch_size_frames": cfg.batch_size,
+        "writer_queue_GiB": cfg.writer_queue_gib,
+        "writer_memory_reserve_GiB": cfg.writer_memory_reserve_gib,
     }
     if report["status"] == "FAILED":
         summary["decision"] = "FAILED"
@@ -706,6 +752,7 @@ def important_metrics(number: int, report: dict, cfg: Settings, report_path: Pat
             "writer_margin_met": result["provisional_writer_margin_met"],
             "paced_pipeline_fps": paced["pipeline_fps"],
             "paced_durable_fps": paced["durable_fps"],
+            "paced_source_acquisition_fps": paced["source_acquisition_fps"],
             "paced_max_schedule_late_ms": paced["max_schedule_late_s"] * 1000,
             "paced_wait_s": paced["pace_wait_s"],
             "paced_stage_timing_s": paced["stage_timing_s"],
@@ -715,6 +762,7 @@ def important_metrics(number: int, report: dict, cfg: Settings, report_path: Pat
                 "full_wait_events": paced["producer_queue_full_wait_events"],
             },
             "paced_bottleneck_diagnosis": paced["bottleneck_diagnosis"],
+            "ram_buffer_plan": result["ram_buffer_plan"],
             "paced_consecutive_frame_ids": paced["verified_consecutive_frame_ids"],
             "paced_image_markers_verified": paced["verified_image_frame_markers"],
             "limitation": result["storage_note"],
