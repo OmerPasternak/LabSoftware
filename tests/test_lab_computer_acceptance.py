@@ -119,6 +119,22 @@ def test_offline_failure_is_recorded_and_storage_still_runs(config, monkeypatch)
     assert "1 failed" in (config.output_dir / Path(result["offline_tests"]["log"]).name).read_text()
 
 
+def test_section_1_continues_when_git_is_not_on_path(config, monkeypatch):
+    actual_run = subprocess.run
+
+    def missing_git(command, **kwargs):
+        if command and command[0] == "git":
+            raise FileNotFoundError(2, "The system cannot find the file specified", "git")
+        return actual_run(command, **kwargs)
+
+    monkeypatch.setattr(lab.subprocess, "run", missing_git)
+    result = lab.section_1(config)
+    assert result["revision"].startswith("unavailable: git executable")
+    assert result["git_status"] == "unavailable"
+    assert result["git_note"] == "Git metadata was skipped; storage diagnostics continued."
+    assert result["paced_writer"]["verified_consecutive_frame_ids"]
+
+
 def test_faults_are_mock_only_and_trigger_defaults_to_deferred(config, monkeypatch):
     def forbidden(*args, **kwargs):
         raise AssertionError("physical driver must not be opened")

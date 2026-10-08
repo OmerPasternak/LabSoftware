@@ -351,8 +351,22 @@ def capture_only(camera, cfg: Settings, frames: int) -> dict:
 def section_1(cfg: Settings) -> dict:
     """Record the PC/environment, run offline tests and benchmark the chosen drive."""
     destination = prepare(cfg, cfg.speed_frames)
-    revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True)
-    status = subprocess.run(["git", "status", "--short", "--branch"], cwd=ROOT, capture_output=True, text=True)
+    try:
+        revision = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True,
+        )
+        status = subprocess.run(
+            ["git", "status", "--short", "--branch"], cwd=ROOT, capture_output=True, text=True,
+        )
+        revision_text = revision.stdout.strip() or "unavailable"
+        status_text = status.stdout
+        git_note = None
+    except FileNotFoundError:
+        # GitHub Desktop can manage the checkout with its bundled Git even when
+        # git.exe is not available to the notebook kernel through Windows PATH.
+        revision_text = "unavailable: git executable is not on this kernel's PATH"
+        status_text = "unavailable"
+        git_note = "Git metadata was skipped; storage diagnostics continued."
     versions = {}
     for package in ("numpy", "h5py", "PyQt6", "pco", "pytest"):
         try:
@@ -360,7 +374,8 @@ def section_1(cfg: Settings) -> dict:
         except importlib.metadata.PackageNotFoundError:
             versions[package] = "not installed"
     result = {"python": sys.executable, "platform": platform.platform(),
-              "revision": revision.stdout.strip(), "git_status": status.stdout,
+              "revision": revision_text, "git_status": status_text,
+              "git_note": git_note,
               "packages": versions, "usb_port_note": cfg.usb_port_note,
               "free_GB": shutil.disk_usage(destination).free / 1e9}
     if cfg.run_offline_tests:
