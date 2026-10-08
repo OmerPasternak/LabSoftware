@@ -26,7 +26,18 @@ from scripts.stress_camera_storage import ReplayCamera
 
 
 class PacedReplayCamera(ReplayCamera):
-    """Deliver prepared frames at a target rate in frames per second."""
+    """Deliver prepared frames at a target rate while permitting writer waits.
+
+    This synthetic source has no physical FIFO and therefore cannot establish
+    how long a real camera tolerates backpressure. If storage stalls, waiting
+    is recorded as schedule lateness instead of reporting invented frame loss.
+    Physical camera drivers remain unpausable and fail closed on a full queue.
+    """
+
+    @property
+    def can_pause_acquisition(self) -> bool:
+        """Allow an offline replay to wait for storage without losing frames."""
+        return True
 
     def __init__(self, width: int, height: int, batch_size: int, fps: float) -> None:
         super().__init__(width, height, batch_size, pattern="noise")
@@ -119,7 +130,11 @@ def run_benchmark(
             "verified_consecutive_frame_ids": True,
             "verified_image_frame_markers": True,
             "kept_data": keep_data,
-            "note": "No camera/USB/trigger is exercised; OS and device caching may still affect timing.",
+            "note": (
+                "No camera/USB/trigger is exercised. Synthetic replay may wait for storage; "
+                "review max_schedule_late_s, and validate physical FIFO tolerance separately. "
+                "OS and device caching may still affect timing."
+            ),
         }
         result["data_path"] = str(path)
         return result
