@@ -272,6 +272,14 @@ def inspect_file(path: Path, cfg: Settings | None = None, full_read: bool = Fals
                   "schema_version": str(attrs["schema_version"]),
                   "compression": images.compression or "none",
                   "trigger_mode": str(attrs["trigger_mode"]), "timestamp_sources": sources,
+                  "writer_queue_batches": (int(attrs["writer_queue_batches"])
+                                             if "writer_queue_batches" in attrs else None),
+                  "writer_queue_capacity_frames": (int(attrs["writer_queue_capacity_frames"])
+                                                     if "writer_queue_capacity_frames" in attrs else None),
+                  "writer_queue_capacity_MiB": (int(attrs["writer_queue_capacity_bytes"]) / 2**20
+                                                 if "writer_queue_capacity_bytes" in attrs else None),
+                  "writer_queue_max_batches_used": (int(attrs["writer_queue_max_batches_used"])
+                                                     if "writer_queue_max_batches_used" in attrs else None),
                   "sample_statistics": sample_stats, "full_pixel_read": full_read,
                   "pixel_sha256": digest.hexdigest() if full_read else None,
                   "metadata_sha256": metadata_digest.hexdigest()}
@@ -576,6 +584,10 @@ def _saved_run_metrics(run: dict) -> dict:
         "total_close_s": run.get("total_close_s"),
         "durable_sync_s": run.get("synced_s"),
         "average_cpu_cores": run.get("average_cpu_cores"),
+        "writer_queue_batches": run.get("writer_queue_batches"),
+        "writer_queue_capacity_frames": run.get("writer_queue_capacity_frames"),
+        "writer_queue_capacity_MiB": run.get("writer_queue_capacity_MiB"),
+        "writer_queue_max_batches_used": run.get("writer_queue_max_batches_used"),
         "sample_statistics": run.get("sample_statistics"),
     }
 

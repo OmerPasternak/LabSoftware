@@ -22,6 +22,7 @@ from ..safe_io import check_disk_space
 
 
 HDF5_SCHEMA_VERSION = "2.0"
+DEFAULT_WRITER_QUEUE_BYTES = 512 * 2**20
 _WINDOWS_RESERVED_NAMES = {
     "CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
     *(f"LPT{i}" for i in range(1, 10)),
@@ -47,6 +48,17 @@ def _frame_chunk_shape(height: int, width: int) -> tuple[int, int, int]:
             if row * col <= max_pixels and row * col > best_rows * best_cols:
                 best_rows, best_cols = row, col
     return 1, best_rows, best_cols
+
+
+def _writer_queue_batches(
+    num_frames: int, batch_size: int, height: int, width: int,
+    byte_budget: int = DEFAULT_WRITER_QUEUE_BYTES,
+) -> int:
+    """Size the bounded writer queue by image bytes, capped by the run length."""
+    batch_frames = min(batch_size, num_frames)
+    batch_bytes = batch_frames * height * width * np.dtype("uint16").itemsize
+    batches_in_run = math.ceil(num_frames / batch_size)
+    return min(batches_in_run, max(1, byte_budget // batch_bytes))
 
 
 def sanitize_filename_component(value: str, fallback: str = "HHG_Scan") -> str:
@@ -217,15 +229,15 @@ class CameraScanManager:
         *,
         run_id: str | None = None,
         batch_size: int = 4,
-        queue_batches: int = 4,
+        queue_batches: int | None = None,
         abort_check: Optional[Callable[[], bool]] = None,
     ) -> tuple[Path, np.ndarray]:
         """Acquire and atomically save one scan step in bounded frame batches.
 
         Units are raw 16-bit ADU, seconds for exposure, and sensor pixels for ROI.
-        The bounded queue overlaps camera capture with HDF5 writing. A mock
-        waits for storage; a physical camera fails the step on backpressure
-        instead of silently losing frames.
+        The byte-bounded queue overlaps camera capture with HDF5 writing and
+        absorbs finite filesystem stalls. A mock waits for storage; a physical
+        camera fails the step if sustained backpressure fills the queue.
         """
         with self._operation("SCANNING"):
             return self._acquire_and_save_step(
@@ -244,15 +256,15 @@ class CameraScanManager:
         *,
         run_id: str | None,
         batch_size: int,
-        queue_batches: int,
+        queue_batches: int | None,
         abort_check: Optional[Callable[[], bool]],
     ) -> tuple[Path, np.ndarray]:
         if not self.camera.is_connected:
             raise RuntimeError("Cannot execute scan step: Camera is disconnected.")
         if num_frames < 1:
             raise ValueError("num_frames must be >= 1.")
-        if batch_size < 1 or queue_batches < 1:
-            raise ValueError("batch_size and queue_batches must be >= 1.")
+        if batch_size < 1 or (queue_batches is not None and queue_batches < 1):
+            raise ValueError("batch_size must be >= 1 and queue_batches must be None or >= 1.")
 
         # HDF5 is only needed for a saved scan, not for opening the GUI or live view.
         import h5py
@@ -266,6 +278,11 @@ class CameraScanManager:
         clean_exp = sanitize_filename_component(experiment_name)
         clean_param = str(param_name).strip() or "Setpoint"
         roi = self.camera.get_roi()
+        height, width = roi[3] - roi[1], roi[2] - roi[0]
+        if queue_batches is None:
+            queue_batches = _writer_queue_batches(num_frames, batch_size, height, width)
+        queue_capacity_frames = min(num_frames, queue_batches * batch_size)
+        queue_capacity_bytes = queue_capacity_frames * height * width * 2
         check_disk_space(self.storage_dir, int(num_frames * (roi[2] - roi[0]) * (roi[3] - roi[1]) * 2 * 1.1))
 
         attrs = {
@@ -296,6 +313,9 @@ class CameraScanManager:
                 "roi_bounds": roi,
                 "storage_compression": self.compression or "none",
                 "trigger_mode": self.camera.get_trigger_mode().value,
+                "writer_queue_batches": int(queue_batches),
+                "writer_queue_capacity_frames": int(queue_capacity_frames),
+                "writer_queue_capacity_bytes": int(queue_capacity_bytes),
         }
         mode = self.camera.get_readout_mode()
         attrs["readout_mode"] = mode.name
@@ -309,6 +329,7 @@ class CameraScanManager:
         written = 0
         producer_error: BaseException | None = None
         producer_complete = False
+        max_pending_batches = 0
 
         def write_batches() -> None:
             """Own the HDF5 handle and drain copied frame batches in order."""
@@ -328,7 +349,6 @@ class CameraScanManager:
                         dtype=h5py.string_dtype(encoding="utf-8"),
                         chunks=(min(256, num_frames),),
                     )
-                    height, width = roi[3] - roi[1], roi[2] - roi[0]
                     options = (
                         {"compression": "gzip", "compression_opts": 1, "shuffle": True}
                         if self.compression == "gzip" else {}
@@ -374,6 +394,7 @@ class CameraScanManager:
                             h5f.attrs["frames_written"] = written
                             h5f.flush()
                     h5f.attrs["frames_written"] = written
+                    h5f.attrs["writer_queue_max_batches_used"] = max_pending_batches
                     if producer_complete and written == num_frames:
                         h5f.attrs["complete"] = True
                     h5f.flush()
@@ -415,6 +436,7 @@ class CameraScanManager:
                     while True:
                         try:
                             pending.put(copied_batch, timeout=0.05)
+                            max_pending_batches = max(max_pending_batches, pending.qsize())
                             break
                         except Full as exc:
                             if writer_errors:
@@ -427,6 +449,8 @@ class CameraScanManager:
                                 raise AcquisitionBackpressure(
                                     f"HDF5 writer queue filled after {captured} frames "
                                     f"at {images.shape[2]}x{images.shape[1]} pixels; "
+                                    f"capacity was {queue_capacity_frames} frames "
+                                    f"({queue_capacity_bytes / 2**20:.1f} MiB); "
                                     "acquisition stopped to avoid frame loss. "
                                     "Use a smaller applied ROI or faster storage."
                                 ) from exc
@@ -511,7 +535,7 @@ class CameraScanManager:
                 try:
                     filepath, latest_frame = self._acquire_and_save_step(
                         experiment_name, step, param_name, value, num_frames,
-                        run_id=run_id, batch_size=4, queue_batches=4,
+                        run_id=run_id, batch_size=4, queue_batches=None,
                         abort_check=abort_check,
                     )
                 except AcquisitionAborted:

@@ -15,7 +15,9 @@ from hhg_control.sequencer.scan_manager import (
     AcquisitionAborted,
     AcquisitionBackpressure,
     CameraScanManager,
+    DEFAULT_WRITER_QUEUE_BYTES,
     _frame_chunk_shape,
+    _writer_queue_batches,
     sanitize_filename_component,
 )
 
@@ -151,6 +153,39 @@ def test_bounded_writer_queue_fails_instead_of_silently_losing_frames(tmp_path):
         assert h5f.attrs["frames_written"] < 20
     assert manager.state == "IDLE"
     camera.close()
+
+
+def test_automatic_writer_queue_absorbs_finite_stall(tmp_path):
+    """The default byte-bounded queue absorbs a finite writer pause."""
+    from scripts.stress_camera_storage import ReplayCamera
+
+    class InitiallySlowWriter(CameraScanManager):
+        def _write_batch(self, image_dset, metadata_dset, start, images, metadata):
+            if start == 0:
+                time.sleep(0.2)
+            super()._write_batch(image_dset, metadata_dset, start, images, metadata)
+
+    camera = ReplayCamera(width=960, height=128, batch_size=4, pattern="noise")
+    camera.connect()
+    manager = InitiallySlowWriter(camera, tmp_path)
+    path, _ = manager.acquire_and_save_step(
+        "finite_stall", 0, "delay_mm", 0.0, 80, batch_size=4,
+    )
+    with h5py.File(path) as h5f:
+        assert bool(h5f.attrs["complete"])
+        assert h5f.attrs["writer_queue_capacity_frames"] == 80
+        assert h5f.attrs["writer_queue_max_batches_used"] > 4
+    camera.close()
+
+
+def test_automatic_writer_queue_is_bounded_by_bytes():
+    batches = _writer_queue_batches(
+        num_frames=10_000, batch_size=16, height=128, width=2560,
+    )
+    batch_bytes = 16 * 128 * 2560 * 2
+    capacity_bytes = batches * batch_bytes
+    assert capacity_bytes <= DEFAULT_WRITER_QUEUE_BYTES
+    assert capacity_bytes > DEFAULT_WRITER_QUEUE_BYTES - batch_bytes
 
 
 def test_acquisition_waits_for_hdf5_dataset_initialization(tmp_path, monkeypatch):
