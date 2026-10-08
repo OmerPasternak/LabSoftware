@@ -559,6 +559,177 @@ def section_8(cfg: Settings) -> dict:
     return result
 
 
+def _saved_run_metrics(run: dict) -> dict:
+    """Select decision-relevant saved-run measurements with explicit units."""
+    return {
+        "file": run.get("file"),
+        "frames": run.get("frames"),
+        "complete": run.get("complete"),
+        "consecutive_frame_ids": run.get("consecutive_ids"),
+        "shape_frame_y_x": run.get("shape_frame_y_x"),
+        "total_fps": run.get("total_fps"),
+        "host_read_fps": run.get("host_read_fps"),
+        "synced_fps": run.get("synced_fps"),
+        "file_MB_per_s": run.get("file_MB_per_s"),
+        "host_interval_median_ms": run.get("host_interval_median_ms"),
+        "host_interval_p99_ms": run.get("host_interval_p99_ms"),
+        "total_close_s": run.get("total_close_s"),
+        "durable_sync_s": run.get("synced_s"),
+        "average_cpu_cores": run.get("average_cpu_cores"),
+        "sample_statistics": run.get("sample_statistics"),
+    }
+
+
+def important_metrics(number: int, report: dict, cfg: Settings, report_path: Path) -> dict:
+    """Build a concise end-of-section summary without overstating acceptance."""
+    width, height = cfg.roi[2] - cfg.roi[0], cfg.roi[3] - cfg.roi[1]
+    summary = {
+        "section": number,
+        "execution_status": report["status"],
+        "source": cfg.source,
+        "report_file": str(report_path.resolve()),
+        "output_directory": str(Path(cfg.output_dir).resolve()),
+        "configured_roi": {"bounds": list(cfg.roi), "width_px": width, "height_px": height},
+        "configured_exposure_ms": cfg.exposure_s * 1000,
+        "configured_target_fps": cfg.target_fps,
+        "batch_size_frames": cfg.batch_size,
+    }
+    if report["status"] == "FAILED":
+        summary["decision"] = "FAILED"
+        summary["error"] = report.get("error")
+        return summary
+
+    result = report["result"]
+    if number == 1:
+        unpaced = result["unpaced_writer"]
+        paced = result["paced_writer"]
+        required = result["required_raw_MB_per_s"]
+        margin_target = required * cfg.storage_margin
+        summary.update({
+            "decision": "READINESS_PASS" if result["readiness_passed"] else "NOT_PASSED",
+            "offline_tests": result["offline_tests"],
+            "free_GB_before_benchmarks": result["free_GB"],
+            "required_raw_MB_per_s": required,
+            "writer_target_with_margin_MB_per_s": margin_target,
+            "unpaced_writer_raw_MB_per_s": unpaced["raw_MB_per_s"],
+            "unpaced_writer_headroom_ratio": unpaced["raw_MB_per_s"] / required,
+            "writer_margin_met": result["provisional_writer_margin_met"],
+            "paced_pipeline_fps": paced["pipeline_fps"],
+            "paced_durable_fps": paced["durable_fps"],
+            "paced_max_schedule_late_ms": paced["max_schedule_late_s"] * 1000,
+            "paced_wait_s": paced["pace_wait_s"],
+            "paced_consecutive_frame_ids": paced["verified_consecutive_frame_ids"],
+            "paced_image_markers_verified": paced["verified_image_frame_markers"],
+            "limitation": result["storage_note"],
+        })
+    elif number == 2:
+        first, second = result["reconnect_readbacks"]
+        summary.update({
+            "decision": "AUTOMATED_CHECKS_PASS",
+            "model": first["sensor"].get("model"),
+            "camera_serial": first["sensor"].get("serial_number"),
+            "applied_roi": first["roi"],
+            "applied_exposure_ms": first["exposure_s"] * 1000,
+            "exposure_difference_us": (first["exposure_s"] - cfg.exposure_s) * 1e6,
+            "readout_mode": first["readout"],
+            "trigger_mode": first["trigger"],
+            "two_reconnect_readbacks_identical": first == second,
+            "roi_limits": first["roi_limits"],
+        })
+    elif number == 3:
+        summary.update({
+            "decision": "AUTOMATED_CHECKS_PASS",
+            "runs": [_saved_run_metrics(run) for run in result["runs"]],
+            "manual_review_required": "Inspect first/middle/last images for scene, orientation and saturation.",
+            "limitation": "Short-run integrity does not establish sustained target-rate operation.",
+        })
+    elif number == 4:
+        summary.update({
+            "decision": (
+                "PROVISIONAL_PASS" if result["provisional_capture_target_met"] is True
+                else "NOT_PASSED" if result["provisional_capture_target_met"] is False
+                else "PENDING_BASELINE"
+            ),
+            "capture_only_median_fps": result["capture_median_fps"],
+            "saved_median_fps": result["saved_median_fps"],
+            "saved_over_capture_ratio": result["saved_over_capture"],
+            "camware_fps": result.get("camware_fps"),
+            "capture_target_fraction": cfg.speed_fraction,
+            "capture_target_met": result["provisional_capture_target_met"],
+            "runs": [
+                {
+                    "capture_only": item["capture_only"],
+                    "saved": _saved_run_metrics(item["saved"]),
+                }
+                for item in result["runs"]
+            ],
+            "pending": result.get("pending"),
+        })
+    elif number == 5:
+        continuous = result["continuous_run"]
+        summary.update({
+            "decision": "AUTOMATED_CHECKS_PASS" if result["duration_target_met"] else "NOT_PASSED",
+            "repeat_runs": [_saved_run_metrics(run) for run in result["repeat_runs"]],
+            "continuous_run": _saved_run_metrics(continuous),
+            "requested_duration_s": result["requested_duration_s"],
+            "observed_acquisition_span_s": result["observed_acquisition_span_s"],
+            "duration_target_met": result["duration_target_met"],
+            "pending_manual_review": result["pending"],
+        })
+    elif number == 6:
+        summary.update({
+            "decision": "AUTOMATED_CHECKS_PASS",
+            "fault_source": result["fault_source"],
+            "verified_outcomes": result["outcomes"],
+            "retained_partial_file_count": len(result["retained_partial_files"]),
+            "retained_partial_files": [str(path) for path in result["retained_partial_files"]],
+            "recovery_run": _saved_run_metrics(result["recovery"]),
+            "pending_manual_review": result["pending"],
+        })
+    elif number == 7:
+        summary.update({
+            "decision": "AUTOMATED_CHECKS_PASS",
+            "files": [
+                {
+                    "file": item["file"],
+                    "frames": item["frames"],
+                    "shape_frame_y_x": item["shape_frame_y_x"],
+                    "consecutive_frame_ids": item["consecutive_ids"],
+                    "full_pixel_read": item["full_pixel_read"],
+                    "file_sha256": item["file_sha256"],
+                    "pixel_sha256": item["pixel_sha256"],
+                    "metadata_sha256": item["metadata_sha256"],
+                }
+                for item in result["files"]
+            ],
+            "copy_comparison": result["copy_comparison"],
+            "limitation": result["note"],
+        })
+    elif number == 8:
+        if result.get("status") == "DEFERRED":
+            summary.update({"decision": "DEFERRED", "reason": result["reason"]})
+        else:
+            summary.update({
+                "decision": (
+                    "COUNT_CHECK_PASS" if result["count_agreement"] is True
+                    else "PENDING_OR_NOT_PASSED"
+                ),
+                "trigger_run": _saved_run_metrics(result),
+                "trigger_mode": result["trigger_mode"],
+                "observed_trigger_pulses": result["observed_trigger_pulses"],
+                "saved_frames": result["frames"],
+                "trigger_count_agreement": result["count_agreement"],
+                "pending_manual_review": result["pending"],
+            })
+    return summary
+
+
+def _print_important_metrics(summary: dict) -> None:
+    """Print one recognizable final block for notebook and terminal users."""
+    print(f"\n=== IMPORTANT METRICS — SECTION {summary['section']} ===")
+    print(json.dumps(summary, indent=2, default=json_default))
+
+
 def execute(number: int, cfg: Settings = CONFIG) -> dict:
     """Run exactly one section and retain a JSON report even when it fails."""
     destination = prepare(cfg)
@@ -571,11 +742,14 @@ def execute(number: int, cfg: Settings = CONFIG) -> dict:
         report["status"] = "EXECUTED"  # Pending/provisional checks remain explicit in result.
     except BaseException as exc:
         report.update(status="FAILED", error=f"{type(exc).__name__}: {exc}")
-        raise
-    finally:
+        report["important_metrics"] = important_metrics(number, report, cfg, path)
         path.write_text(json.dumps(report, indent=2, default=json_default), encoding="utf-8")
-        print(f"Report: {path}")
+        _print_important_metrics(report["important_metrics"])
+        raise
+    report["important_metrics"] = important_metrics(number, report, cfg, path)
+    path.write_text(json.dumps(report, indent=2, default=json_default), encoding="utf-8")
     print(json.dumps(report["result"], indent=2, default=json_default))
+    _print_important_metrics(report["important_metrics"])
     return report
 
 

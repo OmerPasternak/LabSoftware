@@ -25,10 +25,17 @@ def config(tmp_path, monkeypatch):
                         run_offline_tests=False)
 
 
-def test_sections_use_production_writer_and_preserve_copy_hashes(config):
+def test_sections_use_production_writer_and_preserve_copy_hashes(config, capsys):
     identity = lab.section_2(config)
     assert identity["reconnect_readbacks"][0]["sensor"]["model"].endswith("(EMULATOR)")
     short = lab.execute(3, config)
+    output = capsys.readouterr().out
+    assert "=== IMPORTANT METRICS — SECTION 3 ===" in output
+    assert '"total_fps"' in output and '"consecutive_frame_ids": true' in output
+    assert short["important_metrics"]["decision"] == "AUTOMATED_CHECKS_PASS"
+    assert len(short["important_metrics"]["runs"]) == 2
+    saved_report = json.loads(Path(short["important_metrics"]["report_file"]).read_text())
+    assert saved_report["important_metrics"] == short["important_metrics"]
     assert [item["frames"] for item in short["result"]["runs"]] == [3, 9]
     assert all(item["consecutive_ids"] for item in short["result"]["runs"])
     report = lab.section_7(config)
@@ -170,3 +177,41 @@ def test_terminal_runs_only_requested_section_and_deferred_trigger(config):
     assert json.loads(reports[0].read_text())["result"]["status"] == "DEFERRED"
     help_run = subprocess.run([sys.executable, script], capture_output=True, text=True)
     assert help_run.returncode == 0 and "--section" in help_run.stdout
+
+
+def test_important_metrics_cover_all_sections(config):
+    results = {
+        1: lab.section_1(config),
+        2: lab.section_2(config),
+        3: lab.section_3(config),
+        4: lab.section_4(config),
+        5: lab.section_5(config),
+        6: lab.section_6(config),
+        7: lab.section_7(config),
+        8: lab.section_8(config),
+    }
+    expected_decisions = {
+        1: "NOT_PASSED",  # Offline tests are deliberately skipped in this fixture.
+        2: "AUTOMATED_CHECKS_PASS",
+        3: "AUTOMATED_CHECKS_PASS",
+        4: "PENDING_BASELINE",
+        5: "AUTOMATED_CHECKS_PASS",
+        6: "AUTOMATED_CHECKS_PASS",
+        7: "AUTOMATED_CHECKS_PASS",
+        8: "DEFERRED",
+    }
+    for number, result in results.items():
+        report_path = config.output_dir / f"summary_{number}.json"
+        report = {"status": "EXECUTED", "result": result}
+        summary = lab.important_metrics(number, report, config, report_path)
+        assert summary["section"] == number
+        assert summary["decision"] == expected_decisions[number]
+        assert summary["report_file"] == str(report_path.resolve())
+
+
+def test_failed_section_summary_preserves_actionable_error(config):
+    report_path = config.output_dir / "failed.json"
+    report = {"status": "FAILED", "error": "AssertionError: example failure"}
+    summary = lab.important_metrics(3, report, config, report_path)
+    assert summary["decision"] == "FAILED"
+    assert summary["error"] == "AssertionError: example failure"
