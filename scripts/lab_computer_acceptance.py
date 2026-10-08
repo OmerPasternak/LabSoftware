@@ -96,6 +96,10 @@ class Settings:
 
 CONFIG = Settings()
 
+# Camera timing is quantized by the hardware/SDK. Accept readbacks within one
+# microsecond while still reporting and saving the exact applied value.
+EXPOSURE_READBACK_ABS_TOL_S = 1e-6
+
 
 def require(condition: bool, message: str) -> None:
     """Stop a check with an explicit failure reason."""
@@ -179,7 +183,10 @@ def configured_camera(cfg: Settings, trigger=TriggerMode.AUTO_SEQUENCE):
         actual = snapshot(camera)
         require(actual["roi"] == list(cfg.roi), f"Applied ROI differs: {actual['roi']}")
         require(
-            math.isclose(actual["exposure_s"], cfg.exposure_s, rel_tol=1e-5, abs_tol=1e-9),
+            math.isclose(
+                actual["exposure_s"], cfg.exposure_s,
+                rel_tol=1e-5, abs_tol=EXPOSURE_READBACK_ABS_TOL_S,
+            ),
             f"Exposure readback {actual['exposure_s']!r} s differs from requested "
             f"{cfg.exposure_s!r} s",
         )
@@ -217,7 +224,10 @@ def inspect_file(path: Path, cfg: Settings | None = None, full_read: bool = Fals
         if cfg is not None:
             require(roi == list(cfg.roi), "Saved ROI differs from settings")
             require(str(attrs["readout_mode"]) == cfg.readout.name, "Saved shutter mode differs")
-            require(math.isclose(float(attrs["exposure_time_s"]), cfg.exposure_s, rel_tol=1e-5),
+            require(math.isclose(
+                        float(attrs["exposure_time_s"]), cfg.exposure_s,
+                        rel_tol=1e-5, abs_tol=EXPOSURE_READBACK_ABS_TOL_S,
+                    ),
                     "Saved exposure differs")
             if cfg.source == "physical":
                 require("emulator" not in str(attrs["camera_model"]).lower(), "File is simulated")

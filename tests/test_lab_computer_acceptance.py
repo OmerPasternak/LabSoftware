@@ -133,6 +133,18 @@ def test_camera_is_closed_on_settings_mismatch(config, monkeypatch):
     assert closed == [True]
 
 
+def test_camera_exposure_readback_accepts_one_microsecond_quantization(config, monkeypatch):
+    original = lab.MockPcoCamera
+
+    class QuantizedExposure(original):
+        def get_exposure_time(self):
+            return self._exposure_time_s + 0.4e-6
+
+    monkeypatch.setattr(lab, "MockPcoCamera", QuantizedExposure)
+    result = lab.section_2(config)
+    assert result["reconnect_readbacks"][0]["exposure_s"] == pytest.approx(0.0010004)
+
+
 def test_notebook_setup_and_cells_are_executable():
     notebook = json.loads((lab.ROOT / "application tests/lab_computer_acceptance.ipynb").read_text(encoding="utf-8"))
     code_cells = ["".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "code"]
