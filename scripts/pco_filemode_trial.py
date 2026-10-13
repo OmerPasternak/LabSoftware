@@ -7,6 +7,7 @@ external laser-trigger accounting remains a separate acceptance step.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 import importlib.metadata
 import json
@@ -75,6 +76,11 @@ def _decision_input(report: dict, cfg: lab.Settings,
             "durable_raw_equivalent_MB_per_s": synced_median * frame_bytes / 1e6,
             "saved_over_capture_ratio": result["saved_over_capture"],
             "same_settings_camware_fps": result.get("camware_fps"),
+        }
+    elif reference_report is not None:
+        packet["hdf5_section_4"] = {
+            "status": reference_report.get("status"),
+            "error": reference_report.get("error"),
         }
     if report.get("runs"):
         long_run = report["runs"][-1]
@@ -208,10 +214,14 @@ def run(cfg: lab.Settings, *, reference_report: dict | None = None,
         if reference_report.get("section") != 4 or reference_report.get("source") != "physical":
             raise ValueError("Reference must be a physical section 4 report.")
         settings = reference_report.get("settings", {})
+        reference_readout = settings.get("readout")
+        if isinstance(reference_readout, str):
+            reference_readout = reference_readout.rsplit(".", 1)[-1]
+        configured_readout = cfg.readout.name
         if tuple(settings.get("roi", ())) != tuple(cfg.roi):
             raise ValueError("Section 4 reference ROI differs from the direct-file trial.")
         if (settings.get("expected_serial") != cfg.expected_serial
-                or settings.get("readout") != cfg.readout
+                or reference_readout not in (cfg.readout, configured_readout)
                 or float(settings.get("exposure_s", -1)) != cfg.exposure_s):
             raise ValueError("Section 4 reference serial, shutter or exposure differs.")
     destination = lab.prepare(cfg, sum(frames))
@@ -245,7 +255,7 @@ def run(cfg: lab.Settings, *, reference_report: dict | None = None,
             long_run["capture_and_sync_fps"] / cfg.camware_fps
             if cfg.camware_fps is not None and cfg.camware_fps > 0 else None
         )
-        if reference_report is not None:
+        if reference_report is not None and reference_report.get("status") == "EXECUTED":
             section_4 = reference_report["result"]
             hdf5_synced = statistics.median(
                 item["saved"]["synced_fps"] for item in section_4["runs"]
@@ -287,3 +297,80 @@ def run(cfg: lab.Settings, *, reference_report: dict | None = None,
         print(json.dumps(report, indent=2, default=lab.json_default))
         _print_decision_input(report["hard_drive_decision_input"])
     return report
+
+
+def run_hard_drive_decision_test(
+    cfg: lab.Settings,
+    *,
+    output_dir: Path = Path("C:/Users/Public/Documents/@@FPSTEST"),
+) -> dict:
+    """Run the single short physical test used for the drive purchase decision.
+
+    A separate settings object is used so the notebook's normal configuration
+    is not changed. The test always writes to the explicit C: comparison folder
+    and uses the reviewed short profile: one 2,000-frame capture-only/HDF5 run,
+    followed by 20- and 2,000-frame official PCO pcoraw runs. It prints one
+    marked JSON block that contains the matched results to paste into Codex.
+
+    This function connects to the selected physical camera and applies the ROI,
+    exposure, Global Shutter and Auto Sequence settings already shown in the
+    notebook. It does not test external-trigger accounting.
+    """
+    if not cfg.expected_serial:
+        raise ValueError(
+            "Enter CONFIG.expected_serial in the setup cell before running the "
+            "hard-drive decision test."
+        )
+    width = cfg.roi[2] - cfg.roi[0]
+    height = cfg.roi[3] - cfg.roi[1]
+    if (width, height) != (2560, 128):
+        raise ValueError(
+            "This drive-decision test is for the reviewed 2560 x 128 ROI; "
+            f"the setup cell currently specifies {width} x {height}."
+        )
+
+    test_cfg = replace(
+        cfg,
+        source="physical",
+        output_dir=Path(output_dir),
+        batch_size=16,
+        speed_frames=2000,
+        repeats=1,
+        run_offline_tests=False,
+    )
+    print(
+        "HARD-DRIVE DECISION TEST\n"
+        f"Camera serial: {test_cfg.expected_serial}\n"
+        f"Destination: {test_cfg.output_dir}\n"
+        "Profile: 2560 x 128, 1 x 2,000-frame HDF5 run, then official PCO "
+        "20- and 2,000-frame direct-file runs.\n"
+        "Do not open CamWare or the LabSoftware camera GUI until this cell finishes."
+    )
+
+    reference_report = None
+    before = set(test_cfg.output_dir.glob("section_4_*.json")) if test_cfg.output_dir.exists() else set()
+    try:
+        reference_report = lab.execute(4, test_cfg)
+    except Exception as exc:
+        new_reports = sorted(
+            set(test_cfg.output_dir.glob("section_4_*.json")) - before,
+            key=lambda path: path.stat().st_mtime,
+        )
+        if new_reports:
+            reference_report = json.loads(new_reports[-1].read_text(encoding="utf-8"))
+        print(
+            "The current HDF5 path failed, so the test will still try the official "
+            f"PCO direct-file path for comparison: {type(exc).__name__}: {exc}"
+        )
+
+    direct_report = run(
+        test_cfg,
+        reference_report=reference_report,
+        frames=(20, 2000),
+    )
+    return {
+        "settings_used": test_cfg,
+        "hdf5_section_4": reference_report,
+        "pco_direct_file": direct_report,
+        "paste_this": direct_report["hard_drive_decision_input"],
+    }

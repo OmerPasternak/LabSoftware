@@ -238,10 +238,12 @@ def test_notebook_setup_and_cells_are_executable():
     assert short_namespace["CONFIG"].speed_frames == 2000
     assert short_namespace["CONFIG"].repeats == 1
     assert short_namespace["STORAGE_TEST_PROFILE"] == "SHORT (16 / 2,000 / 1)"
-    native_trial_cell = next(source for source in code_cells if "RUN_PCO_FILEMODE_TRIAL" in source)
-    assert "RUN_PCO_FILEMODE_TRIAL = False" in native_trial_cell
+    native_trial_cell = next(
+        source for source in code_cells if "RUN_HARD_DRIVE_DECISION_TEST" in source
+    )
+    assert "RUN_HARD_DRIVE_DECISION_TEST = False" in native_trial_cell
     exec(native_trial_cell, namespace)
-    assert "REPORT_4B" not in namespace
+    assert "HARD_DRIVE_DECISION" not in namespace
     assert code_cells[-1] == "REPORT_8 = lab.execute(8, CONFIG)\n"
 
 
