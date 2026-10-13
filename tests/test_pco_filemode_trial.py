@@ -49,7 +49,9 @@ class FakePco:
         }
 
 
-def test_native_file_trial_checks_counts_pixels_and_ids(tmp_path):
+def test_native_file_trial_checks_counts_pixels_and_ids(tmp_path, monkeypatch):
+    # Offline CI deliberately omits the optional physical-camera SDK.
+    monkeypatch.setattr(filemode.importlib.metadata, "version", lambda package: "2.2.1-test")
     camera = FakePco()
     result = _record_one(camera, tmp_path / "trial.pcoraw", 4, (4, 8), 455.0)
     assert camera.stopped
