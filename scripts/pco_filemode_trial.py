@@ -12,12 +12,98 @@ import importlib.metadata
 import json
 import os
 from pathlib import Path
+import shutil
 import statistics
 import time
 
 import numpy as np
 
 from scripts import lab_computer_acceptance as lab
+
+
+def _decision_input(report: dict, cfg: lab.Settings,
+                    reference_report: dict | None) -> dict:
+    """Build one self-contained block for the final storage decision."""
+    width = cfg.roi[2] - cfg.roi[0]
+    height = cfg.roi[3] - cfg.roi[1]
+    frame_bytes = width * height * 2
+    required_MB_s = frame_bytes * cfg.target_fps / 1e6
+    packet = {
+        "request": (
+            "Use these measured results to decide whether the current acquisition "
+            "is primarily limited by storage, USB/camera capture, or the HDF5 writer. "
+            "Estimate the benefit of replacing the destination drive, state whether "
+            "the official PCO direct-file method is viable, and recommend the minimum "
+            "sustained and margin-tested write speeds for durable target-FPS acquisition."
+        ),
+        "test_status": report.get("status"),
+        "test_error": report.get("error"),
+        "destination": report.get("output_directory"),
+        "free_GB_before_trial": report.get("free_GB_before_trial"),
+        "camera": {
+            "serial_requested": cfg.expected_serial,
+            "settings_readback": report.get("settings_readback"),
+            "roi_width_px": width,
+            "roi_height_px": height,
+            "bytes_per_frame_uint16": frame_bytes,
+            "target_fps": cfg.target_fps,
+            "raw_rate_required_MB_per_s": required_MB_s,
+            "writer_rate_with_margin_MB_per_s": required_MB_s * cfg.storage_margin,
+            "exposure_ms": cfg.exposure_s * 1000,
+            "readout": cfg.readout.name,
+            "trigger_mode_for_this_test": lab.TriggerMode.AUTO_SEQUENCE.value,
+            "binning": "none",
+        },
+        "configured_storage_estimate_MB_per_s": cfg.estimated_storage_MB_per_s,
+        "camware_same_settings_fps": cfg.camware_fps,
+        "hdf5_section_4": None,
+        "pco_direct_file": None,
+        "limitations": [
+            "This short Auto Sequence trial does not validate external trigger accounting.",
+            "A purchase decision should still be confirmed by a sustained run on the final drive.",
+        ],
+    }
+    if reference_report is not None and reference_report.get("status") == "EXECUTED":
+        result = reference_report["result"]
+        synced_values = [item["saved"]["synced_fps"] for item in result["runs"]]
+        synced_median = statistics.median(synced_values)
+        packet["hdf5_section_4"] = {
+            "capture_only_median_fps": result["capture_median_fps"],
+            "saved_through_close_median_fps": result["saved_median_fps"],
+            "durable_synced_fps_each_run": synced_values,
+            "durable_synced_median_fps": synced_median,
+            "durable_raw_equivalent_MB_per_s": synced_median * frame_bytes / 1e6,
+            "saved_over_capture_ratio": result["saved_over_capture"],
+            "same_settings_camware_fps": result.get("camware_fps"),
+        }
+    if report.get("runs"):
+        long_run = report["runs"][-1]
+        packet["pco_direct_file"] = {
+            "frames_requested": long_run.get("frames_requested"),
+            "frames_read_back": long_run.get("frames_read_back"),
+            "consecutive_frame_ids": long_run.get("consecutive_frame_ids"),
+            "recorder_status": long_run.get("recorder_status"),
+            "capture_fps": long_run.get("capture_fps"),
+            "capture_raw_equivalent_MB_per_s": long_run.get(
+                "capture_raw_equivalent_MB_per_s"
+            ),
+            "durable_capture_and_sync_fps": long_run.get("capture_and_sync_fps"),
+            "durable_raw_equivalent_MB_per_s": long_run.get(
+                "capture_and_sync_raw_equivalent_MB_per_s"
+            ),
+            "final_os_fsync_s": long_run.get("final_os_fsync_s"),
+            "file_bytes": long_run.get("file_bytes"),
+            "comparison_with_hdf5": report.get("section_4_comparison"),
+            "short_trial_decision": report.get("decision"),
+        }
+    return packet
+
+
+def _print_decision_input(packet: dict) -> None:
+    """Print a compact block intended to be pasted into a follow-up chat."""
+    print("\n=== COPY FROM HERE — FINAL HARD-DRIVE BOTTLENECK DECISION ===")
+    print(json.dumps(packet, indent=2, default=lab.json_default))
+    print("=== END COPY — FINAL HARD-DRIVE BOTTLENECK DECISION ===")
 
 
 def _read_recorded_frames(cam, frames: int, shape: tuple[int, int]) -> dict:
@@ -134,6 +220,7 @@ def run(cfg: lab.Settings, *, reference_report: dict | None = None,
     report_path = run_dir / "report.json"
     report = {"status": "FAILED", "source": cfg.source,
               "output_directory": str(run_dir), "serial_requested": cfg.expected_serial,
+              "free_GB_before_trial": shutil.disk_usage(destination).free / 1e9,
               "roi_requested": list(cfg.roi), "exposure_s_requested": cfg.exposure_s,
               "readout_requested": cfg.readout.name,
               "trigger_requested": lab.TriggerMode.AUTO_SEQUENCE.value,
@@ -191,8 +278,12 @@ def run(cfg: lab.Settings, *, reference_report: dict | None = None,
         report["error"] = f"{type(exc).__name__}: {exc}"
         raise
     finally:
+        report["hard_drive_decision_input"] = _decision_input(
+            report, cfg, reference_report
+        )
         report_path.write_text(json.dumps(report, indent=2, default=lab.json_default),
                                encoding="utf-8")
         print("\n=== IMPORTANT METRICS — PCO DIRECT FILE TRIAL ===")
         print(json.dumps(report, indent=2, default=lab.json_default))
+        _print_decision_input(report["hard_drive_decision_input"])
     return report
