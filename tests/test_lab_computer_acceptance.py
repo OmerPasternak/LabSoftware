@@ -241,8 +241,14 @@ def test_notebook_setup_and_cells_are_executable():
     native_trial_cell = next(
         source for source in code_cells if "RUN_HARD_DRIVE_DECISION_TEST" in source
     )
-    assert "RUN_HARD_DRIVE_DECISION_TEST = False" in native_trial_cell
-    exec(native_trial_cell, namespace)
+    assert "RUN_HARD_DRIVE_DECISION_TEST = True" in native_trial_cell
+    exec(
+        native_trial_cell.replace(
+            "RUN_HARD_DRIVE_DECISION_TEST = True",
+            "RUN_HARD_DRIVE_DECISION_TEST = False",
+        ),
+        namespace,
+    )
     assert "HARD_DRIVE_DECISION" not in namespace
     assert code_cells[-1] == "REPORT_8 = lab.execute(8, CONFIG)\n"
 
