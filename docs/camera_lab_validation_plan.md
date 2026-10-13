@@ -34,6 +34,12 @@ is not a hardware acceptance result. The notebook now defaults to a centered
   accepted trigger pulse. The exposure field still sets that duration. The
   setting is read back before a scan and stored as HDF5 `trigger_mode`.
   Simulation records the selection but does not wait for real pulses.
+- Notebook section **4B** is an opt-in physical comparison using the pinned
+  `pco` Python package's direct `pcoraw` recorder. It retains full 16-bit
+  sensor pixels, adds no binning or FPS cap, checks every recorder frame ID,
+  and reports capture and post-sync rates beside section 4's HDF5 results.
+  A short pass is provisional until a sustained run and metadata-preserving
+  conversion to the established HDF5/MATLAB schema are validated.
 - A matched software benchmark is available with
   `./.venv/Scripts/python.exe -m scripts.benchmark_simulation_overhead`.
   It times 2 x 1,000 frames at 1740 x 128, 1 ms, using the production HDF5
@@ -55,8 +61,8 @@ is not a hardware acceptance result. The notebook now defaults to a centered
    `camera_model` and serial; never infer source from the image appearance.
 4. Decide the scientific timing requirement. At 128 rows the listed USB
    Global Shutter rate (455 fps) is below a 1 kHz laser, so one saved frame
-   per laser shot is not established. A smaller centered ROI or different
-   interface may help, but must be verified on hardware. Configure and verify
+   per laser shot is not established. Keep the intended unbinned ROI and
+   trigger rate for these comparisons. Configure and verify
    the intended external trigger before claiming laser-shot synchronization.
    On the bench, confirm the actual trigger connector, electrical levels,
    polarity, and timing from the installed camera/manual before connecting the
@@ -65,7 +71,7 @@ is not a hardware acceptance result. The notebook now defaults to a centered
 
 ## Controlled physical trial
 
-1. Begin with the intended 1740 × 128 centered ROI and 1 ms exposure. One
+1. Begin with the intended 2560 × 128 centered ROI and 1 ms exposure. One
    millisecond is shorter than the approximately 2.20 ms period at 455 fps;
    shortening exposure alone is unlikely to remove a readout/transfer limit.
    With external triggering, no frame will arrive until a valid pulse does;
@@ -89,6 +95,12 @@ is not a hardware acceptance result. The notebook now defaults to a centered
    capture is slow, compare the camera SDK/camware baseline with our saved run
    before changing the writer. If capture is fast but the queue fills, profile
    the writer and storage on that PC before changing FIFO or batch settings.
+5. After the identity, short scan and section 4 comparison pass, explicitly
+   enable notebook section 4B on the same drive, serial, ROI, exposure, shutter
+   and Auto Sequence mode. Compare direct-file capture and sync rates with
+   CamWare and HDF5, and require exact counts, no recorder errors, and
+   consecutive frame IDs. Repeat on a new internal NVMe drive if installed.
+   Do not infer external trigger accounting from Auto Sequence results.
 
 ## Acceptance for research use
 

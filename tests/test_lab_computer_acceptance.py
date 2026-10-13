@@ -212,7 +212,7 @@ def test_camera_exposure_readback_accepts_one_microsecond_quantization(config, m
 def test_notebook_setup_and_cells_are_executable():
     notebook = json.loads((lab.ROOT / "application tests/lab_computer_acceptance.ipynb").read_text(encoding="utf-8"))
     code_cells = ["".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "code"]
-    assert len(code_cells) == 9
+    assert len(code_cells) == 10
     for source in code_cells:
         compile(source, "lab_computer_acceptance.ipynb", "exec")
     namespace = {}
@@ -238,6 +238,10 @@ def test_notebook_setup_and_cells_are_executable():
     assert short_namespace["CONFIG"].speed_frames == 2000
     assert short_namespace["CONFIG"].repeats == 1
     assert short_namespace["STORAGE_TEST_PROFILE"] == "SHORT (16 / 2,000 / 1)"
+    native_trial_cell = next(source for source in code_cells if "RUN_PCO_FILEMODE_TRIAL" in source)
+    assert "RUN_PCO_FILEMODE_TRIAL = False" in native_trial_cell
+    exec(native_trial_cell, namespace)
+    assert "REPORT_4B" not in namespace
     assert code_cells[-1] == "REPORT_8 = lab.execute(8, CONFIG)\n"
 
 
