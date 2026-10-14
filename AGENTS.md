@@ -55,6 +55,43 @@ Whenever planning or adding a new instrument:
 - Version control: git, from the first file. Commit in small, logical chunks with descriptive messages. Never suggest force-pushing to a shared branch or rewriting history the student has already pushed, without explaining the risk first.
 - Testing: use mock drivers for sequencer tests and run the tests relevant to each code change. Use judgment about adjacent risks; small, focused edits do not require the full suite every time. Run the full suite periodically, after broad or high-risk changes, and before commits or pushes when its coverage is warranted. Documentation-only edits usually need no test run; report what was and was not checked.
 
+## GITHUB ACTIONS AND PRE-PUSH VALIDATION
+
+### Match the environment that actually runs CI
+
+- Read `.github/workflows/tests.yml` and `pyproject.toml` before choosing validation. As reviewed on 2026-10-14, CI uses `windows-latest`, Python 3.10/3.11/3.12, `python -m pip install ".[test]"`, and `python -m pytest -q`. Re-read these files when they change; do not assume this snapshot stays current.
+- Use the existing `.venv` for ordinary development, but its installed hardware SDK and extra packages can hide CI failures. For dependency, packaging, optional-SDK, or pytest-configuration changes, also validate in an isolated environment with only `.[test]` installed. Do not uninstall packages from the working lab environment to simulate CI.
+- Before a code/test push, run the full offline suite on the final proposed state. For Python compatibility, timing/threading, or Windows-path changes, validate the affected tests across the workflow's Python versions where available, especially 3.10. Report unavailable versions explicitly; a 3.12 pass does not establish a 3.10 pass. Documentation-only changes normally need only a checked diff.
+- For packaging, ignored-directory, or pytest-path changes, validate from a fresh checkout/export containing the proposed tracked files, without copied caches or local data folders. Confirm the configured pytest base-temp parent is present in Git (`data/test_artifacts/pytest/.gitkeep` currently provides it). An alternate `--basetemp` can diagnose local permissions but does not validate the default CI setup.
+
+### Design offline tests to survive a clean Windows runner
+
+- Keep optional vendor-module symbols defined even when import fails (for example, `pco = None`), and patch the module attribute used by the code under test. Fake camera objects alone do not isolate SDK access: also stub distribution-version lookups, SDK imports, device discovery, and other vendor-dependent calls reached by the test. Offline tests must pass without installing `hardware-pco` or contacting a camera.
+- Never assume `tmp_path` or the checkout is on C:. GitHub's Windows checkout has been on D:, so a temporary folder and `D:/camera_test` can resolve to the same drive. Mock drive identity, free-space queries, and physical acquisition for disk-comparison tests while retaining the production different-drive validation. Keep actual test writes small and inside temporary folders; a simulated multi-GB trial must not allocate that volume or write to a lab drive.
+- Synchronize concurrency tests with explicit events and bounded waits for the condition being asserted. A writer-start event does not prove the camera producer has already advanced. Release gates and join worker threads in `finally` so failed assertions cannot leave blocked workers behind.
+- Avoid asserting elapsed time is at least exactly the requested `sleep()` duration. The CI fsync test measured 0.14855 s and 0.14982 s for a requested 0.15 s delay. Prefer a controlled clock for timing logic; when exercising real elapsed time, use a justified tolerance that still detects the intended slow stage. Preserve the behavioral assertion (such as identifying fsync as the bottleneck), and rerun affected timing tests across supported versions when possible. Do not weaken production integrity checks to accommodate test scheduling.
+
+### Check what will be pushed, then inspect its result
+
+- Confirm checkout path, branch, remote, `git status`, and the proposed diff before committing or pushing. Preserve unrelated local edits. A passing working tree can include an uncommitted fix that the pushed commit lacks: verify every required fix and test is included in the proposed commits, then validate that state. Revalidate after subsequent code/test edits.
+- Push only with explicit user authorization. Once an authorized push is made, inspect the Actions run for that exact commit SHA and every matrix job. Report local validation and remote CI results separately; an accepted push is not a passing workflow.
+- If CI fails, read each failed job's pytest summary and traceback, group shared causes, and reproduce the failure in the matching environment. Carry known failures forward until resolved; rerunning or pushing unrelated work does not establish a fix. Do not skip tests, add hardware dependencies to offline CI, or repeatedly retry a failing run merely to obtain green status.
+- Treat action-runtime deprecation warnings separately from test failures. Historical Node.js 20 warnings were addressed by updating checkout/setup-python actions, but the failing pytest tracebacks still required their own fixes.
+
+### Historical failure evidence
+
+Reviewed all 26 available workflow runs and all 15 failed matrix jobs on 2026-10-14. Seven runs failed; the table covers every failed run. These are historical observations, not a claim that the current commit passes CI.
+
+| Failed run | Observed error | Prevention |
+| --- | --- | --- |
+| [#1](https://github.com/OmerPasternak/LabSoftware/actions/runs/35740475971) (all Python versions) | Two PCO contract tests raised `AttributeError`: the driver module had no `pco` attribute when the SDK was absent. | Define the optional symbol on both import paths; test without the SDK. Fixed in `7251df8`. |
+| [#8](https://github.com/OmerPasternak/LabSoftware/actions/runs/37597067505) (all versions) | 55 setup errors: `FileNotFoundError` for the configured pytest temporary directory in a clean checkout. | Track the required parent directory and exercise the default pytest command from a fresh checkout. Fixed in `51b42f0`. |
+| [#9](https://github.com/OmerPasternak/LabSoftware/actions/runs/37598446172) (3.10) | Writer-overlap test asserted `camera.calls > 1` before the producer advanced. | Wait for a producer event instead of assuming thread order. Fixed in `16c625e`. |
+| [#21](https://github.com/OmerPasternak/LabSoftware/actions/runs/38391643498) (all versions) | Fake-camera trial still queried installed `pco` metadata and raised `PackageNotFoundError`. | Stub the version lookup as well as the camera. Fixed in `5fc7e89`. |
+| [#24](https://github.com/OmerPasternak/LabSoftware/actions/runs/38537887921) (3.10) | Slow-fsync test measured 0.14855 s against a strict 0.15 s minimum. | Use controlled timing or a justified tolerance and test the oldest supported Python. |
+| [#25](https://github.com/OmerPasternak/LabSoftware/actions/runs/38540853997) (all versions) | Drive-comparison test rejected its destinations as being on the same drive. | Simulate C:/D: identity explicitly; `tmp_path` may actually be on D:. Test adjusted in `0314c1b`. |
+| [#26](https://github.com/OmerPasternak/LabSoftware/actions/runs/38544843414) (3.10) | Slow-fsync test recurred: 0.14982 s against 0.15 s. | Ensure the tested tolerance fix is committed and included in the pushed SHA; do not rely on an uncommitted local fix. |
+
 ## SAFETY AND HARDWARE-RISK RULES
 
 - Never write code that sends commands to real hardware without the student reviewing it first, especially anything involving motorized stages, laser shutters/interlocks, high voltage, or gas delivery. Flag any parameter change that could exceed a physically reasonable range (e.g., stage travel limits, exposure/gain limits) and ask for confirmation rather than assuming defaults.
