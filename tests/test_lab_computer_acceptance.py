@@ -45,10 +45,13 @@ def test_ram_buffer_plan_bridges_five_minutes_only_at_the_assumed_hdd_rate():
 def test_sections_use_production_writer_and_preserve_copy_hashes(config, capsys):
     identity = lab.section_2(config)
     assert identity["reconnect_readbacks"][0]["sensor"]["model"].endswith("(EMULATOR)")
+    capsys.readouterr()
     short = lab.execute(3, config)
     output = capsys.readouterr().out
-    assert "=== IMPORTANT METRICS — SECTION 3 ===" in output
-    assert '"total_fps"' in output and '"consecutive_frame_ids": true' in output
+    assert output == ""
+    log = Path(short["log_file"]).read_text(encoding="utf-8")
+    assert "=== IMPORTANT METRICS — SECTION 3 ===" in log
+    assert '"total_fps"' in log and '"consecutive_frame_ids": true' in log
     assert short["important_metrics"]["decision"] == "AUTOMATED_CHECKS_PASS"
     assert len(short["important_metrics"]["runs"]) == 2
     first_timing = short["important_metrics"]["runs"][0]["pipeline_stage_timing_s"]
@@ -76,7 +79,34 @@ def test_sections_use_production_writer_and_preserve_copy_hashes(config, capsys)
         lab.inspect_file(copy)
 
 
-def test_section_3_review_displays_first_middle_and_last_frames(config, monkeypatch):
+def test_quiet_section_failure_is_saved_without_notebook_output(config, monkeypatch, capsys):
+    """File-only notebook execution retains failures for review instead of printing."""
+    def fail_section(cfg):
+        print("progress before failure")
+        raise RuntimeError("simulated section failure")
+
+    monkeypatch.setitem(lab.SECTIONS, 3, fail_section)
+    report = lab.execute(3, config, raise_on_error=False)
+    assert capsys.readouterr().out == ""
+    assert report["status"] == "FAILED"
+    assert "simulated section failure" in report["error"]
+    report_file = Path(report["important_metrics"]["report_file"])
+    assert json.loads(report_file.read_text(encoding="utf-8"))["status"] == "FAILED"
+    assert "progress before failure" in Path(report["log_file"]).read_text(encoding="utf-8")
+
+
+def test_quiet_section_interrupt_still_propagates(config, monkeypatch):
+    """An interrupted notebook remains interruptible even with quiet failure reports."""
+    def interrupt_section(cfg):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setitem(lab.SECTIONS, 3, interrupt_section)
+    with pytest.raises(KeyboardInterrupt):
+        lab.execute(3, config, raise_on_error=False)
+    assert list(config.output_dir.glob("section_3_*.json"))
+
+
+def test_section_3_review_saves_first_middle_and_last_frames(config, monkeypatch):
     import matplotlib.pyplot as plt
 
     report = {"result": lab.section_3(config)}
@@ -85,7 +115,8 @@ def test_section_3_review_displays_first_middle_and_last_frames(config, monkeypa
     figure = lab.show_section_3_review_images(report)
     try:
         image_axes = [axis for axis in figure.axes if axis.images]
-        assert shown == [True]
+        assert shown == []
+        assert Path(report["review_image"]).is_file()
         assert len(image_axes) == 6
         assert "frame 1/3" in image_axes[0].get_title()
         assert "frame 2/3" in image_axes[1].get_title()
@@ -251,7 +282,7 @@ def test_notebook_setup_and_cells_are_executable():
         namespace,
     )
     assert "HARD_DRIVE_DECISION" not in namespace
-    assert code_cells[-1] == "REPORT_8 = lab.execute(8, CONFIG)\n"
+    assert code_cells[-1] == "REPORT_8 = lab.execute(8, CONFIG, raise_on_error=False)\n"
 
 
 def test_terminal_runs_only_requested_section_and_deferred_trigger(config):

@@ -7,9 +7,11 @@ external laser-trigger accounting remains a separate acceptance step.
 
 from __future__ import annotations
 
+from contextlib import redirect_stdout
 from dataclasses import replace
 from datetime import datetime, timezone
 import importlib.metadata
+import io
 import json
 import os
 from pathlib import Path, PureWindowsPath
@@ -353,6 +355,40 @@ def run_hard_drive_decision_test(
     c_output_dir: Path = Path("C:/Users/Public/Documents/@@FPSTEST"),
     d_output_dir: Path = Path("D:/HHG measurements/@@FPSTEST"),
     max_output_gb_per_drive: float = 30.0,
+    print_output: bool = False,
+) -> dict:
+    """Save the reviewed physical comparison and its log without printing.
+
+    Camera settings and output limits are unchanged. Detailed progress and
+    Section 4 output are retained in execution.log beside comparison.json.
+    Preflight errors still propagate to the notebook before camera recording.
+    """
+    progress = io.StringIO()
+    with redirect_stdout(progress):
+        result = _run_hard_drive_decision_test(
+            cfg, c_output_dir=c_output_dir, d_output_dir=d_output_dir,
+            max_output_gb_per_drive=max_output_gb_per_drive,
+        )
+    report_path = Path(result["report_file"])
+    log_path = report_path.with_name("execution.log")
+    log_path.write_text(progress.getvalue(), encoding="utf-8")
+    result["paste_this"]["execution_log"] = str(log_path)
+    result["paste_this"]["report_file"] = str(report_path)
+    report_path.write_text(
+        json.dumps(result["comparison"], indent=2, default=lab.json_default),
+        encoding="utf-8",
+    )
+    if print_output:
+        _print_decision_input(result["paste_this"])
+    return result
+
+
+def _run_hard_drive_decision_test(
+    cfg: lab.Settings,
+    *,
+    c_output_dir: Path = Path("C:/Users/Public/Documents/@@FPSTEST"),
+    d_output_dir: Path = Path("D:/HHG measurements/@@FPSTEST"),
+    max_output_gb_per_drive: float = 30.0,
 ) -> dict:
     """Compare PCO .pcoraw and production HDF5 writes on C: and D:.
 
@@ -559,15 +595,9 @@ def run_hard_drive_decision_test(
     report_path.write_text(
         json.dumps(summary, indent=2, default=lab.json_default), encoding="utf-8"
     )
-    print("\n=== C: VS D: PCORAW AND HDF5 DRIVE COMPARISON ===")
-    print(json.dumps(summary, indent=2, default=lab.json_default))
-    print(f"Comparison report saved to: {report_path}")
-    print("=== COPY FROM HERE — FINAL HARD-DRIVE BOTTLENECK DECISION ===")
-    print(json.dumps(summary["hard_drive_decision_input"], indent=2,
-                     default=lab.json_default))
-    print("=== END COPY — FINAL HARD-DRIVE BOTTLENECK DECISION ===")
     return {"settings_used": common_cfg, "drives": drive_cfgs,
-            "comparison": summary, "paste_this": summary["hard_drive_decision_input"]}
+            "comparison": summary, "paste_this": summary["hard_drive_decision_input"],
+            "report_file": str(report_path)}
 
 
 def _destination_free_bytes(path: Path) -> int:

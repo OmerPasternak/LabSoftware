@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from types import SimpleNamespace
+import json
 
 import numpy as np
 import pytest
@@ -126,7 +127,7 @@ def test_decision_input_is_self_contained_and_copyable(capsys):
 
 @pytest.mark.parametrize("fail_d_hdf5", [False, True])
 def test_one_cell_drive_test_compares_both_formats_with_per_drive_cap(
-    tmp_path, monkeypatch, fail_d_hdf5,
+    tmp_path, monkeypatch, fail_d_hdf5, capsys,
 ):
     cfg = Settings(expected_serial="12345")
     observed = {}
@@ -196,7 +197,6 @@ def test_one_cell_drive_test_compares_both_formats_with_per_drive_cap(
             "durable_raw_equivalent_MB_per_s": 249.0368,
         },
     )
-    monkeypatch.setattr(filemode, "_print_decision_input", lambda packet: None)
     result = run_hard_drive_decision_test(
         cfg,
         c_output_dir=tmp_path,
@@ -225,6 +225,14 @@ def test_one_cell_drive_test_compares_both_formats_with_per_drive_cap(
     assert result["paste_this"]["C"]["pcoraw"]["frames_processed"] == expected_frames
     assert result["paste_this"]["C"]["hdf5"]["frames"] == expected_frames
     assert result["paste_this"]["C"]["combined_output_GB"] < 30.0
+    assert capsys.readouterr().out == ""
+    packet = result["paste_this"]
+    assert packet["status"] == result["paste_this"]["status"]
+    log_path = Path(packet["execution_log"])
+    assert "Both destinations were preflighted" in log_path.read_text(encoding="utf-8")
+    assert Path(packet["report_file"]).is_file()
+    persisted = json.loads(Path(packet["report_file"]).read_text(encoding="utf-8"))
+    assert persisted["hard_drive_decision_input"] == packet
 
 
 def test_drive_id_distinguishes_windows_drive_letters():

@@ -23,7 +23,7 @@ upper-exclusive sensor pixels. Reports and acquired HDF5 files are retained.
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 import hashlib
@@ -490,8 +490,8 @@ def section_3(cfg: Settings) -> dict:
     return {"runs": runs}
 
 
-def show_section_3_review_images(report: dict):
-    """Display the first, middle and last saved frame from every Section 3 run.
+def show_section_3_review_images(report: dict, *, display: bool = False):
+    """Save the first, middle and last frame panels; display only when requested.
 
     The three panels in each row share one percentile-based ADU scale so that
     brightness changes remain visible. Only the review frames are read from
@@ -538,12 +538,23 @@ def show_section_3_review_images(report: dict):
             axis.set_xlabel("ROI x pixel")
             axis.set_ylabel("ROI y pixel")
         figure.colorbar(last_image, ax=list(axes[row]), label="ADU (shared scale for this run)")
-        print(f"Review row {row + 1}: {path} — frames {[index + 1 for index in indices]}")
     figure.suptitle(
         "Section 3 visual review — first, middle and last saved frames\n"
         "Each row shares an ADU scale; the thin 2560×128 ROI is stretched vertically for inspection."
     )
-    plt.show()
+    report_file = report.get("important_metrics", {}).get("report_file")
+    review_path = (Path(report_file).with_suffix(".png") if report_file else
+                   Path(runs[0]["file"]).with_suffix(".review.png"))
+    figure.savefig(review_path, dpi=150)
+    report["review_image"] = str(review_path)
+    if report_file:
+        Path(report_file).write_text(
+            json.dumps(report, indent=2, default=json_default), encoding="utf-8",
+        )
+    if display:
+        plt.show()
+    else:
+        plt.close(figure)
     return figure
 
 
@@ -875,26 +886,38 @@ def _print_important_metrics(summary: dict) -> None:
     print(json.dumps(summary, indent=2, default=json_default))
 
 
-def execute(number: int, cfg: Settings = CONFIG) -> dict:
-    """Run exactly one section and retain a JSON report even when it fails."""
-    destination = prepare(cfg)
+def execute(number: int, cfg: Settings = CONFIG, *, print_output: bool = False,
+            raise_on_error: bool = True) -> dict:
+    """Run one section, saving JSON and a log without printing by default.
+
+    Notebook cells use raise_on_error=False to keep ordinary failures in the
+    report. Interrupts always propagate; callers needing fail-fast behaviour
+    retain the default raise_on_error=True. No hardware is opened on import.
+    """
+    destination = Path(cfg.output_dir).resolve()
+    destination.mkdir(parents=True, exist_ok=True)
     report = {"section": number, "utc": datetime.now(timezone.utc).isoformat(),
               "source": cfg.source, "settings": asdict(cfg),
               "hardware_acceptance": "not automatically certified; review section benchmarks"}
     path = destination / f"section_{number}_{datetime.now(timezone.utc):%Y%m%dT%H%M%S_%fZ}.json"
-    try:
-        report["result"] = SECTIONS[number](cfg)
-        report["status"] = "EXECUTED"  # Pending/provisional checks remain explicit in result.
-    except BaseException as exc:
-        report.update(status="FAILED", error=f"{type(exc).__name__}: {exc}")
+    log_path = path.with_suffix(".log")
+    report["log_file"] = str(log_path)
+    failure = None
+    with log_path.open("w", encoding="utf-8") as log, redirect_stdout(log):
+        try:
+            prepare(cfg)
+            report["result"] = SECTIONS[number](cfg)
+            report["status"] = "EXECUTED"  # Pending checks remain explicit.
+        except BaseException as exc:
+            failure = exc
+            report.update(status="FAILED", error=f"{type(exc).__name__}: {exc}")
         report["important_metrics"] = important_metrics(number, report, cfg, path)
         path.write_text(json.dumps(report, indent=2, default=json_default), encoding="utf-8")
         _print_important_metrics(report["important_metrics"])
-        raise
-    report["important_metrics"] = important_metrics(number, report, cfg, path)
-    path.write_text(json.dumps(report, indent=2, default=json_default), encoding="utf-8")
-    print(json.dumps(report["result"], indent=2, default=json_default))
-    _print_important_metrics(report["important_metrics"])
+    if print_output:
+        print(log_path.read_text(encoding="utf-8"), end="")
+    if failure is not None and (raise_on_error or isinstance(failure, (KeyboardInterrupt, SystemExit))):
+        raise failure
     return report
 
 
