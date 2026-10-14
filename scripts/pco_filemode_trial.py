@@ -61,6 +61,8 @@ def _decision_input(report: dict, cfg: lab.Settings,
         "pco_direct_file": None,
         "limitations": [
             "This short Auto Sequence trial does not validate external trigger accounting.",
+            "PCO pixel readback may be unavailable for the installed file DLL; recorder "
+            "counts and file size do not independently verify image pixels or frame IDs.",
             "A purchase decision should still be confirmed by a sustained run on the final drive.",
         ],
     }
@@ -88,6 +90,8 @@ def _decision_input(report: dict, cfg: lab.Settings,
             "frames_requested": long_run.get("frames_requested"),
             "frames_read_back": long_run.get("frames_read_back"),
             "consecutive_frame_ids": long_run.get("consecutive_frame_ids"),
+            "pixel_readback_status": long_run.get("pixel_readback_status"),
+            "pixel_readback_error": long_run.get("pixel_readback_error"),
             "recorder_status": long_run.get("recorder_status"),
             "capture_fps": long_run.get("capture_fps"),
             "capture_raw_equivalent_MB_per_s": long_run.get(
@@ -141,7 +145,18 @@ def _read_recorded_frames(cam, frames: int, shape: tuple[int, int]) -> dict:
         last_id = frame_id
         previous_id = frame_id
     return {"frames_read_back": frames, "consecutive_frame_ids": True,
+            "pixel_readback_status": "VERIFIED",
             "first_frame_id": first_id, "last_frame_id": last_id}
+
+
+def _readback_unavailable_error(exc: Exception) -> bool:
+    """Identify PCO's file-DLL unsupported readback response without hiding other errors."""
+    message = str(exc).lower()
+    return (
+        "0x80123004" in message
+        and "file dll" in message
+        and "option is not available" in message
+    )
 
 
 def _record_one(cam, directory: Path, frames: int, shape: tuple[int, int],
@@ -196,7 +211,21 @@ def _record_one(cam, directory: Path, frames: int, shape: tuple[int, int],
         os.fsync(handle.fileno())
     synced_s = time.perf_counter() - started
     verification_started = time.perf_counter()
-    checked = _read_recorded_frames(cam, frames, shape)
+    try:
+        checked = _read_recorded_frames(cam, frames, shape)
+    except Exception as exc:
+        if not _readback_unavailable_error(exc):
+            raise
+        # Some installed PCO file-DLL combinations successfully write pcoraw
+        # but do not implement Recorder.copy_image(). Preserve the valid file,
+        # recorder counts, and throughput timings while making pixel/ID
+        # verification explicitly unavailable in the report.
+        checked = {
+            "frames_read_back": None,
+            "consecutive_frame_ids": None,
+            "pixel_readback_status": "UNAVAILABLE",
+            "pixel_readback_error": str(exc),
+        }
     verification_s = time.perf_counter() - verification_started
     raw_bytes = frames * shape[0] * shape[1] * 2
     return {
@@ -298,8 +327,9 @@ def run(cfg: lab.Settings, *, reference_report: dict | None = None,
         report["status"] = "EXECUTED"
         report["pending"] = (
             "Repeat on the final drive for a sustained run, validate independent "
-            "trigger counts later, and prove pcoraw-to-HDF5/MATLAB metadata conversion "
-            "before using direct file mode for research scans."
+            "trigger counts later, verify pcoraw image contents with a supported reader, "
+            "and prove pcoraw-to-HDF5/MATLAB metadata conversion before using direct "
+            "file mode for research scans."
         )
     except BaseException as exc:
         report["error"] = f"{type(exc).__name__}: {exc}"
