@@ -391,8 +391,8 @@ def run_hard_drive_decision_test(
     overhead_reserve_bytes = 2_000_000_000
     free_space_reserve_bytes = 100_000_000
     free_by_drive = {
-        "C": shutil.disk_usage(c_output_dir.resolve()).free,
-        "D": shutil.disk_usage(d_output_dir.resolve()).free,
+        "C": _destination_free_bytes(c_output_dir),
+        "D": _destination_free_bytes(d_output_dir),
     }
     tightest_free_bytes = min(free_by_drive.values())
     # There are two same-sized outputs per drive. lab.prepare's 1.5x free-space
@@ -528,10 +528,10 @@ def run_hard_drive_decision_test(
             break
         summary[drive] = drive_summary
     if summary["C"] is not None and summary["D"] is not None:
-        c_pco = summary["C"].get("pcoraw", {}).get("durable_raw_equivalent_MB_per_s")
-        d_pco = summary["D"].get("pcoraw", {}).get("durable_raw_equivalent_MB_per_s")
-        c_hdf5 = summary["C"].get("hdf5", {}).get("durable_raw_equivalent_MB_per_s")
-        d_hdf5 = summary["D"].get("hdf5", {}).get("durable_raw_equivalent_MB_per_s")
+        c_pco = (summary["C"].get("pcoraw") or {}).get("durable_raw_equivalent_MB_per_s")
+        d_pco = (summary["D"].get("pcoraw") or {}).get("durable_raw_equivalent_MB_per_s")
+        c_hdf5 = (summary["C"].get("hdf5") or {}).get("durable_raw_equivalent_MB_per_s")
+        d_hdf5 = (summary["D"].get("hdf5") or {}).get("durable_raw_equivalent_MB_per_s")
         summary["comparison"] = {
             "pcoraw_D_over_C_durable_rate_ratio": d_pco / c_pco
             if c_pco and d_pco is not None else None,
@@ -568,6 +568,14 @@ def run_hard_drive_decision_test(
     print("=== END COPY — FINAL HARD-DRIVE BOTTLENECK DECISION ===")
     return {"settings_used": common_cfg, "drives": drive_cfgs,
             "comparison": summary, "paste_this": summary["hard_drive_decision_input"]}
+
+
+def _destination_free_bytes(path: Path) -> int:
+    """Read free bytes from an existing ancestor before creating a test folder."""
+    probe = path.resolve()
+    while not probe.exists() and probe.parent != probe:
+        probe = probe.parent
+    return shutil.disk_usage(probe).free
 
 
 def _drive_id(path: Path) -> str:

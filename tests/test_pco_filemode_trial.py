@@ -124,8 +124,9 @@ def test_decision_input_is_self_contained_and_copyable(capsys):
     assert "END COPY — FINAL HARD-DRIVE BOTTLENECK DECISION" in output
 
 
+@pytest.mark.parametrize("fail_d_hdf5", [False, True])
 def test_one_cell_drive_test_compares_both_formats_with_per_drive_cap(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, fail_d_hdf5,
 ):
     cfg = Settings(expected_serial="12345")
     observed = {}
@@ -165,6 +166,8 @@ def test_one_cell_drive_test_compares_both_formats_with_per_drive_cap(
     def fake_execute(number, test_cfg):
         assert number == 4
         observed.setdefault("hdf5", []).append((test_cfg.output_dir, test_cfg.speed_frames))
+        if fail_d_hdf5 and len(observed["hdf5"]) == 2:
+            raise RuntimeError("simulated D: HDF5 failure")
         hdf5_path = tmp_path / f"hdf5_{len(observed['hdf5'])}.h5"
         hdf5_path.write_bytes(b"mock HDF5 payload")
         return {
@@ -206,9 +209,15 @@ def test_one_cell_drive_test_compares_both_formats_with_per_drive_cap(
     assert len(observed["runs"]) == 2
     assert all(frames == (expected_frames,) and not emit for _, frames, emit in observed["runs"])
     assert len(observed["hdf5"]) == 2
-    assert result["comparison"]["status"] == "EXECUTED"
+    assert result["comparison"]["status"] == ("PARTIAL" if fail_d_hdf5 else "EXECUTED")
     assert result["comparison"]["comparison"]["pcoraw_D_over_C_durable_rate_ratio"] == 1.0
-    assert result["comparison"]["comparison"]["hdf5_D_over_C_durable_rate_ratio"] == 1.0
+    if fail_d_hdf5:
+        assert result["paste_this"]["D"]["hdf5"] is None
+        assert "simulated D: HDF5 failure" in result["paste_this"]["D"]["error"]
+        assert result["comparison"]["comparison"]["hdf5_D_over_C_durable_rate_ratio"] is None
+        assert list(tmp_path.glob("PCO_C_VS_D_COMPARISON_*/comparison.json"))
+    else:
+        assert result["comparison"]["comparison"]["hdf5_D_over_C_durable_rate_ratio"] == 1.0
     assert cfg.source == "mock"
     assert result["settings_used"].source == "physical"
     assert result["settings_used"].output_dir == cfg.output_dir
@@ -221,6 +230,18 @@ def test_one_cell_drive_test_compares_both_formats_with_per_drive_cap(
 def test_drive_id_distinguishes_windows_drive_letters():
     assert filemode._drive_id(Path(r"C:\camera_test")) == "c:"
     assert filemode._drive_id(Path(r"D:\camera_test")) == "d:"
+
+
+def test_free_space_probe_accepts_new_destination(tmp_path, monkeypatch):
+    """A new nested test folder uses its existing ancestor's free space."""
+    probes = []
+    monkeypatch.setattr(filemode.shutil, "disk_usage", lambda path: (
+        probes.append(path) or SimpleNamespace(free=48_000_000_000)
+    ))
+    destination = tmp_path / "new" / "camera_test"
+    assert filemode._destination_free_bytes(destination) == 48_000_000_000
+    assert probes == [tmp_path.resolve()]
+    assert not destination.exists()
 
 
 def test_one_cell_drive_test_requires_serial_before_camera_use(tmp_path):

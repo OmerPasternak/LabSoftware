@@ -1,5 +1,7 @@
 from pathlib import Path
 import time
+from types import SimpleNamespace
+
 """Verify that the paced offline benchmark uses and checks the scan writer."""
 
 from hhg_control.sequencer.scan_manager import CameraScanManager
@@ -50,15 +52,27 @@ def test_paced_pipeline_identifies_slow_final_fsync(monkeypatch, tmp_path):
     from scripts import benchmark_capture_pipeline as benchmark
 
     original_fsync = benchmark.os.fsync
+    clock_offset = 0.0
+
+    def controlled_clock():
+        return time.perf_counter() + clock_offset
 
     def slow_fsync(file_descriptor):
-        time.sleep(0.15)
-        return original_fsync(file_descriptor)
+        nonlocal clock_offset
+        result = original_fsync(file_descriptor)
+        clock_offset += 1.0
+        return result
 
+    # Advance only this benchmark's clock after the real durability call.
+    # Windows sleep timing cannot make the simulated one-second delay shorter.
+    monkeypatch.setattr(benchmark, "time", SimpleNamespace(
+        perf_counter=controlled_clock, sleep=time.sleep,
+    ))
     monkeypatch.setattr(benchmark.os, "fsync", slow_fsync)
     result = run_benchmark(
         tmp_path, frames=8, width=16, height=8,
         fps=100.0, batch_size=2,
     )
-    assert result["stage_timing_s"]["final_os_fsync"] >= 0.15
+    assert result["stage_timing_s"]["final_os_fsync"] >= 1.0 - 1e-6
+    assert result["durable_s"] - result["pipeline_s"] >= 1.0 - 1e-6
     assert result["bottleneck_diagnosis"]["dominant_stage"] == "final_os_fsync"
