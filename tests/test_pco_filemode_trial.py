@@ -123,48 +123,55 @@ def test_decision_input_is_self_contained_and_copyable(capsys):
     assert "END COPY — FINAL HARD-DRIVE BOTTLENECK DECISION" in output
 
 
-def test_one_cell_drive_test_forces_short_physical_c_profile_without_mutating_config(
+def test_one_cell_drive_test_preflights_and_compares_25_gb_on_c_and_d(
     tmp_path, monkeypatch,
 ):
     cfg = Settings(expected_serial="12345")
     observed = {}
-    section_4 = {
-        "section": 4, "source": "physical", "status": "EXECUTED",
-        "settings": {
-            "roi": list(cfg.roi), "expected_serial": cfg.expected_serial,
-            "readout": cfg.readout, "exposure_s": cfg.exposure_s,
-        },
-        "result": {},
-    }
+    prepared = []
+    monkeypatch.setattr(filemode.lab, "prepare", lambda test_cfg, frames: prepared.append(
+        (test_cfg.output_dir, frames)
+    ) or test_cfg.output_dir)
+    monkeypatch.setattr(filemode, "_matching_section4_reference", lambda directory, test_cfg: None)
 
-    def fake_execute(number, test_cfg):
-        observed["number"] = number
-        observed["section_cfg"] = test_cfg
-        return section_4
+    def fake_run(test_cfg, *, reference_report, frames, emit_output):
+        observed.setdefault("runs", []).append((test_cfg.output_dir, frames, emit_output))
+        return {
+            "status": "EXECUTED", "output_directory": str(test_cfg.output_dir),
+            "free_GB_before_trial": 100.0,
+            "runs": [{
+                "frames_requested": frames[0], "file": str(test_cfg.output_dir / "trial.pcoraw"),
+                "recorder_status": {"dwProcImgCount": frames[0], "dwLastError": 0,
+                                    "bFIFOOverflow": False},
+                "capture_fps": 400.0,
+                "capture_raw_equivalent_MB_per_s": 262.144,
+                "capture_and_sync_fps": 390.0,
+                "capture_and_sync_raw_equivalent_MB_per_s": 255.5904,
+                "file_bytes": 25_000_000_000,
+                "pixel_readback_status": "UNAVAILABLE",
+            }],
+        }
 
-    def fake_run(test_cfg, *, reference_report, frames):
-        observed["direct_cfg"] = test_cfg
-        observed["reference"] = reference_report
-        observed["frames"] = frames
-        return {"hard_drive_decision_input": {"test_status": "EXECUTED"}}
-
-    monkeypatch.setattr(filemode.lab, "execute", fake_execute)
     monkeypatch.setattr(filemode, "run", fake_run)
-    result = run_hard_drive_decision_test(cfg, output_dir=tmp_path)
+    monkeypatch.setattr(filemode, "_print_decision_input", lambda packet: None)
+    result = run_hard_drive_decision_test(
+        cfg,
+        c_output_dir=tmp_path,
+        d_output_dir=Path("D:/camera_test"),
+        target_raw_gb_per_drive=25.0,
+    )
 
-    test_cfg = observed["section_cfg"]
-    assert observed["number"] == 4
-    assert observed["direct_cfg"] is test_cfg
-    assert observed["reference"] is section_4
-    assert observed["frames"] == (20, 2000)
-    assert test_cfg.source == "physical"
-    assert test_cfg.output_dir == tmp_path
-    assert (test_cfg.batch_size, test_cfg.speed_frames, test_cfg.repeats) == (16, 2000, 1)
+    assert [frames for _, frames in prepared] == [38147, 38147]
+    assert len(observed["runs"]) == 2
+    assert all(frames == (38147,) and not emit for _, frames, emit in observed["runs"])
+    assert result["comparison"]["status"] == "EXECUTED"
+    assert result["comparison"]["comparison"]["D_over_C_durable_rate_ratio"] == 1.0
     assert cfg.source == "mock"
-    assert cfg.output_dir != tmp_path
-    assert result["paste_this"]["test_status"] == "EXECUTED"
+    assert result["settings_used"].source == "physical"
+    assert result["settings_used"].output_dir == cfg.output_dir
+    assert result["paste_this"]["C"]["frames_processed"] == 38147
 
 
 def test_one_cell_drive_test_requires_serial_before_camera_use(tmp_path):
     with pytest.raises(ValueError, match="expected_serial"):
-        run_hard_drive_decision_test(Settings(), output_dir=tmp_path)
+        run_hard_drive_decision_test(Settings(), c_output_dir=tmp_path)
