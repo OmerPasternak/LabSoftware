@@ -126,9 +126,27 @@ def test_small_roi_metadata_budget_is_checked_before_writing(cfg):
     assert report["drives"] == {}
 
 
-def test_notebook_contains_quiet_explicit_diagnostics():
+def test_compact_report_is_chart_ready_in_main_folder(cfg):
+    report = diagnostics.run_bin_hdf5_trial(
+        cfg, target_raw_gb_per_format=7 * 64 * 32 * 2 / 1e9,
+        batch_size=3, sync_every_gb=0.000001,
+    )
+    path = Path(report["report_file"])
+    assert path.parent == cfg.output_dir
+    packet = json.loads(path.read_text(encoding="utf-8"))
+    assert packet["compare_periodic_sync"] is True
+    assert len(packet["rows"]) == 4
+    assert all(len(row) == len(packet["columns"]) for row in packet["rows"])
+    rows = [dict(zip(packet["columns"], row)) for row in packet["rows"]]
+    assert all(row["pixels_equal_source"] and row["consecutive_frame_ids"] for row in rows)
+    assert {row["sync_policy"] for row in rows} == {"final_only", "periodic_and_final"}
+    assert len(json.dumps(packet)) < 0.7 * len(json.dumps(report, default=lab.json_default))
+
+
+def test_notebook_contains_minimal_status_and_periodic_sync_default():
     notebook = json.loads((lab.ROOT / "application tests/lab_computer_acceptance.ipynb").read_text(encoding="utf-8"))
     cells = ["".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "code"]
     assert any("run_batch_size_trial(" in cell and "RUN_BATCH_SIZE_TEST = True" in cell for cell in cells)
-    assert any("run_bin_hdf5_trial(" in cell and "COMPARE_PERIODIC_SYNC = False" in cell for cell in cells)
-    assert all("print(" not in cell for cell in cells)
+    assert any("run_bin_hdf5_trial(" in cell and "COMPARE_PERIODIC_SYNC = True" in cell for cell in cells)
+    assert all("print(" in cell or "run_notebook_cell(" in cell for cell in cells)
+    assert all("raise_on_error=False" not in cell for cell in cells)

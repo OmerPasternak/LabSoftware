@@ -9,7 +9,9 @@ source and checks metadata IDs; it is not a physical camera acceptance test.
 
 Open `application tests/lab_computer_acceptance.ipynb`, restart its kernel after
 updating code, run setup, then run the desired individual cell. All diagnostic
-reports and logs go to files; no reports or plots are embedded in the notebook.
+reports and logs go to files; only brief RUNNING/DONE/FAILED messages appear in
+the notebook. Failures raise an error after saving their diagnostics. No report
+dumps or plots are embedded in the notebook.
 Use one destination per drive. Every requested drive is preflighted for the
 complete retained payload before recording or writing. Files are retained in
 new directories and research data is never overwritten or deleted.
@@ -24,8 +26,9 @@ one repetition retains about 3.93 GB at 2560x128. The default cap is 8 GB.
 Two repetitions reverse batch order on the second pass; set the cap to at least
 9 GB for that profile, provided free-space preflight permits it.
 
-The first destination's `BENCHMARK_ONLY_section_4c_*` folder contains the
-combined `report.json` and `execution.log`. Each drive retains its data files.
+The combined `section_4c_<UTC>.json` and matching `.log` are directly in the
+first selected test folder. Each drive retains its data in a separate
+`BENCHMARK_ONLY_section_4c_*` subfolder.
 Inspect:
 
 - Capture-only FPS versus saved and durable FPS for each batch.
@@ -50,7 +53,8 @@ and `_write_batch` serialization. It is labelled `diagnostic-1.0`, not research
 schema 2.0, because this isolates synchronous storage operations and omits
 production acquisition/queue orchestration.
 
-Default payload is approximately 2 GB per format: 4 GB per drive. The output
+Default payload is approximately 2 GB per format/policy: 8 GB per drive, with
+periodic-sync comparison enabled. Disabling it retains 4 GB per drive. The output
 cap cannot exceed 30 GB. Preparation and source hashing occur before write
 timing. All pixels and JSON frame IDs are read back in bounded blocks and
 checked after the mandatory final fsync; readback has separate timing.
@@ -59,13 +63,37 @@ The first drive runs HDF5 then BIN; the next reverses that order. One pass is
 not enough to establish a robust sustained advantage. Small payloads can fit
 in OS/SSD caches, even though the final sync is measured.
 
-`COMPARE_PERIODIC_SYNC=True` adds another pair, syncing every 0.25 GB by
-default and still syncing at the end. It doubles the default retained payload
-to about 8 GB per drive. It affects only this synthetic diagnostic. Compare
+`COMPARE_PERIODIC_SYNC=True` is the default. The additional pair syncs every
+0.25 GB and still syncs at the end. It affects only this synthetic diagnostic. Compare
 total durable seconds/MB/s, not just a shorter final pause. An immediate second
 fsync is recorded after the timed durability interval; a fast second call is
 consistent with the first having drained outstanding writes, but does not
 identify the specific driver or SSD mechanism by itself.
+
+### Compact reports for analysis and charts
+
+Reports are directly in the selected test folder, not in data subfolders.
+Section 4B writes `section_4b_<UTC>.json`; its native-recorder troubleshooting
+reports are `pco_filemode_<UTC>.json`. Sections 4C/4D write
+`section_4c_<UTC>.json` and `section_4d_<UTC>.json` with matching logs.
+Attach the appropriate section JSON here for analysis.
+
+Reports use schema version 2.0. Sections 1–8 retain one important-metrics block
+and essential settings, without repeating the full raw result. Section 4B no
+longer embeds a second copy of itself. Sections 4C/4D use a `columns` header and
+`rows` table, plus shared settings/drive information. Time columns use seconds,
+rates use decimal MB/s and frame rates use frames/s. Data paths in the table
+are relative to that row's drive `output_directory`. Pipeline stages overlap;
+do not sum them to estimate total time. Numeric tables retain six decimal
+places; pixel checksums and integer counts remain exact.
+
+Keep errors, frame/pixel integrity, write/sync/verification timings, queue and
+batch/flush metrics. Repeated settings, nested copies, verbose sample-image
+descriptions and derived data that can be reconstructed are omitted. Detailed
+progress and 4C/4D exception tracebacks remain in the log. Original acquisition
+metadata is unchanged in HDF5 files, and existing historical reports are not
+rewritten. In-process callers retain the full results; the PCO comparison can
+also read the compact saved Section 4 summary.
 
 ## Pixel verification: separate the claims
 

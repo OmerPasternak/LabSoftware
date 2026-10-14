@@ -125,6 +125,16 @@ def test_decision_input_is_self_contained_and_copyable(capsys):
     assert "END COPY — FINAL HARD-DRIVE BOTTLENECK DECISION" in output
 
 
+def test_compact_section_4_reference_remains_readable():
+    reference = {"status": "EXECUTED", "important_metrics": {
+        "capture_only_median_fps": 450.0, "saved_median_fps": 440.0,
+        "saved_over_capture_ratio": 440.0 / 450.0,
+        "runs": [{"saved": {"synced_fps": 300.0}}],
+    }}
+    packet = _decision_input({"status": "EXECUTED"}, Settings(), reference)
+    assert packet["hdf5_section_4"]["durable_synced_median_fps"] == 300.0
+
+
 @pytest.mark.parametrize("fail_d_hdf5", [False, True])
 def test_one_cell_drive_test_compares_both_formats_with_per_drive_cap(
     tmp_path, monkeypatch, fail_d_hdf5, capsys,
@@ -215,7 +225,7 @@ def test_one_cell_drive_test_compares_both_formats_with_per_drive_cap(
         assert result["paste_this"]["D"]["hdf5"] is None
         assert "simulated D: HDF5 failure" in result["paste_this"]["D"]["error"]
         assert result["comparison"]["comparison"]["hdf5_D_over_C_durable_rate_ratio"] is None
-        assert list(tmp_path.glob("PCO_C_VS_D_COMPARISON_*/comparison.json"))
+        assert list(tmp_path.glob("section_4b_*.json"))
     else:
         assert result["comparison"]["comparison"]["hdf5_D_over_C_durable_rate_ratio"] == 1.0
     assert cfg.source == "mock"
@@ -232,7 +242,9 @@ def test_one_cell_drive_test_compares_both_formats_with_per_drive_cap(
     assert "Both destinations were preflighted" in log_path.read_text(encoding="utf-8")
     assert Path(packet["report_file"]).is_file()
     persisted = json.loads(Path(packet["report_file"]).read_text(encoding="utf-8"))
-    assert persisted["hard_drive_decision_input"] == packet
+    assert persisted == packet
+    assert "hard_drive_decision_input" not in persisted
+    assert Path(packet["report_file"]).parent == tmp_path
 
 
 def test_drive_id_distinguishes_windows_drive_letters():

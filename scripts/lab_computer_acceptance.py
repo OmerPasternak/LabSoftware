@@ -549,7 +549,7 @@ def show_section_3_review_images(report: dict, *, display: bool = False):
     report["review_image"] = str(review_path)
     if report_file:
         Path(report_file).write_text(
-            json.dumps(report, indent=2, default=json_default), encoding="utf-8",
+            json.dumps(compact_section_report(report), indent=1, default=json_default), encoding="utf-8",
         )
     if display:
         plt.show()
@@ -707,22 +707,69 @@ def _saved_run_metrics(run: dict) -> dict:
         "consecutive_frame_ids": run.get("consecutive_ids"),
         "shape_frame_y_x": run.get("shape_frame_y_x"),
         "total_fps": run.get("total_fps"),
-        "host_read_fps": run.get("host_read_fps"),
         "synced_fps": run.get("synced_fps"),
-        "file_MB_per_s": run.get("file_MB_per_s"),
-        "host_interval_median_ms": run.get("host_interval_median_ms"),
         "host_interval_p99_ms": run.get("host_interval_p99_ms"),
         "total_close_s": run.get("total_close_s"),
         "durable_sync_s": run.get("synced_s"),
         "final_os_fsync_s": run.get("final_os_fsync_s"),
         "pipeline_stage_timing_s": run.get("pipeline_stage_timing_s"),
         "average_cpu_cores": run.get("average_cpu_cores"),
-        "writer_queue_batches": run.get("writer_queue_batches"),
-        "writer_queue_capacity_frames": run.get("writer_queue_capacity_frames"),
-        "writer_queue_capacity_MiB": run.get("writer_queue_capacity_MiB"),
-        "writer_queue_max_batches_used": run.get("writer_queue_max_batches_used"),
-        "sample_statistics": run.get("sample_statistics"),
     }
+
+
+def compact_settings(settings: dict) -> dict:
+    """Keep settings needed to interpret rates, integrity and hardware identity."""
+    keys = ("expected_serial", "roi", "exposure_s", "readout", "target_fps",
+            "batch_size", "writer_queue_gib", "writer_memory_reserve_gib")
+    return {key: settings[key] for key in keys if key in settings}
+
+
+def compact_section_report(report: dict) -> dict:
+    """Persist one summary without duplicating full results and configuration."""
+    compact = {key: report[key] for key in
+               ("section", "utc", "status", "source", "error", "log_file", "review_image")
+               if key in report}
+    compact["report_schema_version"] = "2.0"
+    compact["settings"] = compact_settings(report.get("settings", {}))
+    summary = dict(report.get("important_metrics", {}))
+    for key in ("section", "execution_status", "source", "output_directory", "configured_roi",
+                "configured_exposure_ms", "configured_target_fps", "batch_size_frames",
+                "writer_queue_GiB", "writer_memory_reserve_GiB"):
+        summary.pop(key, None)
+    compact["important_metrics"] = summary
+    if report.get("section") == 1:
+        result = report.get("result", {})
+        compact["environment"] = {key: result[key] for key in
+                                   ("python", "platform", "revision", "packages", "usb_port_note")
+                                   if key in result}
+    return compact
+
+
+def run_notebook_cell(label: str, operation):
+    """Print minimal status, preserve saved diagnostics, and raise failed results.
+
+    Full reports remain in files. Executed benchmark decisions such as
+    NOT_PASSED or PENDING_BASELINE are displayed, not confused with SDK errors.
+    """
+    print(f"{label}: RUNNING", flush=True)
+    try:
+        result = operation()
+        report = result.get("comparison", result) if isinstance(result, dict) else {}
+        if report.get("status") in ("FAILED", "PARTIAL", "ERROR"):
+            errors = [report.get("error")]
+            errors += [report.get(key, {}).get("error") for key in ("C", "D")
+                       if isinstance(report.get(key), dict)]
+            detail = next((error for error in errors if error), "See the saved report for incomplete results")
+            raise RuntimeError(f"{label}: {detail}")
+        decision = report.get("important_metrics", {}).get("decision", report.get("status", "DONE"))
+        path = result.get("report_file") if isinstance(result, dict) else None
+        path = path or report.get("important_metrics", {}).get("report_file")
+        suffix = f"; {Path(path).name}" if path else ""
+        print(f"{label}: DONE ({decision}){suffix}", flush=True)
+        return result
+    except BaseException:
+        print(f"{label}: FAILED", flush=True)
+        raise
 
 
 def important_metrics(number: int, report: dict, cfg: Settings, report_path: Path) -> dict:
@@ -890,9 +937,9 @@ def execute(number: int, cfg: Settings = CONFIG, *, print_output: bool = False,
             raise_on_error: bool = True) -> dict:
     """Run one section, saving JSON and a log without printing by default.
 
-    Notebook cells use raise_on_error=False to keep ordinary failures in the
-    report. Interrupts always propagate; callers needing fail-fast behaviour
-    retain the default raise_on_error=True. No hardware is opened on import.
+    Notebook cells use run_notebook_cell for minimal status and retain the
+    default raise_on_error=True. Interrupts always propagate. Full results
+    remain available to in-process callers; only the compact summary is saved.
     """
     destination = Path(cfg.output_dir).resolve()
     destination.mkdir(parents=True, exist_ok=True)
@@ -912,8 +959,12 @@ def execute(number: int, cfg: Settings = CONFIG, *, print_output: bool = False,
             failure = exc
             report.update(status="FAILED", error=f"{type(exc).__name__}: {exc}")
         report["important_metrics"] = important_metrics(number, report, cfg, path)
-        path.write_text(json.dumps(report, indent=2, default=json_default), encoding="utf-8")
-        _print_important_metrics(report["important_metrics"])
+        path.write_text(json.dumps(compact_section_report(report), indent=1, default=json_default), encoding="utf-8")
+        print(f"Status: {report['status']}; report: {path.name}")
+        if failure is not None:
+            print(report["error"])
+        if print_output:
+            _print_important_metrics(report["important_metrics"])
     if print_output:
         print(log_path.read_text(encoding="utf-8"), end="")
     if failure is not None and (raise_on_error or isinstance(failure, (KeyboardInterrupt, SystemExit))):

@@ -16,6 +16,7 @@ import os
 from pathlib import Path, PureWindowsPath
 import shutil
 import time
+import traceback
 
 import h5py
 import numpy as np
@@ -40,12 +41,91 @@ def _destinations(cfg: lab.Settings, output_dirs: dict[str, Path] | None) -> dic
     return destinations
 
 
+def _analysis_report(report: dict) -> dict:
+    """Build one small, chart-ready table with shared context instead of repeated dumps."""
+    settings = report["settings"]
+    width, height = settings["roi"][2] - settings["roi"][0], settings["roi"][3] - settings["roi"][1]
+    frame_bytes = width * height * 2
+    packet = {key: report[key] for key in
+              ("section", "utc", "status", "source", "error", "report_file", "execution_log") if key in report}
+    packet.update(report_schema_version="2.0", analysis_request="Diagnose bottlenecks and make comparison charts.",
+                  shape_y_x=[height, width], bytes_per_frame=frame_bytes,
+                  target_fps=settings["target_fps"],
+                  required_raw_MB_per_s=frame_bytes * settings["target_fps"] / 1e6,
+                  margin_target_MB_per_s=frame_bytes * settings["target_fps"] * settings["storage_margin"] / 1e6,
+                  physical_acceptance=False, drives={})
+    if "diagnostic_settings" in report:
+        packet["diagnostic_settings"] = report["diagnostic_settings"]
+    if report["section"] == "4c":
+        packet["settings"] = lab.compact_settings(settings)
+        packet["settings"].pop("batch_size", None)  # Actual batches are in the rows.
+        packet["columns"] = ["drive", "repetition", "batch_size", "frames", "file",
+                             "capture_fps", "saved_fps", "durable_fps", "durable_MB_per_s",
+                             "capture_s", "write_close_s", "durable_s", "final_fsync_s",
+                             "complete", "consecutive_frame_ids", "stage_timing_s"]
+        packet["notes"] = "Sequential short runs; caching may affect rankings. Stages overlap; do not add them."
+        packet["settings_readback"] = {
+            label: {"model": value["sensor"].get("model"), "serial": value["sensor"].get("serial_number"),
+                    "roi": value["roi"], "exposure_s": value["exposure_s"],
+                    "readout": value["readout"], "trigger": value["trigger"]}
+            for label, value in report.get("settings_readback", {}).items()
+        }
+    else:
+        packet["BIN_metadata_sidecar"] = "frame_metadata.jsonl (beside each BIN file)"
+        packet["columns"] = ["drive", "format", "sync_policy", "frames", "file",
+                             "write_close_MB_per_s", "durable_MB_per_s", "equivalent_durable_fps",
+                             "write_close_s", "durable_s", "final_fsync_s", "second_fsync_s",
+                             "periodic_fsync_s", "periodic_fsync_count", "pixels_equal_source",
+                             "consecutive_frame_ids", "verification_s"]
+        packet["notes"] = "Synthetic synchronous control; not camera/queue throughput. Preparation/readback excluded from durability."
+        for key in ("expected_pixel_sha256", "source_preparation_s", "image_layout", "batch_size",
+                    "compare_periodic_sync", "raw_GB_per_format"):
+            if key in report:
+                packet[key] = report[key]
+    packet["rows"] = []
+    for label, drive in report["drives"].items():
+        directory = Path(drive["output_directory"])
+        packet["drives"][label] = {key: drive[key] for key in
+                                   ("output_directory", "free_GB_before", "output_GB", "within_output_cap")
+                                   if key in drive}
+        for run in drive["runs"]:
+            if report["section"] == "4c":
+                saved, capture = run["saved"], run["capture_only"]
+                values = [label, run["repetition"], run["batch_size"], saved["frames"], saved["file"],
+                          capture["total_fps"], saved["total_fps"], saved["synced_fps"], run["durable_raw_MB_per_s"],
+                          capture.get("elapsed_s"), saved.get("total_close_s"), saved.get("synced_s"),
+                          saved.get("final_os_fsync_s"), saved.get("complete"), saved.get("consecutive_ids"),
+                          saved.get("pipeline_stage_timing_s")]
+            else:
+                values = [label, run["format"], run["sync_policy"], run["frames"], run["file"],
+                          run["write_close_raw_MB_per_s"], run["durable_raw_MB_per_s"], run["equivalent_durable_fps"],
+                          run["write_close_s"], run["durable_s"], run["final_os_fsync_s"], run["immediate_second_fsync_s"],
+                          run["periodic_fsync_s"], run["periodic_fsync_count"], run["pixels_equal_source"],
+                          run["consecutive_frame_ids"], run["verification_s"]]
+            values[4] = str(Path(values[4]).relative_to(directory))
+            packet["rows"].append(values)
+    return _rounded_values(packet)
+
+
+def _rounded_values(value):
+    """Use microsecond/report precision without long floating-point tails."""
+    if isinstance(value, float):
+        return round(value, 6)
+    if isinstance(value, dict):
+        return {key: _rounded_values(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_rounded_values(item) for item in value]
+    return value
+
+
 def _report(section: str, cfg: lab.Settings, destinations: dict[str, Path], operation) -> dict:
     """Save results and a progress log silently, including ordinary failures."""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
-    folder = next(iter(destinations.values())) / f"BENCHMARK_ONLY_section_{section}_{stamp}"
-    folder.mkdir(parents=True, exist_ok=False)
-    report_path, log_path = folder / "report.json", folder / "execution.log"
+    destination = next(iter(destinations.values()))
+    destination.mkdir(parents=True, exist_ok=True)
+    folder_name = f"BENCHMARK_ONLY_section_{section}_{stamp}"
+    report_path = destination / f"section_{section}_{stamp}.json"
+    log_path = report_path.with_suffix(".log")
     report = {"section": section, "utc": datetime.now(timezone.utc).isoformat(),
               "status": "FAILED", "source": cfg.source if section == "4c" else "synthetic",
               "settings": asdict(cfg), "report_file": str(report_path),
@@ -53,15 +133,16 @@ def _report(section: str, cfg: lab.Settings, destinations: dict[str, Path], oper
     interrupted = None
     with log_path.open("w", encoding="utf-8") as log, redirect_stdout(log):
         try:
-            operation(report, folder.name)
+            operation(report, folder_name)
             report["status"] = "EXECUTED"
         except BaseException as exc:
             report["error"] = f"{type(exc).__name__}: {exc}"
             print(report["error"])
+            traceback.print_exc(file=log)
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 interrupted = exc
         finally:
-            report_path.write_text(json.dumps(report, indent=2, default=lab.json_default),
+            report_path.write_text(json.dumps(_analysis_report(report), indent=1, default=lab.json_default),
                                    encoding="utf-8")
     if interrupted is not None:
         raise interrupted
@@ -118,6 +199,8 @@ def run_batch_size_trial(
             raise ValueError("Frame count, repeats and batch sizes must be positive integers")
         if cfg.source == "physical" and not cfg.expected_serial:
             raise ValueError("Set the reviewed physical camera serial before 4C")
+        report["diagnostic_settings"] = {"frames": frames, "repeats": repeats,
+                                          "batch_sizes": list(batch_sizes), "max_output_GB_per_drive": max_output_gb_per_drive}
         total_frames = frames * repeats * len(batch_sizes)
         frame_bytes, raw, free = _preflight(
             cfg, destinations, total_frames, repeats * len(batch_sizes), max_output_gb_per_drive,
@@ -304,13 +387,13 @@ def _write_control(folder, kind, bank, frames, expected_digest, sync_every_bytes
 def run_bin_hdf5_trial(
     cfg: lab.Settings, *, output_dirs: dict[str, Path] | None = None,
     target_raw_gb_per_format: float = 2.0, batch_size: int = 16,
-    compare_periodic_sync: bool = False, sync_every_gb: float = 0.25,
+    compare_periodic_sync: bool = True, sync_every_gb: float = 0.25,
     max_output_gb_per_drive: float = 30.0,
 ) -> dict:
     """4D: compare identical synthetic pixels/metadata in BIN and HDF5.
 
-    Defaults retain about 4 GB per drive, or 8 GB with the optional periodic-sync
-    pair. Uses only a bounded prepared frame bank, verifies every pixel, and
+    Defaults retain about 8 GB per drive, or 4 GB with periodic comparison
+    disabled. Uses only a bounded prepared frame bank, verifies every pixel, and
     retains all outputs. Sync, source preparation and readback are timed separately.
     No real camera, binning, sensor exposure, USB or trigger is involved.
     """
@@ -321,6 +404,9 @@ def run_bin_hdf5_trial(
                 not isinstance(batch_size, int) or batch_size < 1 or
                 not math.isfinite(sync_every_gb) or sync_every_gb <= 0):
             raise ValueError("Payload GB, batch size and sync interval GB must be positive and finite")
+        report["diagnostic_settings"] = {"raw_GB_per_format": target_raw_gb_per_format, "batch_size": batch_size,
+                                          "compare_periodic_sync": compare_periodic_sync, "sync_every_GB": sync_every_gb,
+                                          "max_output_GB_per_drive": max_output_gb_per_drive}
         width, height = cfg.roi[2] - cfg.roi[0], cfg.roi[3] - cfg.roi[1]
         if width < 2 or height < 1:
             raise ValueError("Synthetic frame markers require at least two columns and one row")

@@ -50,15 +50,16 @@ def test_sections_use_production_writer_and_preserve_copy_hashes(config, capsys)
     output = capsys.readouterr().out
     assert output == ""
     log = Path(short["log_file"]).read_text(encoding="utf-8")
-    assert "=== IMPORTANT METRICS — SECTION 3 ===" in log
-    assert '"total_fps"' in log and '"consecutive_frame_ids": true' in log
+    assert "Status: EXECUTED" in log
     assert short["important_metrics"]["decision"] == "AUTOMATED_CHECKS_PASS"
     assert len(short["important_metrics"]["runs"]) == 2
     first_timing = short["important_metrics"]["runs"][0]["pipeline_stage_timing_s"]
     assert first_timing["hdf5_batch_write_s"] > 0
     assert short["important_metrics"]["runs"][0]["final_os_fsync_s"] >= 0
     saved_report = json.loads(Path(short["important_metrics"]["report_file"]).read_text())
-    assert saved_report["important_metrics"] == short["important_metrics"]
+    assert saved_report["important_metrics"] == lab.compact_section_report(short)["important_metrics"]
+    assert "result" not in saved_report
+    assert len(json.dumps(saved_report)) < 0.6 * len(json.dumps(short, default=lab.json_default))
     assert [item["frames"] for item in short["result"]["runs"]] == [3, 9]
     assert all(item["consecutive_ids"] for item in short["result"]["runs"])
     report = lab.section_7(config)
@@ -104,6 +105,24 @@ def test_quiet_section_interrupt_still_propagates(config, monkeypatch):
     with pytest.raises(KeyboardInterrupt):
         lab.execute(3, config, raise_on_error=False)
     assert list(config.output_dir.glob("section_3_*.json"))
+
+
+def test_notebook_status_raises_failed_or_partial_reports(capsys):
+    for status in ("FAILED", "PARTIAL"):
+        with pytest.raises(RuntimeError, match="saved SDK failure"):
+            lab.run_notebook_cell("4C", lambda: {"status": status, "error": "saved SDK failure"})
+    output = capsys.readouterr().out
+    assert output.count("RUNNING") == 2 and output.count("FAILED") == 2
+
+
+def test_notebook_status_keeps_decisions_and_original_errors(capsys):
+    report = {"status": "EXECUTED", "important_metrics": {"decision": "NOT_PASSED"}}
+    assert lab.run_notebook_cell("1", lambda: report) is report
+    assert "DONE (NOT_PASSED)" in capsys.readouterr().out
+    def fail():
+        raise ValueError("original error")
+    with pytest.raises(ValueError, match="original error"):
+        lab.run_notebook_cell("1", fail)
 
 
 def test_section_3_review_saves_first_middle_and_last_frames(config, monkeypatch):
@@ -282,7 +301,7 @@ def test_notebook_setup_and_cells_are_executable():
         namespace,
     )
     assert "HARD_DRIVE_DECISION" not in namespace
-    assert code_cells[-1] == "REPORT_8 = lab.execute(8, CONFIG, raise_on_error=False)\n"
+    assert 'lab.run_notebook_cell("Section 8", lambda: lab.execute(8, CONFIG))' in code_cells[-1]
 
 
 def test_terminal_runs_only_requested_section_and_deferred_trigger(config):
@@ -292,7 +311,7 @@ def test_terminal_runs_only_requested_section_and_deferred_trigger(config):
     assert run.returncode == 0, run.stderr
     reports = list(config.output_dir.glob("section_*.json"))
     assert len(reports) == 1
-    assert json.loads(reports[0].read_text())["result"]["status"] == "DEFERRED"
+    assert json.loads(reports[0].read_text())["important_metrics"]["decision"] == "DEFERRED"
     help_run = subprocess.run([sys.executable, script], capture_output=True, text=True)
     assert help_run.returncode == 0 and "--section" in help_run.stdout
 

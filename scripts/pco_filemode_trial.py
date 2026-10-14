@@ -24,6 +24,17 @@ import numpy as np
 from scripts import lab_computer_acceptance as lab
 
 
+def _section_4_result(reference: dict) -> dict:
+    """Read old in-memory or compact saved Section 4 reports consistently."""
+    if "result" in reference:
+        return reference["result"]
+    summary = reference["important_metrics"]
+    return {"runs": summary["runs"], "capture_median_fps": summary["capture_only_median_fps"],
+            "saved_median_fps": summary["saved_median_fps"],
+            "saved_over_capture": summary["saved_over_capture_ratio"],
+            "camware_fps": summary.get("camware_fps")}
+
+
 def _decision_input(report: dict, cfg: lab.Settings,
                     reference_report: dict | None) -> dict:
     """Build one self-contained block for the final storage decision."""
@@ -69,7 +80,7 @@ def _decision_input(report: dict, cfg: lab.Settings,
         ],
     }
     if reference_report is not None and reference_report.get("status") == "EXECUTED":
-        result = reference_report["result"]
+        result = _section_4_result(reference_report)
         synced_values = [item["saved"]["synced_fps"] for item in result["runs"]]
         synced_median = statistics.median(synced_values)
         packet["hdf5_section_4"] = {
@@ -275,14 +286,14 @@ def run(cfg: lab.Settings, *, reference_report: dict | None = None,
     destination = lab.prepare(cfg, sum(frames))
     run_dir = destination / f"PCO_FILEMODE_TRIAL_{datetime.now(timezone.utc):%Y%m%dT%H%M%S_%fZ}"
     run_dir.mkdir(exist_ok=False)
-    report_path = run_dir / "report.json"
+    report_path = destination / f"pco_filemode_{run_dir.name.removeprefix('PCO_FILEMODE_TRIAL_')}.json"
     report = {"status": "FAILED", "source": cfg.source,
               "output_directory": str(run_dir), "serial_requested": cfg.expected_serial,
               "free_GB_before_trial": shutil.disk_usage(destination).free / 1e9,
               "roi_requested": list(cfg.roi), "exposure_s_requested": cfg.exposure_s,
               "readout_requested": cfg.readout.name,
               "trigger_requested": lab.TriggerMode.AUTO_SEQUENCE.value,
-              "runs": [], "physical_acceptance": False}
+              "runs": [], "physical_acceptance": False, "report_file": str(report_path)}
     try:
         with lab.configured_camera(cfg, trigger=lab.TriggerMode.AUTO_SEQUENCE) as camera:
             if not hasattr(camera._cam, "record") or not hasattr(camera._cam, "rec"):
@@ -304,7 +315,7 @@ def run(cfg: lab.Settings, *, reference_report: dict | None = None,
             if cfg.camware_fps is not None and cfg.camware_fps > 0 else None
         )
         if reference_report is not None and reference_report.get("status") == "EXECUTED":
-            section_4 = reference_report["result"]
+            section_4 = _section_4_result(reference_report)
             hdf5_synced = statistics.median(
                 item["saved"]["synced_fps"] for item in section_4["runs"]
             )
@@ -340,7 +351,14 @@ def run(cfg: lab.Settings, *, reference_report: dict | None = None,
         report["hard_drive_decision_input"] = _decision_input(
             report, cfg, reference_report
         )
-        report_path.write_text(json.dumps(report, indent=2, default=lab.json_default),
+        stored = {key: value for key, value in report.items()
+                  if key not in ("hard_drive_decision_input", "pending")}
+        stored["runs"] = [
+            {**run, "recorder_status": {key: value for key, value in run.get("recorder_status", {}).items()
+                                       if key in ("dwReqImgCount", "dwProcImgCount", "dwLastError", "bFIFOOverflow")}}
+            for run in report.get("runs", [])
+        ]
+        report_path.write_text(json.dumps(stored, indent=1, default=lab.json_default),
                                encoding="utf-8")
         if emit_output:
             print("\n=== IMPORTANT METRICS — PCO DIRECT FILE TRIAL ===")
@@ -360,7 +378,8 @@ def run_hard_drive_decision_test(
     """Save the reviewed physical comparison and its log without printing.
 
     Camera settings and output limits are unchanged. Detailed progress and
-    Section 4 output are retained in execution.log beside comparison.json.
+    Section 4 output are retained in a matching .log beside the compact
+    section_4b_<UTC>.json directly in the selected C: test folder.
     Preflight errors still propagate to the notebook before camera recording.
     """
     progress = io.StringIO()
@@ -370,12 +389,12 @@ def run_hard_drive_decision_test(
             max_output_gb_per_drive=max_output_gb_per_drive,
         )
     report_path = Path(result["report_file"])
-    log_path = report_path.with_name("execution.log")
+    log_path = report_path.with_suffix(".log")
     log_path.write_text(progress.getvalue(), encoding="utf-8")
     result["paste_this"]["execution_log"] = str(log_path)
     result["paste_this"]["report_file"] = str(report_path)
     report_path.write_text(
-        json.dumps(result["comparison"], indent=2, default=lab.json_default),
+        json.dumps(result["comparison"], indent=1, default=lab.json_default),
         encoding="utf-8",
     )
     if print_output:
@@ -551,9 +570,12 @@ def _run_hard_drive_decision_test(
                     key=lambda path: path.stat().st_mtime,
                 )
                 saved_report = None
-                if report_dirs and (report_dirs[-1] / "report.json").is_file():
+                saved_report_path = (drive_cfg.output_dir /
+                                     f"pco_filemode_{report_dirs[-1].name.removeprefix('PCO_FILEMODE_TRIAL_')}.json"
+                                     if report_dirs else None)
+                if saved_report_path is not None and saved_report_path.is_file():
                     saved_report = json.loads(
-                        (report_dirs[-1] / "report.json").read_text(encoding="utf-8")
+                        saved_report_path.read_text(encoding="utf-8")
                     )
                 drive_summary["pcoraw"] = _drive_run_summary(saved_report, error=exc)
             drive_summary["status"] = "FAILED"
@@ -586,17 +608,14 @@ def _run_hard_drive_decision_test(
                 frame_bytes * common_cfg.target_fps * common_cfg.storage_margin / 1e6
             ),
         }
-    summary["hard_drive_decision_input"] = dict(summary)
-    report_dir = c_output_dir.resolve() / (
-        f"PCO_C_VS_D_COMPARISON_{datetime.now(timezone.utc):%Y%m%dT%H%M%S_%fZ}"
+    report_path = c_output_dir.resolve() / (
+        f"section_4b_{datetime.now(timezone.utc):%Y%m%dT%H%M%S_%fZ}.json"
     )
-    report_dir.mkdir(parents=True, exist_ok=False)
-    report_path = report_dir / "comparison.json"
     report_path.write_text(
-        json.dumps(summary, indent=2, default=lab.json_default), encoding="utf-8"
+        json.dumps(summary, indent=1, default=lab.json_default), encoding="utf-8"
     )
     return {"settings_used": common_cfg, "drives": drive_cfgs,
-            "comparison": summary, "paste_this": summary["hard_drive_decision_input"],
+            "comparison": summary, "paste_this": summary,
             "report_file": str(report_path)}
 
 
