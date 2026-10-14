@@ -1,6 +1,7 @@
 """Offline checks for the opt-in PCO native-file trial; no camera is opened."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -123,19 +124,28 @@ def test_decision_input_is_self_contained_and_copyable(capsys):
     assert "END COPY — FINAL HARD-DRIVE BOTTLENECK DECISION" in output
 
 
-def test_one_cell_drive_test_preflights_and_compares_25_gb_on_c_and_d(
+def test_one_cell_drive_test_compares_both_formats_with_per_drive_cap(
     tmp_path, monkeypatch,
 ):
     cfg = Settings(expected_serial="12345")
     observed = {}
     prepared = []
+    # pytest's tmp_path can live on any runner drive (GitHub's Windows runner
+    # puts the checkout on D:). Treat this temporary folder as the simulated
+    # C: destination while leaving the D: fixture as an actual Windows path.
+    real_drive_id = filemode._drive_id
+    monkeypatch.setattr(
+        filemode, "_drive_id",
+        lambda path: "c:" if Path(path) == tmp_path else real_drive_id(path),
+    )
+    monkeypatch.setattr(filemode.shutil, "disk_usage", lambda path: SimpleNamespace(free=100_000_000_000))
     monkeypatch.setattr(filemode.lab, "prepare", lambda test_cfg, frames: prepared.append(
         (test_cfg.output_dir, frames)
     ) or test_cfg.output_dir)
-    monkeypatch.setattr(filemode, "_matching_section4_reference", lambda directory, test_cfg: None)
 
     def fake_run(test_cfg, *, reference_report, frames, emit_output):
         observed.setdefault("runs", []).append((test_cfg.output_dir, frames, emit_output))
+        raw_bytes = frames[0] * 2560 * 128 * 2
         return {
             "status": "EXECUTED", "output_directory": str(test_cfg.output_dir),
             "free_GB_before_trial": 100.0,
@@ -147,29 +157,70 @@ def test_one_cell_drive_test_preflights_and_compares_25_gb_on_c_and_d(
                 "capture_raw_equivalent_MB_per_s": 262.144,
                 "capture_and_sync_fps": 390.0,
                 "capture_and_sync_raw_equivalent_MB_per_s": 255.5904,
-                "file_bytes": 25_000_000_000,
+                "file_bytes": raw_bytes + 30_000_000,
                 "pixel_readback_status": "UNAVAILABLE",
             }],
         }
 
+    def fake_execute(number, test_cfg):
+        assert number == 4
+        observed.setdefault("hdf5", []).append((test_cfg.output_dir, test_cfg.speed_frames))
+        hdf5_path = tmp_path / f"hdf5_{len(observed['hdf5'])}.h5"
+        hdf5_path.write_bytes(b"mock HDF5 payload")
+        return {
+            "status": "EXECUTED",
+            "result": {"runs": [{
+                "capture_only": {"total_fps": 410.0},
+                "saved": {
+                    "file": str(hdf5_path), "frames": test_cfg.speed_frames,
+                    "complete": True, "consecutive_ids": True,
+                    "total_fps": 390.0, "synced_fps": 380.0,
+                    "final_os_fsync_s": 0.1,
+                    "pipeline_stage_timing_s": {"write": 1.0},
+                },
+            }]},
+        }
+
     monkeypatch.setattr(filemode, "run", fake_run)
+    monkeypatch.setattr(filemode.lab, "execute", fake_execute)
+    monkeypatch.setattr(
+        filemode, "_hdf5_run_summary",
+        lambda report, *, frame_bytes: {
+            "status": "EXECUTED", "file": report["result"]["runs"][0]["saved"]["file"],
+            "file_bytes": report["result"]["runs"][0]["saved"]["frames"] * frame_bytes + 10_000_000,
+            "frames": report["result"]["runs"][0]["saved"]["frames"],
+            "complete": True, "consecutive_frame_ids": True,
+            "durable_raw_equivalent_MB_per_s": 249.0368,
+        },
+    )
     monkeypatch.setattr(filemode, "_print_decision_input", lambda packet: None)
     result = run_hard_drive_decision_test(
         cfg,
         c_output_dir=tmp_path,
         d_output_dir=Path("D:/camera_test"),
-        target_raw_gb_per_drive=25.0,
+        max_output_gb_per_drive=30.0,
     )
 
-    assert [frames for _, frames in prepared] == [38147, 38147]
+    expected_frames = (14_000_000_000 // (2560 * 128 * 2))
+    assert [frames for _, frames in prepared] == [expected_frames * 2, expected_frames * 2]
     assert len(observed["runs"]) == 2
-    assert all(frames == (38147,) and not emit for _, frames, emit in observed["runs"])
+    assert all(frames == (expected_frames,) and not emit for _, frames, emit in observed["runs"])
+    assert len(observed["hdf5"]) == 2
     assert result["comparison"]["status"] == "EXECUTED"
-    assert result["comparison"]["comparison"]["D_over_C_durable_rate_ratio"] == 1.0
+    assert result["comparison"]["comparison"]["pcoraw_D_over_C_durable_rate_ratio"] == 1.0
+    assert result["comparison"]["comparison"]["hdf5_D_over_C_durable_rate_ratio"] == 1.0
     assert cfg.source == "mock"
     assert result["settings_used"].source == "physical"
     assert result["settings_used"].output_dir == cfg.output_dir
-    assert result["paste_this"]["C"]["frames_processed"] == 38147
+    assert result["settings_used"].speed_frames == expected_frames
+    assert result["paste_this"]["C"]["pcoraw"]["frames_processed"] == expected_frames
+    assert result["paste_this"]["C"]["hdf5"]["frames"] == expected_frames
+    assert result["paste_this"]["C"]["combined_output_GB"] < 30.0
+
+
+def test_drive_id_distinguishes_windows_drive_letters():
+    assert filemode._drive_id(Path(r"C:\camera_test")) == "c:"
+    assert filemode._drive_id(Path(r"D:\camera_test")) == "d:"
 
 
 def test_one_cell_drive_test_requires_serial_before_camera_use(tmp_path):

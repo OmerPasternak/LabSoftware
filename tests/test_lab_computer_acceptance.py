@@ -217,7 +217,8 @@ def test_notebook_setup_and_cells_are_executable():
         compile(source, "lab_computer_acceptance.ipynb", "exec")
     namespace = {}
     exec(code_cells[0], namespace)
-    assert namespace["CONFIG"].source == "mock"
+    assert namespace["CONFIG"].source == "physical"
+    assert namespace["CONFIG"].output_dir == r"C:\Users\Public\Documents\@@FPSTEST"
     assert namespace["CONFIG"].trigger_bench_ready is False
     assert namespace["CONFIG"].roi == (0, 1016, 2560, 1144)
     assert namespace["USE_SHORT_STORAGE_DIAGNOSTIC"] is False

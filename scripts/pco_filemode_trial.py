@@ -352,21 +352,21 @@ def run_hard_drive_decision_test(
     *,
     c_output_dir: Path = Path("C:/Users/Public/Documents/@@FPSTEST"),
     d_output_dir: Path = Path("D:/HHG measurements/@@FPSTEST"),
-    target_raw_gb_per_drive: float = 25.0,
+    max_output_gb_per_drive: float = 30.0,
 ) -> dict:
-    """Write one approximately 25-GB physical pcoraw file to C: and one to D:.
+    """Compare PCO .pcoraw and production HDF5 writes on C: and D:.
 
-    The same camera settings and frame count are used on both destinations. A
-    preflight requires at least 1.5 times the planned raw bytes free on both
-    drives before either camera run starts. Result files are kept for review.
-    The emitted comparison reports recorder counts, errors, file sizes, capture
-    rates, and capture-plus-fsync rates. The installed file DLL may not support
-    pixel readback; that limitation is retained in the report.
+    Each drive receives one .pcoraw file and one HDF5 file with identical frame
+    counts and camera settings. Their combined size is capped at the requested
+    per-drive budget. Frame count is limited by both that cap and the currently
+    available space on the tighter drive; preflight reserves 1.5 times the
+    combined raw payload plus 100 MB. Two GB of the output cap is reserved for
+    format metadata and reports. All files are retained.
 
     This function connects to the selected physical camera and applies the ROI,
     exposure, Global Shutter and Auto Sequence settings already shown in the
-    notebook. It does not test external-trigger accounting or rerun the HDF5
-    benchmark; it compares C: and D: with PCO's own direct-file recorder.
+    notebook. It runs direct PCO file mode and Section 4's capture-only plus
+    saved-HDF5 path on each drive. It does not test external-trigger accounting.
     """
     if not cfg.expected_serial:
         raise ValueError(
@@ -381,36 +381,58 @@ def run_hard_drive_decision_test(
             f"the setup cell currently specifies {width} x {height}."
         )
 
-    if target_raw_gb_per_drive <= 0:
-        raise ValueError("target_raw_gb_per_drive must be positive")
+    if max_output_gb_per_drive <= 2.1:
+        raise ValueError("max_output_gb_per_drive must exceed the 2-GB overhead reserve")
     c_output_dir, d_output_dir = Path(c_output_dir), Path(d_output_dir)
     if _drive_id(c_output_dir) == _drive_id(d_output_dir):
         raise ValueError("C: and D: test destinations must be on different drives")
     frame_bytes = width * height * 2
-    target_bytes = int(target_raw_gb_per_drive * 1e9)
-    frames = (target_bytes + frame_bytes - 1) // frame_bytes
-    planned_raw_bytes = frames * frame_bytes
+    output_cap_bytes = int(max_output_gb_per_drive * 1e9)
+    overhead_reserve_bytes = 2_000_000_000
+    free_space_reserve_bytes = 100_000_000
+    free_by_drive = {
+        "C": shutil.disk_usage(c_output_dir.resolve()).free,
+        "D": shutil.disk_usage(d_output_dir.resolve()).free,
+    }
+    tightest_free_bytes = min(free_by_drive.values())
+    # There are two same-sized outputs per drive. lab.prepare's 1.5x free-space
+    # rule therefore requires 3x one-format raw bytes before either run.
+    max_raw_per_format = min(
+        (output_cap_bytes - overhead_reserve_bytes) // 2,
+        max(0, tightest_free_bytes - free_space_reserve_bytes) // 3,
+    )
+    frames = max_raw_per_format // frame_bytes
+    if frames < 2000:
+        raise OSError(
+            "The drive comparison needs at least 2,000 frames per format on both drives. "
+            f"Available free space is C: {free_by_drive['C'] / 1e9:.2f} GB, "
+            f"D: {free_by_drive['D'] / 1e9:.2f} GB; clear space or choose another "
+            "destination before retrying. No camera run was started."
+        )
+    planned_raw_per_format = frames * frame_bytes
+    planned_raw_per_drive = 2 * planned_raw_per_format
     common_cfg = replace(
-        cfg, source="physical", batch_size=16, speed_frames=2000, repeats=1,
+        cfg, source="physical", speed_frames=frames, repeats=1,
         run_offline_tests=False,
     )
-    # Preflight both drives before starting either physical recording.
+    # Preflight the complete two-format payload on both drives before camera use.
     drive_cfgs = {
         "C": replace(common_cfg, output_dir=c_output_dir),
         "D": replace(common_cfg, output_dir=d_output_dir),
     }
     for drive_cfg in drive_cfgs.values():
-        lab.prepare(drive_cfg, frames)
+        lab.prepare(drive_cfg, frames * 2)
 
-    reference_report = _matching_section4_reference(c_output_dir, common_cfg)
     print(
-        "C: VS D: SUSTAINED CAMERA-TO-FILE COMPARISON\n"
+        "C: VS D: PCO .PCORAW AND HDF5 COMPARISON\n"
         f"Camera serial: {common_cfg.expected_serial}\n"
-        f"ROI: {width} x {height}; frames per drive: {frames:,}\n"
-        f"Raw payload per drive: {planned_raw_bytes / 1e9:.3f} GB\n"
+        f"ROI: {width} x {height}; frames per format and drive: {frames:,}\n"
+        f"Planned raw payload per format: {planned_raw_per_format / 1e9:.3f} GB\n"
+        f"Planned raw payload across both formats per drive: {planned_raw_per_drive / 1e9:.3f} GB\n"
+        f"Maximum output per drive: {max_output_gb_per_drive:.1f} GB\n"
         f"C: {c_output_dir.resolve()}\nD: {d_output_dir.resolve()}\n"
-        "Both destinations were preflighted before camera use. The two pcoraw "
-        "files will remain on disk after the comparison.\n"
+        "Both destinations were preflighted for both formats before camera use. "
+        "All .pcoraw and .h5 files will remain on disk.\n"
         "Do not open CamWare or the LabSoftware camera GUI until both runs finish."
     )
 
@@ -420,50 +442,109 @@ def run_hard_drive_decision_test(
         "roi": list(common_cfg.roi), "exposure_s": common_cfg.exposure_s,
         "readout": common_cfg.readout.name,
         "trigger": lab.TriggerMode.AUTO_SEQUENCE.value,
-        "target_raw_GB_per_drive": target_raw_gb_per_drive,
-        "frames_per_drive": frames,
-        "planned_raw_GB_per_drive": planned_raw_bytes / 1e9,
+        "max_output_GB_per_drive": max_output_gb_per_drive,
+        "output_overhead_reserve_GB_per_drive": overhead_reserve_bytes / 1e9,
+        "frames_per_format_per_drive": frames,
+        "planned_raw_GB_per_format": planned_raw_per_format / 1e9,
+        "planned_raw_GB_across_formats_per_drive": planned_raw_per_drive / 1e9,
+        "free_GB_before_test_by_drive": {
+            drive: free / 1e9 for drive, free in free_by_drive.items()
+        },
         "C": None, "D": None, "comparison": None,
-        "previous_HDF5_reference": _section4_summary(reference_report),
         "physical_acceptance": False,
         "limitations": [
             "C: and D: runs are sequential, so other changing system load may affect the comparison.",
             "PCO file-DLL pixel readback is unavailable on this installation; counts and file size "
             "do not verify every pixel or consecutive camera frame ID.",
             "Auto Sequence does not validate external trigger accounting.",
-            "A 25-GB run is a sustained comparison, not final multi-hour acquisition acceptance.",
+            "Section 4 verifies HDF5 metadata and frame IDs; PCO pixel readback may remain unavailable.",
+            "The selected frame count is space-limited and this is not final multi-hour acceptance.",
         ],
     }
     for drive, drive_cfg in drive_cfgs.items():
         before = set(drive_cfg.output_dir.glob("PCO_FILEMODE_TRIAL_*"))
+        drive_summary = {
+            "status": "PARTIAL",
+            "output_directory": str(drive_cfg.output_dir.resolve()),
+            "free_GB_before_test": free_by_drive[drive] / 1e9,
+            "pcoraw": None,
+            "hdf5": None,
+            "combined_output_bytes": None,
+            "combined_output_GB": None,
+            "max_output_GB": max_output_gb_per_drive,
+            "within_output_cap": None,
+        }
         try:
             drive_report = run(
-                drive_cfg, reference_report=reference_report,
+                drive_cfg, reference_report=None,
                 frames=(frames,), emit_output=False,
             )
-        except Exception as exc:
-            report_dirs = sorted(
-                set(drive_cfg.output_dir.glob("PCO_FILEMODE_TRIAL_*")) - before,
-                key=lambda path: path.stat().st_mtime,
-            )
-            saved_report = None
-            if report_dirs and (report_dirs[-1] / "report.json").is_file():
-                saved_report = json.loads(
-                    (report_dirs[-1] / "report.json").read_text(encoding="utf-8")
+            drive_summary["pcoraw"] = _drive_run_summary(drive_report)
+            pcoraw_bytes = drive_summary["pcoraw"].get("file_bytes")
+            if pcoraw_bytes is None:
+                raise RuntimeError(f"{drive}: PCO recorder report omitted the file size")
+            projected_hdf5_bytes = planned_raw_per_format + 100_000_000
+            if pcoraw_bytes + projected_hdf5_bytes > output_cap_bytes:
+                raise RuntimeError(
+                    f"{drive}: projected .pcoraw plus HDF5 output exceeds the "
+                    f"{max_output_gb_per_drive:.1f}-GB per-drive cap; HDF5 run was not started"
                 )
-            summary[drive] = _drive_run_summary(saved_report, error=exc)
+
+            hdf5_cfg = replace(drive_cfg, speed_frames=frames, repeats=1)
+            hdf5_report = lab.execute(4, hdf5_cfg)
+            drive_summary["hdf5"] = _hdf5_run_summary(
+                hdf5_report, frame_bytes=frame_bytes,
+            )
+            hdf5_bytes = drive_summary["hdf5"].get("file_bytes")
+            if hdf5_bytes is None:
+                raise RuntimeError(f"{drive}: Section 4 HDF5 report omitted the file size")
+            combined_bytes = pcoraw_bytes + hdf5_bytes
+            drive_summary["combined_output_bytes"] = combined_bytes
+            drive_summary["combined_output_GB"] = combined_bytes / 1e9
+            drive_summary["within_output_cap"] = combined_bytes <= output_cap_bytes
+            if not drive_summary["within_output_cap"]:
+                raise RuntimeError(
+                    f"{drive}: measured .pcoraw plus HDF5 output exceeded the "
+                    f"{max_output_gb_per_drive:.1f}-GB per-drive cap"
+                )
+            drive_summary["status"] = "EXECUTED"
+        except Exception as exc:
+            if drive_summary["pcoraw"] is None:
+                report_dirs = sorted(
+                    set(drive_cfg.output_dir.glob("PCO_FILEMODE_TRIAL_*")) - before,
+                    key=lambda path: path.stat().st_mtime,
+                )
+                saved_report = None
+                if report_dirs and (report_dirs[-1] / "report.json").is_file():
+                    saved_report = json.loads(
+                        (report_dirs[-1] / "report.json").read_text(encoding="utf-8")
+                    )
+                drive_summary["pcoraw"] = _drive_run_summary(saved_report, error=exc)
+            drive_summary["status"] = "FAILED"
+            drive_summary["error"] = f"{type(exc).__name__}: {exc}"
+            summary[drive] = drive_summary
             summary["status"] = "PARTIAL"
             summary["stopped_after"] = drive
             break
-        summary[drive] = _drive_run_summary(drive_report)
+        summary[drive] = drive_summary
     if summary["C"] is not None and summary["D"] is not None:
-        c_durable = summary["C"].get("durable_raw_equivalent_MB_per_s")
-        d_durable = summary["D"].get("durable_raw_equivalent_MB_per_s")
+        c_pco = summary["C"].get("pcoraw", {}).get("durable_raw_equivalent_MB_per_s")
+        d_pco = summary["D"].get("pcoraw", {}).get("durable_raw_equivalent_MB_per_s")
+        c_hdf5 = summary["C"].get("hdf5", {}).get("durable_raw_equivalent_MB_per_s")
+        d_hdf5 = summary["D"].get("hdf5", {}).get("durable_raw_equivalent_MB_per_s")
         summary["comparison"] = {
-            "D_over_C_durable_rate_ratio": d_durable / c_durable
-            if c_durable and d_durable is not None else None,
-            "D_minus_C_durable_MB_per_s": d_durable - c_durable
-            if c_durable is not None and d_durable is not None else None,
+            "pcoraw_D_over_C_durable_rate_ratio": d_pco / c_pco
+            if c_pco and d_pco is not None else None,
+            "pcoraw_D_minus_C_durable_MB_per_s": d_pco - c_pco
+            if c_pco is not None and d_pco is not None else None,
+            "hdf5_D_over_C_durable_rate_ratio": d_hdf5 / c_hdf5
+            if c_hdf5 and d_hdf5 is not None else None,
+            "hdf5_D_minus_C_durable_MB_per_s": d_hdf5 - c_hdf5
+            if c_hdf5 is not None and d_hdf5 is not None else None,
+            "C_pcoraw_over_hdf5_durable_rate_ratio": c_pco / c_hdf5
+            if c_hdf5 and c_pco is not None else None,
+            "D_pcoraw_over_hdf5_durable_rate_ratio": d_pco / d_hdf5
+            if d_hdf5 and d_pco is not None else None,
             "required_raw_MB_per_s_at_target_fps": frame_bytes * common_cfg.target_fps / 1e6,
             "proposed_margin_target_MB_per_s": (
                 frame_bytes * common_cfg.target_fps * common_cfg.storage_margin / 1e6
@@ -478,7 +559,7 @@ def run_hard_drive_decision_test(
     report_path.write_text(
         json.dumps(summary, indent=2, default=lab.json_default), encoding="utf-8"
     )
-    print("\n=== C: VS D: SUSTAINED DRIVE COMPARISON ===")
+    print("\n=== C: VS D: PCORAW AND HDF5 DRIVE COMPARISON ===")
     print(json.dumps(summary, indent=2, default=lab.json_default))
     print(f"Comparison report saved to: {report_path}")
     print("=== COPY FROM HERE — FINAL HARD-DRIVE BOTTLENECK DECISION ===")
@@ -494,44 +575,31 @@ def _drive_id(path: Path) -> str:
     return PureWindowsPath(str(path)).drive.casefold()
 
 
-def _matching_section4_reference(directory: Path, cfg: lab.Settings) -> dict | None:
-    """Find the newest prior HDF5 report with the same physical camera settings."""
-    candidates = sorted(directory.glob("section_4_*.json"),
-                        key=lambda path: path.stat().st_mtime, reverse=True)
-    for path in candidates:
-        try:
-            report = json.loads(path.read_text(encoding="utf-8"))
-            settings = report.get("settings", {})
-            readout = settings.get("readout")
-            if isinstance(readout, str):
-                readout = readout.rsplit(".", 1)[-1]
-            if (
-                report.get("status") == "EXECUTED"
-                and report.get("source") == "physical"
-                and settings.get("expected_serial") == cfg.expected_serial
-                and tuple(settings.get("roi", ())) == tuple(cfg.roi)
-                and readout == cfg.readout.name
-                and abs(float(settings.get("exposure_s", -1)) - cfg.exposure_s) <= 1e-9
-            ):
-                report["report_file"] = str(path.resolve())
-                return report
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            continue
-    return None
-
-
-def _section4_summary(report: dict | None) -> dict | None:
-    """Extract comparable rates from a previously completed Section 4 report."""
-    if not report or report.get("status") != "EXECUTED":
-        return None
+def _hdf5_run_summary(report: dict, *, frame_bytes: int) -> dict:
+    """Summarize one Section 4 capture-only/HDF5 run for drive comparison."""
     result = report.get("result", {})
+    runs = result.get("runs", [])
+    if report.get("status") != "EXECUTED" or len(runs) != 1:
+        raise RuntimeError("Section 4 did not return exactly one successful HDF5 run")
+    capture = runs[0]["capture_only"]
+    saved = runs[0]["saved"]
+    path = Path(saved["file"])
+    file_bytes = path.stat().st_size
     return {
-        "report_file": report.get("report_file"),
-        "capture_only_fps": result.get("capture_median_fps"),
-        "hdf5_saved_fps": result.get("saved_median_fps"),
-        "hdf5_durable_fps": statistics.median(
-            item["saved"]["synced_fps"] for item in result.get("runs", [])
-        ) if result.get("runs") else None,
+        "status": report.get("status"),
+        "file": str(path.resolve()), "file_bytes": file_bytes,
+        "frames": saved.get("frames"),
+        "complete": saved.get("complete"),
+        "consecutive_frame_ids": saved.get("consecutive_ids"),
+        "capture_only_fps": capture.get("total_fps"),
+        "saved_fps": saved.get("total_fps"),
+        "durable_fps": saved.get("synced_fps"),
+        "durable_raw_equivalent_MB_per_s": (
+            saved["synced_fps"] * frame_bytes / 1e6
+            if saved.get("synced_fps") is not None else None
+        ),
+        "final_os_fsync_s": saved.get("final_os_fsync_s"),
+        "pipeline_stage_timing_s": saved.get("pipeline_stage_timing_s"),
     }
 
 
