@@ -144,16 +144,20 @@ def _read_recorded_frames(cam, frames: int, shape: tuple[int, int]) -> dict:
             "first_frame_id": first_id, "last_frame_id": last_id}
 
 
-def _record_one(cam, path: Path, frames: int, shape: tuple[int, int],
+def _record_one(cam, directory: Path, frames: int, shape: tuple[int, int],
                 reference_fps: float) -> dict:
-    """Record a finite Auto Sequence directly to a new PCO file and verify it."""
-    if path.exists():
-        raise FileExistsError(f"Refusing to overwrite an existing recorder file: {path}")
+    """Record into a new SDK-owned directory and verify its generated PCO file."""
+    if directory.exists():
+        raise FileExistsError(f"Refusing to reuse an existing recorder directory: {directory}")
+    directory.mkdir()
     timeout_s = max(10.0, 3.0 * frames / reference_fps + 5.0)
     started = time.perf_counter()
     status = None
     try:
-        cam.record(number_of_images=frames, mode="pcoraw", file_path=str(path))
+        # pco.python file modes take an output directory and generate their own
+        # filename.  Passing a desired filename can still let the recorder run,
+        # but does not guarantee that a file appears at that exact path.
+        cam.record(number_of_images=frames, mode="pcoraw", file_path=str(directory))
         while True:
             status = cam.rec.get_status()
             if status.get("dwLastError") or status.get("bFIFOOverflow"):
@@ -171,8 +175,21 @@ def _record_one(cam, path: Path, frames: int, shape: tuple[int, int],
         raise RuntimeError(f"PCO changed the requested recorder count: {status}")
     if int(status.get("dwProcImgCount", -1)) != frames:
         raise RuntimeError(f"PCO recorded fewer or more frames than requested: {status}")
-    if not path.is_file() or path.stat().st_size == 0:
-        raise RuntimeError(f"PCO did not leave a nonempty pcoraw file at {path}")
+    generated = [
+        candidate for candidate in directory.iterdir()
+        if candidate.is_file() and candidate.suffix.lower() == ".pcoraw"
+    ]
+    nonempty = [candidate for candidate in generated if candidate.stat().st_size > 0]
+    if len(nonempty) != 1:
+        contents = [
+            {"name": candidate.name, "bytes": candidate.stat().st_size}
+            for candidate in directory.iterdir() if candidate.is_file()
+        ]
+        raise RuntimeError(
+            "PCO did not leave exactly one nonempty pcoraw file in "
+            f"{directory}; directory contents: {contents}"
+        )
+    path = nonempty[0]
 
     sync_started = time.perf_counter()
     with path.open("r+b", buffering=0) as handle:
@@ -242,8 +259,8 @@ def run(cfg: lab.Settings, *, reference_report: dict | None = None,
             report["settings_readback"] = lab.snapshot(camera)
             shape = (cfg.roi[3] - cfg.roi[1], cfg.roi[2] - cfg.roi[0])
             for count in frames:
-                path = run_dir / f"native_{count}.pcoraw"
-                result = _record_one(camera._cam, path, count, shape, cfg.target_fps)
+                directory = run_dir / f"native_{count}"
+                result = _record_one(camera._cam, directory, count, shape, cfg.target_fps)
                 report["runs"].append(result)
         long_run = report["runs"][-1]
         report["camware_reference_fps"] = cfg.camware_fps

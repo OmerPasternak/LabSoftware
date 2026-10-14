@@ -36,7 +36,9 @@ class FakePco:
     def record(self, *, number_of_images: int, mode: str, file_path: str) -> None:
         assert mode == "pcoraw"
         self.rec.frames = number_of_images
-        Path(file_path).write_bytes(b"fake native recorder output")
+        (Path(file_path) / "pco_generated_name.pcoraw").write_bytes(
+            b"fake native recorder output"
+        )
 
     def stop(self) -> None:
         self.stopped = True
@@ -53,7 +55,7 @@ def test_native_file_trial_checks_counts_pixels_and_ids(tmp_path, monkeypatch):
     # Offline CI deliberately omits the optional physical-camera SDK.
     monkeypatch.setattr(filemode.importlib.metadata, "version", lambda package: "2.2.1-test")
     camera = FakePco()
-    result = _record_one(camera, tmp_path / "trial.pcoraw", 4, (4, 8), 455.0)
+    result = _record_one(camera, tmp_path / "trial", 4, (4, 8), 455.0)
     assert camera.stopped
     assert result["frames_read_back"] == 4
     assert result["consecutive_frame_ids"]
@@ -64,12 +66,12 @@ def test_native_file_trial_checks_counts_pixels_and_ids(tmp_path, monkeypatch):
 def test_native_file_trial_rejects_recorder_error_and_frame_gap(tmp_path):
     errored = FakePco(error=1)
     with pytest.raises(RuntimeError, match="recorder reported an error"):
-        _record_one(errored, tmp_path / "error.pcoraw", 4, (4, 8), 455.0)
+        _record_one(errored, tmp_path / "error", 4, (4, 8), 455.0)
     assert errored.stopped
 
     gapped = FakePco(gap=True)
     with pytest.raises(RuntimeError, match="frame-ID gap"):
-        _record_one(gapped, tmp_path / "gap.pcoraw", 4, (4, 8), 455.0)
+        _record_one(gapped, tmp_path / "gap", 4, (4, 8), 455.0)
     assert gapped.stopped
 
 
