@@ -411,6 +411,8 @@ class PcoEdgeCamera(BaseCamera):
             raise ValueError("num_frames and batch_size must be >= 1.")
 
         previous_id: int | None = None
+        # Explicit 4C profiling only; ordinary acquisitions add no timing calls.
+        diagnostics = getattr(self, "acquisition_diagnostics", None)
         images: list[np.ndarray] = []
         metas: list[Dict[str, Any]] = []
         try:
@@ -441,6 +443,7 @@ class PcoEdgeCamera(BaseCamera):
                     )
                 frame, raw_meta = self._cam.image(image_index=0)
                 host_frame_read_ns = time.perf_counter_ns()
+                handling_started = time.perf_counter() if diagnostics is not None else 0.0
                 frame = np.asarray(frame)
                 expected_shape = (roi[3] - roi[1], roi[2] - roi[0])
                 if frame.dtype != np.uint16 or frame.shape != expected_shape:
@@ -468,11 +471,21 @@ class PcoEdgeCamera(BaseCamera):
                     "exposure_s": self._exposure_time_s,
                     "roi": roi,
                 })
+                if diagnostics is not None:
+                    diagnostics.stage("python_frame_handling", time.perf_counter() - handling_started)
                 if len(images) == batch_size:
-                    yield np.stack(images, axis=0), metas
+                    stack_started = time.perf_counter() if diagnostics is not None else 0.0
+                    batch = np.stack(images, axis=0)
+                    if diagnostics is not None:
+                        diagnostics.stage("batch_stack", time.perf_counter() - stack_started)
+                    yield batch, metas
                     images, metas = [], []
             if images:
-                yield np.stack(images, axis=0), metas
+                stack_started = time.perf_counter() if diagnostics is not None else 0.0
+                batch = np.stack(images, axis=0)
+                if diagnostics is not None:
+                    diagnostics.stage("batch_stack", time.perf_counter() - stack_started)
+                yield batch, metas
             status = self._cam.rec.get_status()
             if status.get("bFIFOOverflow") or status.get("dwLastError"):
                 raise RuntimeError(

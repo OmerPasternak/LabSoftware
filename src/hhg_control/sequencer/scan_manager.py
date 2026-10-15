@@ -380,6 +380,7 @@ class CameraScanManager:
         producer_started = 0.0
         producer_finished = 0.0
         producer_copy_s = 0.0
+        producer_latest_frame_copy_s = 0.0
         producer_copied_image_bytes = 0
         queue_put_durations: list[float] = []
         queue_full_wait_events = 0
@@ -569,7 +570,13 @@ class CameraScanManager:
                                 ) from exc
                     queue_put_durations.append(time.perf_counter() - queue_put_started)
                     captured += len(images)
+                    diagnostics = getattr(self.camera, "acquisition_diagnostics", None)
+                    if diagnostics is not None:
+                        diagnostics.queue_sample(captured, written, pending.qsize(),
+                                                 queue_capacity_frames, queue_capacity_bytes)
+                    latest_copy_started = time.perf_counter()
                     latest_frame = images[-1].copy()
+                    producer_latest_frame_copy_s += time.perf_counter() - latest_copy_started
                 if abort_check is not None and abort_check() and captured != num_frames:
                     raise AcquisitionAborted(
                         f"Acquisition stopped after {captured} of {num_frames} frames."
@@ -595,8 +602,11 @@ class CameraScanManager:
                 writer_drain_s = time.perf_counter() - drain_started
 
         self.last_step_timing = {
+            "captured_frames": captured,
+            "written_frames": written,
             "producer_total_s": max(0.0, producer_finished - producer_started),
             "producer_copy_s": producer_copy_s,
+            "producer_latest_frame_copy_s": producer_latest_frame_copy_s,
             "producer_copied_image_bytes": producer_copied_image_bytes,
             "producer_queue_put_s": float(sum(queue_put_durations)),
             "producer_queue_put_max_s": float(max(queue_put_durations)) if queue_put_durations else 0.0,

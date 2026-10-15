@@ -31,10 +31,15 @@ def test_batch_control_uses_production_writer_and_keeps_config(cfg, capsys):
     runs = report["drives"]["selected"]["runs"]
     assert [run["batch_size"] for run in runs] == [1, 4, 4, 1]
     assert all(run["saved"]["frames"] == 7 and run["saved"]["consecutive_ids"] for run in runs)
+    assert all(run["queue_discard"]["frames"] == 7 for run in runs)
     assert all(Path(run["saved"]["file"]).is_file() for run in runs)
     assert cfg.batch_size == 4 and cfg.speed_frames == 8
     persisted = json.loads(Path(report["report_file"]).read_text(encoding="utf-8"))
     assert persisted["drives"]["selected"]["within_output_cap"]
+    details = persisted["drives"]["selected"]["diagnostics"]
+    assert all(item["pixel_integrity"]["status"] == "VERIFIED" for item in details)
+    assert all(item["saved"]["camera_timestamp_status"] == "UNAVAILABLE" for item in details)
+    assert all(item["interpretation"]["run_complete"] for item in details)
 
 
 def test_batch_budget_fails_before_camera_access(cfg, monkeypatch):
@@ -196,3 +201,97 @@ def test_pixel_trial_budget_stops_before_camera(cfg, monkeypatch):
     report = diagnostics.run_hdf5_pixel_verification_trial(cfg, frames=1_000_000, max_output_gb_per_drive=0.1)
     assert report["status"] == "FAILED"
     assert "exceeds the per-drive cap" in report["error"]
+
+
+@pytest.mark.parametrize("budget,files", [(40, 3), (20, 3), (100, 1), (200, 1), (40, 4), (200, 4)])
+def test_stage_budget_includes_all_files_and_metadata(cfg, budget, files):
+    frames = diagnostics.stage_frames(cfg, budget, files)
+    frame_bytes = 64 * 32 * 2
+    total = frames * files * (frame_bytes + 4096) + files * 100_000_000
+    assert total <= budget * 1e9
+    assert budget * 1e9 - total < files * (frame_bytes + 4096)
+
+
+def test_stage_profile_and_continuous_selection_guard(cfg, monkeypatch):
+    assert diagnostics.stage_profile("C", 200) == 40
+    assert diagnostics.stage_profile("D", 100) == 100
+    with pytest.raises(ValueError):
+        diagnostics.stage_profile("D", 40)
+    with pytest.raises(ValueError):
+        diagnostics.stage_profile("invalid")
+    def forbidden(*args):
+        raise AssertionError("Camera must not be reached")
+    monkeypatch.setattr(lab, "configured_camera", forbidden)
+    report = diagnostics.run_batch_size_trial(cfg, stage_output_gb=200)
+    assert report["status"] == "FAILED"
+    assert "selected_batch_size" in report["error"]
+
+
+def test_hdf5_only_control_remains_synthetic(cfg, monkeypatch):
+    def forbidden(*args):
+        raise AssertionError("No camera")
+    monkeypatch.setattr(lab, "configured_camera", forbidden)
+    report = diagnostics.run_bin_hdf5_trial(cfg, target_raw_gb_per_format=7 * 4096 / 1e9, include_bin=False)
+    assert report["status"] == "EXECUTED", report.get("error")
+    assert {run["format"] for run in report["drives"]["selected"]["runs"]} == {"hdf5"}
+    assert len(report["drives"]["selected"]["runs"]) == 2
+
+
+def test_interpretation_distinguishes_retrieval_and_postcapture_delay():
+    from scripts.capture_diagnostics import interpret
+    capture = {"frames": 2000, "total_fps": 449, "profile": {"host_first_to_last_fps": 450}}
+    queued = {"frames": 2000, "total_fps": 448, "profile": {"host_first_to_last_fps": 450}}
+    saved = {"frames": 2000, "total_fps": 440, "synced_fps": 300,
+             "total_close_s": 2000 / 440, "synced_s": 2000 / 300,
+             "final_os_fsync_s": 2000 / 300 - 2000 / 440,
+             "profile": {"camera_cadence_fps": 455, "host_first_to_last_fps": 450, "frames_returned": 2000,
+                         "fifo_capacity_frames": 409, "frame_id_gap_events": 0, "fifo_overflow": False}}
+    result = diagnostics.capture_diag.interpret(capture, queued, saved, 455, "physical")
+    assert result["camera_minus_host_fps"] == 5
+    assert result["saved_minus_durable_fps"] == 140
+    assert result["camera_side_missing_frame_count"] is None
+    assert not result["observed_transfer_error"]
+    assert result["fifo_fill_estimate_s_if_rates_persist"] == pytest.approx(409 / 5)
+    saved["profile"]["camera_cadence_fps"] = None
+    result = interpret(capture, queued, saved, 455, "physical")
+    assert result["reference_minus_camera_fps"] is None
+    assert any("unavailable" in text.lower() for text in result["findings"])
+    saved["profile"]["fifo_overflow"] = True
+    assert interpret(capture, queued, saved, 455, "physical")["observed_transfer_error"]
+
+
+def test_camera_time_never_uses_host_fallback(cfg):
+    from scripts.capture_diagnostics import Probe
+    probe = Probe(object())
+    probe.observe(np.zeros((2, 1, 2), dtype=np.uint16), [
+        {"frame_id": i, "camera_timestamp": 100 + i / 455, "timestamp_source": "host_fallback"}
+        for i in range(2)
+    ])
+    assert probe.summary()["camera_cadence_fps"] is None
+
+
+def test_batch_failure_retains_partial_profile_and_original_error(cfg, monkeypatch):
+    def fail(camera, config, *args, **kwargs):
+        # Exercise acquisition/queue before simulating a storage failure.
+        list(camera.iter_frames(3, batch_size=2))
+        raise OSError("Injected disk failure")
+    monkeypatch.setattr(lab, "saved_run", fail)
+    report = diagnostics.run_batch_size_trial(cfg, batch_sizes=(2,), frames=3)
+    assert report["status"] == "FAILED"
+    assert "Injected disk failure" in report["error"]
+    packet = json.loads(Path(report["report_file"]).read_text(encoding="utf-8"))
+    details = packet["drives"]["selected"]["diagnostics"][0]
+    assert details["saved"]["frames_returned"] == 3
+    assert not details["interpretation"]["run_complete"]
+
+
+def test_stages_do_not_allocate_gigabytes_or_mutate_config(cfg, monkeypatch):
+    # Test orchestration with a tiny substitute for the stage planner. Actual
+    # large-volume arithmetic is checked above; CI never allocates GB payloads.
+    monkeypatch.setattr(diagnostics, "stage_frames", lambda cfg, budget, files: 7)
+    report = diagnostics.run_batch_size_trial(cfg, stage_output_gb=200, selected_batch_size=4)
+    assert report["status"] == "EXECUTED", report.get("error")
+    assert len(report["drives"]["selected"]["runs"]) == 1
+    assert cfg.max_section_raw_gb == 120
+    report = diagnostics.run_bin_hdf5_trial(cfg, stage_output_gb=200)
+    assert report["status"] == "EXECUTED", report.get("error")

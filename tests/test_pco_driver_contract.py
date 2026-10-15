@@ -38,6 +38,78 @@ class FakePcoCamera:
         self.is_recording = False
 
 
+@pytest.mark.parametrize("gap", [False, True])
+def test_passive_capture_profile_keeps_sdk_calls_and_restores_camera(monkeypatch, gap):
+    """Profile the real FIFO driver using only a fake SDK; detect pre-rejection IDs."""
+    from scripts.capture_diagnostics import profiled_camera
+    fake = FakePcoCamera("USB 3.0")
+    numbers = iter((10, 12, 13, 14, 15) if gap else range(10, 15))
+    fake.rec = SimpleNamespace(get_status=lambda: {"bFIFOOverflow": False, "dwLastError": 0})
+    def image(image_index=0):
+        number = next(numbers)
+        return np.ones((16, 64), dtype=np.uint16), {
+            "recorder image number": number,
+            "timestamp": {"year": 2026, "month": 10, "day": 15, "hour": 12, "minute": 0,
+                          "second": 10 + (number - 10) / 455},
+        }
+    fake.image = image
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface, serial: fake))
+    monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
+    camera = pco_edge.PcoEdgeCamera(serial="12345")
+    camera.connect()
+    try:
+        with profiled_camera(camera) as (profiled, probe):
+            assert camera._cam.sdk is fake.sdk
+            assert profiled.get_trigger_mode().value == "auto sequence"
+            assert profiled.get_readout_mode() is not None
+            if gap:
+                with pytest.raises(RuntimeError, match="frame gap"):
+                    list(profiled.iter_frames(5, batch_size=2))
+                assert probe.summary()["sdk_frame_id_gap_events"] == 1
+            else:
+                list(profiled.iter_frames(5, batch_size=2))
+                result = probe.summary()
+                assert result["camera_cadence_fps"] == pytest.approx(455, rel=1e-4)
+                assert result["stages"]["sdk_image_copy"]["calls"] == 5
+                assert result["stages"]["python_frame_handling"]["calls"] == 5
+                assert result["stages"]["batch_stack"]["calls"] == 3
+                assert result["stages"]["sdk_stop"]["calls"] == 1
+                assert result["fifo_overflow"] is False
+        assert camera._cam is fake
+        assert not hasattr(camera, "acquisition_diagnostics")
+        assert fake.record_calls == [(5, "fifo")]
+        assert not fake.is_recording
+    finally:
+        camera.close()
+
+
+def test_profiled_fake_sdk_through_production_writer(monkeypatch, tmp_path):
+    """Check the complete metadata/SDK/writer path, not just generator iteration."""
+    from scripts import lab_computer_acceptance as lab
+    from scripts.capture_diagnostics import profiled_camera
+    fake = FakePcoCamera("USB 3.0")
+    numbers = iter(range(10, 15))
+    fake.rec = SimpleNamespace(get_status=lambda: {"bFIFOOverflow": False, "dwLastError": 0})
+    fake.image = lambda image_index=0: (np.ones((16, 64), dtype=np.uint16),
+                                      {"recorder image number": next(numbers)})
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface, serial: fake))
+    monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
+    camera = pco_edge.PcoEdgeCamera(serial="12345")
+    camera.connect()
+    try:
+        cfg = lab.Settings(output_dir=tmp_path, roi=camera.get_roi(),
+                           exposure_s=camera.get_exposure_time(), readout=camera.get_readout_mode(), batch_size=2)
+        with profiled_camera(camera, hash_pixels=True) as (profiled, probe):
+            result = lab.saved_run(profiled, cfg, "profiled_fake_sdk", 5)
+            assert result["complete"] and result["frames"] == 5
+            assert result["pipeline_stage_timing_s"]["captured_frames"] == 5
+            assert result["pipeline_stage_timing_s"]["written_frames"] == 5
+            assert len(probe.blocks) == 3
+        assert camera._cam is fake
+    finally:
+        camera.close()
+
+
 class FakeSdk:
     def __init__(self):
         self.setup = 1

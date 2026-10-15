@@ -49,59 +49,87 @@ Use one destination per drive. Every requested drive is preflighted for the
 complete retained payload before recording or writing. Files are retained in
 new directories and research data is never overwritten or deleted.
 
-### 4C: batches of 4, 16 and 64
+### 4C: camera cadence, host processing, queue and production HDF5
 
-Uses the existing configured camera and production HDF5 path. Physical runs
-apply the already reviewed serial, ROI, exposure, shutter and Auto Sequence;
-mock runs exercise the same orchestration. On each drive, it records
-capture-only and saved timing for 2,000 frames at each batch size. The default
-one repetition retains about 3.93 GB at 2560x128. The default cap is 8 GB.
-Two repetitions reverse batch order on the second pass; set the cap to at least
-9 GB for that profile, provided free-space preflight permits it.
+The notebook now selects one explicit drive/stage. C uses a 40 GB total retained
+output budget. D selects 20, 100 or 200 GB; it never advances automatically.
+C/D20 divide the budget across batches 4/16/64. D100/D200 require a selected
+batch from screening and retain one continuous recording. Metadata reserves
+(4 KiB/frame plus 100 MB/file) are inside the budget, reducing raw pixel payload
+slightly. All retained outputs are checked together. Existing 1.5x free-space
+reserve remains: C40 generally requires about 60 GB free. Runs do not delete
+older files. Both sections/all stages can retain up to 80 GB on C and 640 GB on D.
 
-The combined `section_4c_<UTC>.json` and matching `.log` are directly in the
-first selected test folder. Each drive retains its data in a separate
-`BENCHMARK_ONLY_section_4c_*` subfolder.
-Inspect:
+Uses the existing reviewed configuration, with no new SDK configuration setter.
+A one-time optional SDK configuration readback records pixel rate, binning,
+exposure/delay and ROI outside rate timing; non-unit binning stops the diagnostic.
+For each batch it compares matched-count capture-only, bounded queue-to-discard,
+and production HDF5. Long stages require roughly three acquisition intervals
+plus sync/readback; only HDF5 retains image payload. Hashing defaults on across
+all three full measured modes for comparable processing work. A separate short
+pair (at most 2,000 frames) measures uninstrumented versus instrumented capture.
 
-- Capture-only FPS versus saved and durable FPS for each batch.
-- HDF5 batch-write durations and periodic/final flush time.
-- Producer queue waits, maximum occupancy and post-capture drain time.
-- Frame count, consecutive IDs, file completion and final fsync time.
-- Repetition variability before choosing a batch size for production.
+The old capture_fps remains N / total capture-only wall duration: recorder
+setup/start, SDK reads, Python batch handling/validation and stop. It is not
+necessarily comparable to a displayed CamWare camera-timing number. Additional
+boundaries are first-to-last host image returns, camera timestamp cadence only
+when documented PCO timestamps are valid for every frame, and startup/stop
+costs. Host fallback/simulated timestamps never establish physical camera cadence.
+The report retains the user-entered CamWare reference without declaring its
+measurement boundary verified.
 
-Changing the batch size also changes the cadence of the current writer's
-flush every 32 batches. This is intentionally a comparison of practical batch
-profiles, not a test that independently attributes gains to chunk shape or
-flush frequency. The production chunk layout is unchanged.
+Passive SDK proxies time only existing record/wait/status/image/stop calls;
+profiling restores the original SDK object even after an error. Image-copy timing
+includes work within that vendor API, not an independent USB-only measurement.
+Driver opt-in timing separates Python frame/metadata work and np.stack. SDK wait
+can be normal acquisition waiting. Source hashes and observer CPU work are
+reported. The mock counterpart exercises the orchestration without an SDK.
 
-### 4D: identical data in BIN and HDF5
+Queue-to-discard uses a bounded queue, owned-batch semantics and the production
+queue-size rule; it is a diagnostic control, not a second writer implementation.
+The production writer records captured/written counts, queue capacity/max/full
+waits, bounded occupancy/progress series, write/flush/close and writer drain.
+Reports retain stage totals/maxima, FIFO capacity, available raw recorder counters,
+overflow/errors, ID provenance/gaps and count/completion checks. Raw recorder
+counts are not assumed to be FIFO occupancy; unknown measurements stay unavailable.
 
-Never opens hardware, even if setup selects a physical camera. Uses a bounded
-seeded random uint16 frame bank, with distinct 32-bit frame markers and
-identical per-frame JSON metadata. BIN is little-endian, C-order
-`[frame, y, x]`, with a JSON-lines sidecar; dimensions and byte order are in the
-report. HDF5 uses `/images` and `/frame_metadata/json`, production chunk shape
-and `_write_batch` serialization. It is labelled `diagnostic-1.0`, not research
-schema 2.0, because this isolates synchronous storage operations and omits
-production acquisition/queue orchestration.
+Every saved HDF5 pixel is read after close/fsync and checked against source hashes;
+keep its sidecar manifest. Pixel failures raise and retain original files. Errors
+preserve available profiles, counts, original exception text and partial paths.
+The structured interpretation distinguishes camera/host rate gaps, changing
+queue/writer behavior, and fsync after capture. Rate differences are not lost-frame
+counts. Any FIFO-fill estimate is an explicitly conditional model assuming steady
+rates and an initially empty FIFO. Sensor-side missing frames and external-trigger
+accounting remain unknown without independent evidence. Pipeline stages overlap;
+do not add stage times. Flush cadence remains every 32 batches.
 
-Default payload is approximately 2 GB per format/policy: 8 GB per drive, with
-periodic-sync comparison enabled. Disabling it retains 4 GB per drive. The output
-cap cannot exceed 30 GB. Preparation and source hashing occur before write
-timing. All pixels and JSON frame IDs are read back in bounded blocks and
-checked after the mandatory final fsync; readback has separate timing.
+### 4D: synthetic format and synchronization control
 
-The first drive runs HDF5 then BIN; the next reverses that order. One pass is
-not enough to establish a robust sustained advantage. Small payloads can fit
-in OS/SSD caches, even though the final sync is measured.
+Never opens hardware, even with a physical setup. Uses a bounded seeded uint16
+bank, distinct 32-bit frame markers and identical JSON metadata. BIN is little-
+endian C-order [frame,y,x] with a JSON-lines metadata sidecar. HDF5 keeps /images,
+/frame_metadata/json, production chunk shape and batch serialization, labelled
+schema diagnostic-1.0 because it omits physical/queue orchestration.
 
-`COMPARE_PERIODIC_SYNC=True` is the default. The additional pair syncs every
-0.25 GB and still syncs at the end. It affects only this synthetic diagnostic. Compare
-total durable seconds/MB/s, not just a shorter final pause. An immediate second
-fsync is recorded after the timed durability interval; a fast second call is
-consistent with the first having drained outstanding writes, but does not
-identify the specific driver or SSD mechanism by itself.
+The same one-stage selection applies: C40 or D20/D100/D200 total GB, metadata
+reserves included. Default two formats/two sync policies divide each stage into
+four files, roughly 10 GB each for C and 5/25/50 GB each on D before reserves.
+Longer files increase sustained-load evidence but do not guarantee every SSD
+cache is exhausted. Library callers can still request small offline controls.
+
+COMPARE_PERIODIC_SYNC=True compares final-only and periodic-plus-final fsync
+(every 0.25 GB); every run ends with fsync. Compare full durable duration, not
+just the final pause. The immediate second fsync is outside the durable interval.
+Source hash preparation precedes write timing; full pixel/metadata verification
+follows it. CPU, bounded write-progress curves, sync and readback timings remain
+in the compact report for comparison with physical 4C. Synthetic equivalent FPS
+is not physical camera FPS. A short final sync alone does not locate Windows,
+controller, firmware, cache or filesystem overhead.
+
+INCLUDE_BIN_COMPARISON remains True: existing evidence established HDF5 versus
+native PCO .pcoraw, not BIN. Change it to False once matched repeated evidence
+settles that question; the same stage budget then divides into two HDF5 policies.
+The storage interpretation explicitly avoids declaring a winner from one pass.
 
 ### Compact reports for analysis and charts
 
