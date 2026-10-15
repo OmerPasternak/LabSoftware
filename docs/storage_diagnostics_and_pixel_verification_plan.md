@@ -131,6 +131,47 @@ native PCO .pcoraw, not BIN. Change it to False once matched repeated evidence
 settles that question; the same stage budget then divides into two HDF5 policies.
 The storage interpretation explicitly avoids declaring a winner from one pass.
 
+### ROI windows in 4C and 4D
+
+The notebook exposes small = (0,1016,2560,1144), medium = (0,540,2560,1620)
+and large = (0,0,2560,2160). Dimensions are 2560x128, 2560x1080 and 2560x2160.
+Medium keeps full width and half sensor height: exactly half the full-frame
+pixels. No binning is used. Helpers create settings copies, preserving CONFIG.
+
+4C uses BATCH_WINDOW, selected manually for one window per physical/mock run.
+Each run retains its own selected C40 or D20/100/200 budget. Small defaults to
+batches 4/16/64; medium/large use 4/16 to stay within the 256 MiB image-batch
+limit. Long stages require a selected batch appropriate for that window.
+Oversized custom batches fail before camera connection.
+
+4D automatically sweeps FORMAT_WINDOWS=("small","medium","large"). Its one
+stage budget is shared across every window, format and sync policy. With BIN
+and both policies, there are 12 files: C40 allocates about 3.33 GB/file and
+D20/100/200 about 1.67/8.33/16.67 GB/file before metadata reserves. The entire
+combined allocation is checked before writing. Shorter per-file sizes affect
+cache interpretation; this sweep is not three separate full-budget stages.
+
+Running all three manual 4C windows plus the complete automatic 4D sweep at
+every stage can retain up to 160 GB on C and 1280 GB on D. One selected 4C
+window plus the complete 4D sweep retains up to the earlier 80/640 GB totals.
+Nothing deletes previous outputs or advances D stages automatically.
+
+Data filenames and folders have suffix tags such as small_2560x128,
+medium_2560x1080 and large_2560x2160. Individual 4C report/log names carry the
+selected tag. The combined 4D report/log has all_windows; each result row and
+its windows map identify the exact size, tag, bytes/frame and chart reference.
+The mixed report has no fictitious common shape/target. BIN metadata filenames
+also carry their window tag. A one-window 4D override uses that individual tag.
+
+The [Excelitas pco.edge 5.5 USB Global Shutter table](https://www.excelitas.com/assets/product/document/pcoedge-55-usb-datasheet.pdf?file=26806.pdf)
+lists 455 fps at 2560x128 and 28 fps at 2560x2160. It has no exact 2560x1080
+entry, so medium's reference stays unknown, without interpolation or borrowing
+the 1920x1080 rate. Rates are measured normally; the report does not compare
+medium or full frame against 455 fps. These references are not applied FPS caps.
+4D's FPS is synthetic storage-equivalent throughput; physical camera cadence
+comes from manual 4C acquisition. Shutter, exposure and trigger behavior retain
+the existing reviewed configuration.
+
 ### Compact reports for analysis and charts
 
 Reports are directly in the selected test folder, not in data subfolders.

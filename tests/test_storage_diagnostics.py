@@ -295,3 +295,95 @@ def test_stages_do_not_allocate_gigabytes_or_mutate_config(cfg, monkeypatch):
     assert cfg.max_section_raw_gb == 120
     report = diagnostics.run_bin_hdf5_trial(cfg, stage_output_gb=200)
     assert report["status"] == "EXECUTED", report.get("error")
+
+
+def test_window_presets_are_exact_unbinned_area_and_keep_config(cfg):
+    expected = {"small": (0, 1016, 2560, 1144), "medium": (0, 540, 2560, 1620),
+                "large": (0, 0, 2560, 2160)}
+    for name, roi in expected.items():
+        changed, info = diagnostics.window_settings(cfg, name)
+        assert changed.roi == roi
+        assert info["roi"] == list(roi)
+        assert info["tag"].endswith(f"2560x{roi[3] - roi[1]}")
+        assert changed.exposure_s == cfg.exposure_s and changed.readout == cfg.readout
+        assert cfg.roi == (0, 0, 64, 32)
+    _, medium = diagnostics.window_settings(cfg, "medium")
+    _, large = diagnostics.window_settings(cfg, "large")
+    assert medium["bytes_per_frame"] * 2 == large["bytes_per_frame"]
+    assert medium["chart_reference_fps"] is None
+    assert large["chart_reference_fps"] == 28
+    with pytest.raises(ValueError):
+        diagnostics.window_settings(cfg, "invalid")
+
+
+def test_automatic_window_sweep_tags_every_output_and_never_opens_camera(cfg, monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("4D must not touch a camera")
+    monkeypatch.setattr(lab, "configured_camera", forbidden)
+    monkeypatch.setattr(diagnostics, "ROI_WINDOWS", {
+        "small": ((0, 8, 64, 24), 455), "medium": ((0, 4, 64, 28), None), "large": ((0, 0, 64, 32), 28)})
+    monkeypatch.setattr(diagnostics, "stage_frames", lambda cfg, budget, files: 7)
+    report = diagnostics.run_bin_hdf5_trial(cfg, windows=("small", "medium", "large"), stage_output_gb=40)
+    assert report["status"] == "EXECUTED", report.get("error")
+    assert Path(report["report_file"]).stem.endswith("_all_windows")
+    packet = json.loads(Path(report["report_file"]).read_text(encoding="utf-8"))
+    assert packet["shape_y_x"] is None and packet["target_fps"] is None
+    assert len(packet["rows"]) == 12
+    assert set(packet["windows"]) == {"small", "medium", "large"}
+    assert packet["windows"]["medium"]["chart_reference_fps"] is None
+    for run in report["drives"]["selected"]["runs"]:
+        assert Path(run["file"]).stem.endswith(run["window_tag"])
+        assert run["pixels_equal_source"]
+        if run["format"] == "bin":
+            assert Path(run["metadata_file"]).stem.endswith(run["window_tag"])
+    assert cfg.roi == (0, 0, 64, 32) and cfg.target_fps == 400
+
+
+@pytest.mark.parametrize("budget", [20, 40, 100, 200])
+def test_all_window_plans_share_one_total_budget(cfg, budget):
+    total = 0
+    controls, windows = 4, 3
+    for name in ("small", "medium", "large"):
+        window_cfg, info = diagnostics.window_settings(cfg, name)
+        frames = diagnostics.stage_frames(window_cfg, budget, controls * windows)
+        total += controls * (frames * (info["bytes_per_frame"] + 4096) + 100_000_000)
+    assert total <= budget * 1e9
+    assert total > budget * 1e9 * 0.99
+
+
+def test_manual_window_selects_one_roi_and_tags_saved_file(cfg, monkeypatch):
+    monkeypatch.setattr(diagnostics, "ROI_WINDOWS", {
+        "small": ((0, 8, 64, 24), 455), "medium": ((0, 4, 64, 28), None), "large": ((0, 0, 64, 32), 28)})
+    report = diagnostics.run_batch_size_trial(cfg, window="medium", batch_sizes=(2,), frames=7)
+    assert report["status"] == "EXECUTED", report.get("error")
+    assert Path(report["report_file"]).stem.endswith("_medium_64x24")
+    run = report["drives"]["selected"]["runs"][0]
+    assert Path(run["saved"]["file"]).stem.endswith("_medium_64x24")
+    assert run["saved"]["shape_frame_y_x"] == [7, 24, 64]
+    packet = json.loads(Path(report["report_file"]).read_text(encoding="utf-8"))
+    assert packet["target_fps"] is None
+    assert packet["required_raw_MB_per_s"] is None
+    assert cfg.roi == (0, 0, 64, 32)
+
+
+def test_combined_sweep_space_checked_before_any_payload(cfg, monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(diagnostics.shutil, "disk_usage", lambda path: SimpleNamespace(free=30_000_000_000))
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Payload must not be written before combined preflight")
+    monkeypatch.setattr(diagnostics, "_write_control", forbidden)
+    report = diagnostics.run_bin_hdf5_trial(cfg, stage_output_gb=40, windows=("small", "medium", "large"))
+    assert report["status"] == "FAILED"
+    assert "Not enough free space for all windows" in report["error"]
+    assert report["drives"] == {}
+
+
+def test_single_synthetic_window_reports_its_actual_shape(cfg, monkeypatch):
+    monkeypatch.setattr(diagnostics, "ROI_WINDOWS", {"large": ((0, 0, 64, 32), 28)})
+    monkeypatch.setattr(diagnostics, "stage_frames", lambda cfg, budget, files: 7)
+    report = diagnostics.run_bin_hdf5_trial(cfg, windows=("large",), stage_output_gb=40)
+    assert report["status"] == "EXECUTED", report.get("error")
+    packet = json.loads(Path(report["report_file"]).read_text(encoding="utf-8"))
+    assert packet["shape_y_x"] == [32, 64]
+    assert packet["target_fps"] == 28
+    assert Path(report["report_file"]).stem.endswith("_large_64x32")

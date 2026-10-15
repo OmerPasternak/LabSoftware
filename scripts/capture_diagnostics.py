@@ -350,8 +350,9 @@ def interpret(capture, queued, saved, target_fps, source, tolerance=0.005):
     if source != "physical":
         statements.append("Mock source: physical camera/USB conclusions are unavailable.")
     elif actual is None:
-        statements.append(f"Camera cadence unavailable: host timing cannot establish whether the camera ran at {target_fps:g} fps or quantify camera-side loss.")
-    elif actual < target_fps * (1 - tolerance):
+        reference_text = f"{target_fps:g} fps" if target_fps is not None else "an unknown chart-reference rate"
+        statements.append(f"Camera cadence unavailable: host timing cannot establish whether the camera ran at {reference_text} or quantify camera-side loss.")
+    elif target_fps is not None and actual < target_fps * (1 - tolerance):
         statements.append("Camera timestamps show cadence below the reference; this does not alone identify sensor, SDK or host-induced throttling.")
     elif host is not None and host < actual * (1 - tolerance):
         statements.append("Camera cadence exceeds host retrieval: investigate SDK copying, Python handling and growing FIFO backlog; rate gap is not a missing-frame count.")
@@ -377,7 +378,7 @@ def interpret(capture, queued, saved, target_fps, source, tolerance=0.005):
     return {"observed_transfer_error": loss, "run_complete": not incomplete,
             "camera_side_missing_frame_count": None,
             "rate_comparison_note": "Differences below compare measurement boundaries/runs, not independent lost-frame counts or additive causes.",
-            "reference_minus_camera_fps": target_fps - actual if actual else None,
+            "reference_minus_camera_fps": target_fps - actual if actual and target_fps is not None else None,
             "camera_minus_host_fps": actual - host if actual and host else None,
             "host_minus_saved_wall_fps": host - saved["total_fps"] if host and saved.get("total_fps") else None,
             "saved_minus_durable_fps": saved["total_fps"] - saved["synced_fps"]

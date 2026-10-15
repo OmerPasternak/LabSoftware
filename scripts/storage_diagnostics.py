@@ -26,6 +26,50 @@ from scripts import capture_diagnostics as capture_diag
 from hhg_control.sequencer.scan_manager import CameraScanManager, _frame_chunk_shape
 
 
+ROI_WINDOWS = {
+    "small": ((0, 1016, 2560, 1144), 455.0),
+    "medium": ((0, 540, 2560, 1620), None),  # Half the full-frame pixels; full width, half height.
+    "large": ((0, 0, 2560, 2160), 28.0),
+}
+ROI_CHART_SOURCE = "https://www.excelitas.com/assets/product/document/pcoedge-55-usb-datasheet.pdf?file=26806.pdf"
+
+
+def window_settings(cfg, window=None):
+    """Return a copy with an unbinned centered ROI and an explicit report/name tag.
+
+    Medium is exactly half the full-frame area, not binning. The vendor GS table
+    has no exact 2560x1080 entry: its reference remains unknown, never extrapolated.
+    None preserves caller settings for existing scripts and small offline mocks.
+    """
+    if window is not None and window not in ROI_WINDOWS:
+        raise ValueError("Window must be small, medium or large")
+    roi = tuple(cfg.roi) if window is None else ROI_WINDOWS[window][0]
+    label = window or next((name for name, item in ROI_WINDOWS.items() if item[0] == roi), "custom")
+    reference = ROI_WINDOWS[label][1] if label in ROI_WINDOWS and cfg.readout == lab.ReadoutMode.GLOBAL_SHUTTER else None
+    width, height = roi[2] - roi[0], roi[3] - roi[1]
+    info = {"name": label, "tag": f"{label}_{width}x{height}", "roi": list(roi),
+            "shape_y_x": [height, width], "bytes_per_frame": width * height * 2,
+            "chart_reference_fps": reference, "chart_source": ROI_CHART_SOURCE,
+            "reference_note": "GS chart reference, not measured cadence; medium has no exact table entry."}
+    return replace(cfg, roi=roi, target_fps=reference if window is not None and reference is not None else cfg.target_fps,
+                   camware_fps=cfg.camware_fps if tuple(cfg.roi) == roi else None), info
+
+
+class _WindowManager(CameraScanManager):
+    """Retain the production writer while placing the ROI tag at the filename end."""
+
+    def __init__(self, *args, window_tag, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.window_tag = window_tag
+
+    def _unique_filepath(self, *args, **kwargs):
+        path = super()._unique_filepath(*args, **kwargs)
+        path = path.with_name(f"{path.stem}_{self.window_tag}{path.suffix}")
+        if path.exists() or path.with_suffix(".h5.partial").exists():
+            raise FileExistsError(f"Tagged diagnostic output already exists: {path}")
+        return path
+
+
 def _volume_key(path: Path) -> str:
     """Identify a Windows drive or POSIX anchor for preflight volume separation."""
     return PureWindowsPath(str(path)).drive.casefold() or path.anchor
@@ -64,14 +108,30 @@ def _analysis_report(report: dict) -> dict:
                   physical_acceptance=False, drives={})
     if "diagnostic_settings" in report:
         packet["diagnostic_settings"] = report["diagnostic_settings"]
+    if "windows" in report:
+        packet["windows"] = report["windows"]
+        packet["window_tag"] = report["window_tag"]
+        if len(report["windows"]) != 1:
+            for key in ("shape_y_x", "bytes_per_frame", "target_fps", "required_raw_MB_per_s", "margin_target_MB_per_s"):
+                packet[key] = None  # Mixed sizes have per-window values, not one fictitious common rate.
+        else:
+            info = next(iter(report["windows"].values()))
+            packet["shape_y_x"] = info["shape_y_x"]
+            packet["bytes_per_frame"] = info["bytes_per_frame"]
+            packet["target_fps"] = info["chart_reference_fps"]
+            packet["required_raw_MB_per_s"] = (info["bytes_per_frame"] * info["chart_reference_fps"] / 1e6
+                                               if info["chart_reference_fps"] is not None else None)
+            packet["margin_target_MB_per_s"] = (packet["required_raw_MB_per_s"] * settings["storage_margin"]
+                                                 if packet["required_raw_MB_per_s"] is not None else None)
     if report["section"] == "4c":
         packet["settings"] = lab.compact_settings(settings)
         packet["settings"].pop("batch_size", None)  # Actual batches are in the rows.
+        packet["settings"].pop("target_fps", None)  # Per-window reference above; unknown is not 455 fps.
         packet["columns"] = ["drive", "repetition", "batch_size", "frames", "file",
                              "capture_fps", "saved_fps", "durable_fps", "durable_MB_per_s",
                              "capture_s", "write_close_s", "durable_s", "final_fsync_s",
-                             "complete", "consecutive_frame_ids", "stage_timing_s", "queue_discard_fps"]
-        packet["notes"] = "Sequential short runs; caching may affect rankings. Stages overlap; do not add them."
+                             "complete", "consecutive_frame_ids", "stage_timing_s", "queue_discard_fps", "window_tag"]
+        packet["notes"] = "Sequential runs; caching may affect rankings. Per-window chart references are not measured cadence. Stages overlap; do not add them."
         packet["settings_readback"] = {
             label: {"model": value["sensor"].get("model"), "serial": value["sensor"].get("serial_number"),
                     "roi": value["roi"], "exposure_s": value["exposure_s"],
@@ -80,12 +140,12 @@ def _analysis_report(report: dict) -> dict:
             for label, value in report.get("settings_readback", {}).items()
         }
     else:
-        packet["BIN_metadata_sidecar"] = "frame_metadata.jsonl (beside each BIN file)"
+        packet["BIN_metadata_sidecar"] = "frame_metadata_<window_tag>.jsonl (beside each BIN file)"
         packet["columns"] = ["drive", "format", "sync_policy", "frames", "file",
                              "write_close_MB_per_s", "durable_MB_per_s", "equivalent_durable_fps",
                              "write_close_s", "durable_s", "final_fsync_s", "second_fsync_s",
                              "periodic_fsync_s", "periodic_fsync_count", "pixels_equal_source",
-                             "consecutive_frame_ids", "verification_s"]
+                             "consecutive_frame_ids", "verification_s", "window_tag", "shape_y_x", "bytes_per_frame"]
         packet["notes"] = "Synthetic synchronous control; not camera/queue throughput. Preparation/readback excluded from durability."
         for key in ("expected_pixel_sha256", "source_preparation_s", "image_layout", "batch_size",
                     "compare_periodic_sync", "raw_GB_per_format"):
@@ -105,13 +165,14 @@ def _analysis_report(report: dict) -> dict:
                           capture.get("total_fps"), saved.get("total_fps"), saved.get("synced_fps"), run.get("durable_raw_MB_per_s"),
                           capture.get("elapsed_s"), saved.get("total_close_s"), saved.get("synced_s"),
                           saved.get("final_os_fsync_s"), saved.get("complete"), saved.get("consecutive_ids"),
-                          saved.get("pipeline_stage_timing_s"), run.get("queue_discard", {}).get("total_fps")]
+                          saved.get("pipeline_stage_timing_s"), run.get("queue_discard", {}).get("total_fps"), run.get("window_tag")]
             else:
                 values = [label, run["format"], run["sync_policy"], run["frames"], run["file"],
                           run["write_close_raw_MB_per_s"], run["durable_raw_MB_per_s"], run["equivalent_durable_fps"],
                           run["write_close_s"], run["durable_s"], run["final_os_fsync_s"], run["immediate_second_fsync_s"],
                           run["periodic_fsync_s"], run["periodic_fsync_count"], run["pixels_equal_source"],
-                          run["consecutive_frame_ids"], run["verification_s"]]
+                          run["consecutive_frame_ids"], run["verification_s"], run.get("window_tag"),
+                          run.get("shape_y_x"), run.get("bytes_per_frame")]
             if values[4] is not None:
                 values[4] = str(Path(values[4]).relative_to(directory))
             packet["rows"].append(values)
@@ -129,13 +190,14 @@ def _rounded_values(value):
     return value
 
 
-def _report(section: str, cfg: lab.Settings, destinations: dict[str, Path], operation) -> dict:
+def _report(section: str, cfg: lab.Settings, destinations: dict[str, Path], operation, *, tag=None) -> dict:
     """Save results and a progress log silently, including ordinary failures."""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
     destination = next(iter(destinations.values()))
     destination.mkdir(parents=True, exist_ok=True)
-    folder_name = f"BENCHMARK_ONLY_section_{section}_{stamp}"
-    report_path = destination / f"section_{section}_{stamp}.json"
+    suffix = f"_{tag}" if tag else ""
+    folder_name = f"BENCHMARK_ONLY_section_{section}_{stamp}{suffix}"
+    report_path = destination / f"section_{section}_{stamp}{suffix}.json"
     log_path = report_path.with_suffix(".log")
     report = {"section": section, "utc": datetime.now(timezone.utc).isoformat(),
               "status": "FAILED", "source": cfg.source if section in ("4c", "4e") else "synthetic",
@@ -221,6 +283,7 @@ def run_batch_size_trial(
     repeats: int = 1, max_output_gb_per_drive: float = 8.0,
     stage_output_gb: float | None = None, selected_batch_size: int | None = None,
     verify_pixels: bool = True,
+    window: str | None = None,
 ) -> dict:
     """4C: compare capture, bounded queue-to-discard and production HDF5.
 
@@ -232,10 +295,14 @@ def run_batch_size_trial(
     Pixel hashes are enabled equally across all three measured modes; an
     uninstrumented short control reports diagnostic overhead separately.
     """
+    cfg, window_info = window_settings(cfg, window)
     destinations = _destinations(cfg, output_dirs)
 
     def operation(report, folder_name):
+        report.update(window_tag=window_info["tag"], windows={window_info["name"]: window_info})
         run_frames, batches, run_repeats, cap = frames, batch_sizes, repeats, max_output_gb_per_drive
+        if window in ("medium", "large") and batch_sizes == (4, 16, 64):
+            batches = (4, 16)  # Keep the existing 256-MiB bound for larger image batches.
         if stage_output_gb is not None:
             if stage_output_gb >= 100:
                 if not isinstance(selected_batch_size, int) or selected_batch_size < 1:
@@ -294,9 +361,9 @@ def run_batch_size_trial(
                     for batch in order:
                         run_cfg = replace(cfg, output_dir=folder, batch_size=batch,
                                           speed_frames=run_frames, repeats=1)
-                        run = {"repetition": repetition + 1, "batch_size": batch,
+                        run = {"repetition": repetition + 1, "batch_size": batch, "window_tag": window_info["tag"],
                                "capture_only": {}, "queue_discard": {}, "saved": {}}
-                        details = {"repetition": repetition + 1, "batch_size": batch}
+                        details = {"repetition": repetition + 1, "batch_size": batch, "window_tag": window_info["tag"]}
                         drive["runs"].append(run)
                         drive["diagnostics"].append(details)
                         try:
@@ -316,7 +383,7 @@ def run_batch_size_trial(
                                         else:
                                             managers = []
                                             def make_manager(*args, **kwargs):
-                                                manager = CameraScanManager(*args, **kwargs)
+                                                manager = _WindowManager(*args, window_tag=window_info["tag"], **kwargs)
                                                 managers.append(manager)
                                                 return manager
                                             try:
@@ -348,7 +415,8 @@ def run_batch_size_trial(
                             raise
                         finally:
                             details["interpretation"] = capture_diag.interpret(
-                                run["capture_only"], run["queue_discard"], run["saved"], cfg.target_fps, cfg.source)
+                                run["capture_only"], run["queue_discard"], run["saved"],
+                                window_info["chart_reference_fps"], cfg.source)
                             details["interpretation"]["pixel_integrity_status"] = details.get("pixel_integrity", {}).get("status", "NOT_COMPLETED")
             drive["median_durable_fps_by_batch"] = {
                 str(batch): float(np.median([run["saved"]["synced_fps"] for run in drive["runs"]
@@ -359,7 +427,7 @@ def run_batch_size_trial(
                                                  key=drive["median_durable_fps_by_batch"].get)
             _measure_output(drive, folder, cap)
 
-    return _report("4c", cfg, destinations, operation)
+    return _report("4c", cfg, destinations, operation, tag=window_info["tag"])
 
 
 def _blocks(bank, frames):
@@ -574,7 +642,7 @@ def _verify_control(path, metadata_path, kind, bank, frames, expected_digest):
             "pixel_sha256": digest.hexdigest(), "verification_s": time.perf_counter() - started}
 
 
-def _write_control(folder, kind, bank, frames, expected_digest, sync_every_bytes):
+def _write_control(folder, kind, bank, frames, expected_digest, sync_every_bytes, *, window_tag=None):
     """Write one matched format control with periodic optional and final mandatory fsync.
 
     HDF5 uses the production chunk shape and _write_batch implementation; BIN
@@ -582,8 +650,9 @@ def _write_control(folder, kind, bank, frames, expected_digest, sync_every_bytes
     and does not reproduce the production asynchronous capture/queue pipeline.
     """
     folder.mkdir(parents=True, exist_ok=False)
-    path = folder / f"BENCHMARK_ONLY_frames.{'h5' if kind == 'hdf5' else 'bin'}"
-    metadata_path = folder / "frame_metadata.jsonl"
+    suffix = f"_{window_tag}" if window_tag else ""
+    path = folder / f"BENCHMARK_ONLY_frames{suffix}.{'h5' if kind == 'hdf5' else 'bin'}"
+    metadata_path = folder / f"frame_metadata{suffix}.jsonl"
     paths = [path] if kind == "hdf5" else [path, metadata_path]
     partial = path.with_suffix(path.suffix + ".partial")
     periodic_sync_s, periodic_count = 0.0, 0
@@ -606,6 +675,8 @@ def _write_control(folder, kind, bank, frames, expected_digest, sync_every_bytes
         with h5py.File(partial, "x") as h5:
             h5.attrs.update(schema_version="diagnostic-1.0", source="synthetic",
                             complete=False, frames_written=0, storage_compression="none")
+            if window_tag is not None:
+                h5.attrs["diagnostic_window_tag"] = window_tag
             images = h5.create_dataset("images", shape=(frames, *bank.shape[1:]),
                                       dtype="<u2", chunks=_frame_chunk_shape(*bank.shape[1:]))
             images.attrs.update(dimension_order="[frame, y, x]", units="ADU")
@@ -666,95 +737,125 @@ def run_bin_hdf5_trial(
     compare_periodic_sync: bool = True, sync_every_gb: float = 0.25,
     max_output_gb_per_drive: float = 30.0,
     stage_output_gb: float | None = None, include_bin: bool = True,
+    windows: tuple[str, ...] | None = None,
 ) -> dict:
-    """4D: compare identical synthetic pixels/metadata in BIN and HDF5.
+    """4D: synthetic format/sync comparison, optionally sweeping all ROI windows.
 
-    Defaults retain about 8 GB per drive, or 4 GB with periodic comparison
-    disabled. Uses only a bounded prepared frame bank, verifies every pixel, and
-    retains all outputs. Sync, source preparation and readback are timed separately.
-    No real camera, binning, sensor exposure, USB or trigger is involved.
+    The notebook requests small/medium/large automatically; library callers can
+    preserve their current ROI with windows=None. A stage's total retained GB
+    is divided across ALL windows/formats/policies, never multiplied by three.
+    Every requested window and the combined free-space budget are preflighted
+    before writes. No camera is opened. Equivalent FPS is storage throughput.
     """
+    if windows is not None and (not windows or len(set(windows)) != len(windows)):
+        raise ValueError("Choose a nonempty list of distinct small/medium/large windows")
+    configurations = [window_settings(cfg, name) for name in (windows or (None,))]
     destinations = _destinations(cfg, output_dirs)
+    report_tag = "all_windows" if len(configurations) > 1 else configurations[0][1]["tag"]
 
     def operation(report, folder_name):
         if (not math.isfinite(target_raw_gb_per_format) or target_raw_gb_per_format <= 0 or
                 not isinstance(batch_size, int) or batch_size < 1 or
                 not math.isfinite(sync_every_gb) or sync_every_gb <= 0):
             raise ValueError("Payload GB, batch size and sync interval GB must be positive and finite")
-        report["diagnostic_settings"] = {"raw_GB_per_format": target_raw_gb_per_format, "batch_size": batch_size,
-                                          "compare_periodic_sync": compare_periodic_sync, "sync_every_GB": sync_every_gb,
-                                          "max_output_GB_per_drive": max_output_gb_per_drive}
-        width, height = cfg.roi[2] - cfg.roi[0], cfg.roi[3] - cfg.roi[1]
-        if width < 2 or height < 1:
-            raise ValueError("Synthetic frame markers require at least two columns and one row")
-        frame_bytes = width * height * 2
         policies = [0, max(1, int(sync_every_gb * 1e9))] if compare_periodic_sync else [0]
         formats = ("hdf5", "bin") if include_bin else ("hdf5",)
         controls = len(formats) * len(policies)
+        count = len(configurations)
         cap = max_output_gb_per_drive if stage_output_gb is None else stage_output_gb
-        frames = (max(1, int(target_raw_gb_per_format * 1e9) // frame_bytes) if stage_output_gb is None
-                  else stage_frames(cfg, stage_output_gb, controls))
-        report["diagnostic_settings"].update(stage_output_GB=stage_output_gb, include_bin=include_bin,
-                                              max_output_GB_per_drive=cap,
-                                              frames_per_output=frames, raw_GB_per_format=frames * frame_bytes / 1e9)
-        bank_frames = min(batch_size, frames)
-        if bank_frames * frame_bytes > 256 * 2**20:
-            raise ValueError("Prepared synthetic bank exceeds 256 MiB; reduce batch size")
-        synthetic_cfg = replace(cfg, source="mock", expected_serial=None)
-        _, raw, free = _preflight(synthetic_cfg, destinations, frames * controls, controls, cap,
-                                   approved_stage=stage_output_gb is not None)
-        preparation = time.perf_counter()
-        bank = np.random.default_rng(42).integers(0, 65536, (bank_frames, height, width), dtype=np.uint16).astype("<u2")
-        expected = hashlib.sha256()
-        for _, block in _blocks(bank, frames):
-            expected.update(block.tobytes(order="C"))
-        report.update(frames_per_format=frames, raw_GB_per_format=frames * frame_bytes / 1e9,
-                      planned_raw_GB_per_drive=raw / 1e9, max_output_GB_per_drive=cap,
-                      batch_size=batch_size, compare_periodic_sync=compare_periodic_sync,
-                      source_preparation_s=time.perf_counter() - preparation,
-                      expected_pixel_sha256=expected.hexdigest(),
-                      image_layout={"shape": [frames, height, width], "dtype": "uint16",
-                                    "byte_order": "little-endian", "dimension_order": "[frame, y, x]"},
-                      limitations=["Synthetic unpaced format control; not physical camera or production pipeline acceptance.",
-                                   "Readback and source-checksum preparation are excluded from write throughput.",
-                                   "Sequential runs and caching can affect results; each policy always ends with fsync.",
-                                   "HDF5 uses production chunks/serialization, but no asynchronous writer queue."])
-        for index, (label, destination) in enumerate(destinations.items()):
+        report.update(window_tag=report_tag, windows={}, compare_periodic_sync=compare_periodic_sync)
+        report["diagnostic_settings"] = {
+            "batch_size": batch_size, "compare_periodic_sync": compare_periodic_sync,
+            "sync_every_GB": sync_every_gb, "stage_output_GB": stage_output_gb,
+            "include_bin": include_bin, "max_output_GB_per_drive": cap,
+            "window_order": [info["name"] for _, info in configurations],
+            "budget_note": "One total budget across every window, format and sync policy.",
+        }
+        plans, raw_total, reserved_total = [], 0, 0
+        for window_cfg, info in configurations:
+            width, height = info["shape_y_x"][1], info["shape_y_x"][0]
+            if width < 2 or height < 1:
+                raise ValueError("Synthetic frame markers require at least two columns and one row")
+            frame_bytes = info["bytes_per_frame"]
+            frames = (max(1, int(target_raw_gb_per_format * 1e9) // frame_bytes) if stage_output_gb is None
+                      else stage_frames(window_cfg, stage_output_gb, controls * count))
+            bank_frames = min(batch_size, frames)
+            if bank_frames * frame_bytes > 256 * 2**20:
+                raise ValueError("Prepared synthetic bank exceeds 256 MiB; reduce batch size")
+            synthetic_cfg = replace(window_cfg, source="mock", expected_serial=None)
+            _preflight(synthetic_cfg, destinations, frames * controls, controls, cap / count,
+                       approved_stage=stage_output_gb is not None)
+            raw = frames * controls * frame_bytes
+            reserve = frames * controls * 4096 + controls * 100_000_000
+            raw_total += raw
+            reserved_total += raw + reserve
+            info = dict(info, frames_per_output=frames, raw_GB_per_output=frames * frame_bytes / 1e9)
+            report["windows"][info["name"]] = info
+            plans.append((info, frames, bank_frames))
+        if reserved_total > cap * 1e9:
+            raise ValueError("Combined windows plus metadata reserve exceed the total per-drive cap")
+        for label, destination in destinations.items():
+            free = shutil.disk_usage(destination).free
+            if free < 1.5 * reserved_total + 100_000_000:
+                raise OSError(f"Not enough free space for all windows on {label}")
             folder = destination / folder_name
-            folder.mkdir(parents=True, exist_ok=True)
-            drive = {"output_directory": str(folder), "free_GB_before": free[label] / 1e9, "runs": [],
-                     "stage_output_budget_GB": cap, "planned_raw_GB": raw / 1e9}
-            report["drives"][label] = drive
-            order = formats if index % 2 == 0 and label.upper() != "D" else tuple(reversed(formats))
-            for policy in policies:
-                name = "periodic" if policy else "final"
-                for kind in order:
-                    drive["runs"].append(_write_control(folder / f"{kind}_{name}", kind, bank,
-                                                        frames, expected.hexdigest(), policy))
-            drive["BIN_over_HDF5_durable_rate_by_policy"] = {
-                name: next(run["durable_raw_MB_per_s"] for run in drive["runs"]
-                           if run["format"] == "bin" and run["sync_policy"] == name) /
-                      next(run["durable_raw_MB_per_s"] for run in drive["runs"]
-                           if run["format"] == "hdf5" and run["sync_policy"] == name)
-                for name in {run["sync_policy"] for run in drive["runs"]} if include_bin
-            }
-            drive["diagnostics"] = [{key: run[key] for key in ("format", "sync_policy", "cpu_s",
-                                        "write_progress_columns", "write_progress")} for run in drive["runs"]]
-            drive["interpretation"] = storage_interpretation(drive["runs"])
-            _measure_output(drive, folder, cap)
+            folder.mkdir(parents=True, exist_ok=False)
+            report["drives"][label] = {"output_directory": str(folder), "free_GB_before": free / 1e9,
+                                        "runs": [], "stage_output_budget_GB": cap,
+                                        "planned_raw_GB": raw_total / 1e9}
+        report.update(planned_raw_GB_per_drive=raw_total / 1e9, max_output_GB_per_drive=cap,
+                      batch_size=batch_size,
+                      limitations=["Synthetic synchronous control; equivalent FPS is not measured camera FPS.",
+                                   "Preparation and pixel readback are outside durable throughput.",
+                                   "Sequential windows/variants and caching can affect rankings; every run ends with fsync.",
+                                   "The stage budget is shared across windows; compare matched-window rows."])
+        for window_index, (info, frames, bank_frames) in enumerate(plans):
+            height, width = info["shape_y_x"]
+            preparation = time.perf_counter()
+            bank = np.random.default_rng(42).integers(0, 65536, (bank_frames, height, width), dtype=np.uint16).astype("<u2")
+            expected = hashlib.sha256()
+            for _, block in _blocks(bank, frames):
+                expected.update(block.tobytes(order="C"))
+            info.update(source_preparation_s=time.perf_counter() - preparation,
+                        expected_pixel_sha256=expected.hexdigest())
+            if count == 1:  # Preserve existing library report fields for one window.
+                report.update(frames_per_format=frames, raw_GB_per_format=info["raw_GB_per_output"],
+                              source_preparation_s=info["source_preparation_s"],
+                              expected_pixel_sha256=expected.hexdigest(),
+                              image_layout={"shape": [frames, height, width], "dtype": "uint16",
+                                            "byte_order": "little-endian", "dimension_order": "[frame, y, x]"})
+            for drive_index, (label, drive) in enumerate(report["drives"].items()):
+                folder = Path(drive["output_directory"])
+                drive_order = int(label.upper() == "D") if label.upper() in ("C", "D") else drive_index
+                reverse = (drive_order + window_index) % 2
+                order = tuple(reversed(formats)) if reverse else formats
+                for policy in policies:
+                    name = "periodic" if policy else "final"
+                    for kind in order:
+                        run = _write_control(folder / f"{kind}_{name}_{info['tag']}", kind, bank,
+                                             frames, expected.hexdigest(), policy, window_tag=info["tag"])
+                        run.update(window_tag=info["tag"], shape_y_x=info["shape_y_x"], bytes_per_frame=info["bytes_per_frame"])
+                        drive["runs"].append(run)
+                drive["diagnostics"] = [{key: run[key] for key in
+                    ("window_tag", "format", "sync_policy", "cpu_s", "write_progress_columns", "write_progress")}
+                    for run in drive["runs"]]
+                drive["interpretation"] = storage_interpretation(drive["runs"])
+                _measure_output(drive, folder, cap)
+            del bank  # Release this window's bank before preparing a larger one.
 
-    return _report("4d", cfg, destinations, operation)
+    return _report("4d", cfg, destinations, operation, tag=report_tag)
 
 
 def storage_interpretation(runs):
     """Interpret synthetic storage timing without claiming physical capture performance."""
     findings = ["Synthetic storage only: no camera, USB, producer queue or trigger conclusion.",
                 "A shorter final fsync is a gain only if total durable time also improves."]
-    for kind in sorted({run["format"] for run in runs}):
-        pair = {run["sync_policy"]: run for run in runs if run["format"] == kind}
-        if {"final_only", "periodic_and_final"} <= pair.keys():
-            ratio = pair["final_only"]["durable_s"] / pair["periodic_and_final"]["durable_s"]
-            findings.append(f"{kind}: periodic/final-only durable throughput ratio {ratio:.3f}; sequential run load may affect it.")
+    for window in sorted({run.get("window_tag", "current") for run in runs}):
+        for kind in sorted({run["format"] for run in runs}):
+            pair = {run["sync_policy"]: run for run in runs if run["format"] == kind and run.get("window_tag", "current") == window}
+            if {"final_only", "periodic_and_final"} <= pair.keys():
+                ratio = pair["final_only"]["durable_s"] / pair["periodic_and_final"]["durable_s"]
+                findings.append(f"{window} / {kind}: periodic/final-only durable throughput ratio {ratio:.3f}; sequential run load may affect it.")
     return {"findings": findings,
             "next_action": "Compare sustained write progress and full durable rates with physical 4C; repeat matched format trials before retiring BIN.",
             "BIN_winner_conclusive": False}
