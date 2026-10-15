@@ -150,3 +150,49 @@ def test_notebook_contains_minimal_status_and_periodic_sync_default():
     assert any("run_bin_hdf5_trial(" in cell and "COMPARE_PERIODIC_SYNC = True" in cell for cell in cells)
     assert all("print(" in cell or "run_notebook_cell(" in cell for cell in cells)
     assert all("raise_on_error=False" not in cell for cell in cells)
+
+
+def test_pixel_trial_checks_source_and_reports_added_time(cfg, capsys):
+    report = diagnostics.run_hdf5_pixel_verification_trial(cfg, frames=7)
+    assert capsys.readouterr().out == ""
+    assert report["status"] == "EXECUTED", report.get("error")
+    drive = report["drives"]["selected"]
+    assert drive["verification"]["pixels_equal_source"]
+    assert drive["verification"]["frames_verified"] == 7
+    assert drive["source_hash_s"] >= 0
+    assert drive["post_acquisition_added_s"] >= drive["verification"]["verification_s"]
+    assert drive["durable_plus_verification_s"] == pytest.approx(
+        drive["verified_run"]["synced_s"] + drive["post_acquisition_added_s"])
+    assert drive["acquisition_fps_change_percent"] == pytest.approx(
+        100 * (drive["verified_run"]["total_fps"] / drive["baseline"]["total_fps"] - 1))
+    path = Path(report["report_file"])
+    assert path.parent == cfg.output_dir
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["source"] == "mock"
+    # A readable HDF5 file with the same shape/count must still fail if a pixel changes.
+    with h5py.File(drive["verified_run"]["file"], "r+") as h5:
+        h5["images"][3, 2, 2] = int(h5["images"][3, 2, 2]) ^ 1
+    with pytest.raises(AssertionError, match="pixels differ"):
+        diagnostics.verify_hdf5_pixels(Path(drive["verified_run"]["file"]), Path(drive["reference_manifest"]))
+
+
+def test_pixel_trial_failure_is_saved_and_raised_by_notebook(cfg, monkeypatch):
+    def corrupt_check(*args):
+        raise AssertionError("Injected pixel mismatch")
+
+    monkeypatch.setattr(diagnostics, "verify_hdf5_pixels", corrupt_check)
+    with pytest.raises(RuntimeError, match="Injected pixel mismatch"):
+        lab.run_notebook_cell("Section 4E", lambda: diagnostics.run_hdf5_pixel_verification_trial(cfg, frames=3))
+    report = json.loads(next(cfg.output_dir.glob("section_4e_*.json")).read_text(encoding="utf-8"))
+    assert report["status"] == "FAILED"
+    assert report["drives"]["selected"]["verification"]["pixels_equal_source"] is False
+
+
+def test_pixel_trial_budget_stops_before_camera(cfg, monkeypatch):
+    def forbidden(*args):
+        raise AssertionError("Must not connect")
+
+    monkeypatch.setattr(lab, "configured_camera", forbidden)
+    report = diagnostics.run_hdf5_pixel_verification_trial(cfg, frames=1_000_000, max_output_gb_per_drive=0.1)
+    assert report["status"] == "FAILED"
+    assert "exceeds the per-drive cap" in report["error"]

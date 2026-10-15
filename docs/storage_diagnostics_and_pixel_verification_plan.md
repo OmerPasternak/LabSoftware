@@ -1,11 +1,44 @@
 # Storage diagnostics and pixel verification integration plan
 
-This plan describes implementation work after the new diagnostics. Pixel
-verification of physical acquisitions is not implemented by this document.
+Section 4E now implements an explicit diagnostic for production HDF5 acquisitions:
+it hashes original camera batches before writing, closes and syncs the file, then
+rereads every pixel against the saved reference manifest. It works with the
+existing physical or mock camera path. Routine production verification and the
+PCO native-file reader described below remain planned work.
 The synthetic 4D control already compares every saved pixel against its known
 source and checks metadata IDs; it is not a physical camera acceptance test.
 
 ## Run the new diagnostics
+
+### 4E: production HDF5 source pixels and readback
+
+Run setup, close other camera applications, and run the 4E cell explicitly. Its
+default destination is CONFIG.output_dir, with 2,000 frames each for a baseline
+and a source-hashed recording (~2.62 GB retained at 2560x128). Configurable drive
+paths allow repeating on C and D. Complete output/free-space checks precede
+camera connection. Each reference/readback block is limited to 256 MiB.
+
+Source SHA-256 runs before batches reach the production writer. References are
+saved in a `.pixels.sha256.json` sidecar after the HDF5 file closes and fsync
+finishes. Every pixel in the second recording is then reread in bounded blocks;
+shape, dtype, completion and frame count must also match. Files and manifests
+are retained on failure. The public `verify_hdf5_pixels(file, manifest)` helper
+can rerun verification later without a camera. Keep both original files.
+
+The compact `section_4e_*.json` is directly in the selected test folder. It reports
+baseline and hashed acquisition/write/close FPS, durable FPS including fsync,
+source hash time, verification time, added post-acquisition time, and total
+duration and measured change versus baseline. The all-checks wall durations
+also include the existing saved-run metadata/sample inspection. Acquisition FPS
+is measured before readback; source hashing can still slow the producer. The
+editable 5% tolerance reports whether measured FPS stayed within that range;
+a tolerance miss is a performance result, while a checksum mismatch raises an
+error. Sequential runs and cache/load changes preclude attributing every timing
+difference to hashing. Reads may use OS cache, so this is not a power-loss test.
+
+The first recording is a timing baseline; only the second has source references.
+This diagnostic does not add routine GUI acquisition verification, protect the
+manifest against deliberate alteration, or verify sensor/trigger correctness.
 
 Open `application tests/lab_computer_acceptance.ipynb`, restart its kernel after
 updating code, run setup, then run the desired individual cell. All diagnostic

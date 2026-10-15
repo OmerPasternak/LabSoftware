@@ -262,7 +262,8 @@ def test_camera_exposure_readback_accepts_one_microsecond_quantization(config, m
 def test_notebook_setup_and_cells_are_executable():
     notebook = json.loads((lab.ROOT / "application tests/lab_computer_acceptance.ipynb").read_text(encoding="utf-8"))
     code_cells = ["".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "code"]
-    assert len(code_cells) == 12
+    assert len(code_cells) == 13  # Setup, sections 1-8 and diagnostics 4B-4E.
+    assert any("run_hdf5_pixel_verification_trial(" in source for source in code_cells)
     for source in code_cells:
         compile(source, "lab_computer_acceptance.ipynb", "exec")
     namespace = {}

@@ -1,4 +1,4 @@
-"""Quiet notebook diagnostics 4C (camera batches) and 4D (synthetic format I/O).
+"""Quiet notebook diagnostics 4C (batches), 4D (formats), 4E (pixel readback).
 
 All outputs are retained in new BENCHMARK_ONLY directories. 4C uses the reviewed
 camera configuration path; 4D never constructs or connects a physical camera.
@@ -43,6 +43,13 @@ def _destinations(cfg: lab.Settings, output_dirs: dict[str, Path] | None) -> dic
 
 def _analysis_report(report: dict) -> dict:
     """Build one small, chart-ready table with shared context instead of repeated dumps."""
+    if report["section"] == "4e":
+        packet = {key: report[key] for key in (
+            "section", "utc", "status", "source", "error", "report_file", "execution_log",
+            "diagnostic_settings", "drives", "limitations") if key in report}
+        packet.update(report_schema_version="2.0", settings=lab.compact_settings(report["settings"]),
+                      physical_acceptance=False)
+        return _rounded_values(packet)
     settings = report["settings"]
     width, height = settings["roi"][2] - settings["roi"][0], settings["roi"][3] - settings["roi"][1]
     frame_bytes = width * height * 2
@@ -127,7 +134,7 @@ def _report(section: str, cfg: lab.Settings, destinations: dict[str, Path], oper
     report_path = destination / f"section_{section}_{stamp}.json"
     log_path = report_path.with_suffix(".log")
     report = {"section": section, "utc": datetime.now(timezone.utc).isoformat(),
-              "status": "FAILED", "source": cfg.source if section == "4c" else "synthetic",
+              "status": "FAILED", "source": cfg.source if section in ("4c", "4e") else "synthetic",
               "settings": asdict(cfg), "report_file": str(report_path),
               "execution_log": str(log_path), "drives": {}, "physical_acceptance": False}
     interrupted = None
@@ -248,6 +255,153 @@ def _blocks(bank, frames):
         block[:, 0, 0] = ids & 65535
         block[:, 0, 1] = ids >> 16
         yield start, block
+
+
+class _PixelReferenceCamera:
+    """Delegate camera operations while hashing each source batch before queueing.
+
+    Only hashes and ranges are retained, not image arrays. Hashing is in the
+    producer path and its possible FPS cost must be measured against a baseline.
+    """
+
+    def __init__(self, camera):
+        self.camera = camera
+        self.blocks = []
+        self.hash_s = 0.0
+
+    def __getattr__(self, name):
+        return getattr(self.camera, name)
+
+    def iter_frames(self, *args, **kwargs):
+        """Yield original batches after SHA-256 over canonical little-endian pixels."""
+        iterator = self.camera.iter_frames(*args, **kwargs)
+        start = 0
+        try:
+            for images, metadata in iterator:
+                began = time.perf_counter()
+                pixels = np.ascontiguousarray(images, dtype="<u2")
+                digest = hashlib.sha256(memoryview(pixels).cast("B")).hexdigest()
+                self.hash_s += time.perf_counter() - began
+                self.blocks.append({"start": start, "frames": len(images), "sha256": digest})
+                start += len(images)
+                yield images, metadata
+        finally:
+            iterator.close()
+
+
+def verify_hdf5_pixels(path: Path, manifest_path: Path) -> dict:
+    """Read every saved pixel against pre-write SHA-256 references, in bounded blocks.
+
+    The acquisition must be closed and synced first. No camera is opened. A
+    mismatch, missing frame, incomplete file or invalid layout raises an error.
+    SHA-256 verifies storage against host source pixels, not sensor correctness.
+    Cached reads are allowed; this does not prove persistence through power loss.
+    """
+    started = time.perf_counter()
+    manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    count = 0
+    with h5py.File(path, "r") as h5:
+        images = h5["images"]
+        if (images.shape != tuple(manifest["shape_frame_y_x"]) or images.dtype != np.dtype("<u2")
+                or not h5.attrs.get("complete", False)
+                or int(h5.attrs.get("frames_written", -1)) != len(images)):
+            raise AssertionError("HDF5 shape/dtype/completion differs from source manifest")
+        for block in manifest["blocks"]:
+            start, frames = block["start"], block["frames"]
+            if start != count or frames < 1 or start + frames > len(images):
+                raise AssertionError("Pixel manifest has a gap or invalid block range")
+            pixels = np.ascontiguousarray(images[start:start + frames], dtype="<u2")
+            if hashlib.sha256(memoryview(pixels).cast("B")).hexdigest() != block["sha256"]:
+                raise AssertionError(f"HDF5 pixels differ from source at frames {start}:{start + frames}")
+            count += frames
+        if count != len(images):
+            raise AssertionError("Pixel manifest does not cover every saved frame")
+    elapsed = time.perf_counter() - started
+    return {"pixels_equal_source": True, "frames_verified": count,
+            "verification_s": elapsed,
+            "verification_raw_MB_per_s": count * np.prod(manifest["shape_frame_y_x"][1:]) * 2 / 1e6 / elapsed}
+
+
+def run_hdf5_pixel_verification_trial(
+    cfg: lab.Settings, *, output_dirs: dict[str, Path] | None = None,
+    frames: int = 2000, fps_tolerance_percent: float = 5.0,
+    max_output_gb_per_drive: float = 8.0,
+) -> dict:
+    """4E: baseline and hashed production acquisitions, then full HDF5 pixel readback.
+
+    Uses CONFIG's reviewed camera settings, Auto Sequence and bounded writer.
+    Default retains two 2000-frame files (~2.62 GB/drive at 2560x128).
+    FPS includes capture/write/close, excluding fsync and post-acquisition checks;
+    durable FPS includes fsync. Total trial time includes all checks. The measured
+    source-hash overhead is reported honestly; unchanged FPS is never assumed.
+    """
+    destinations = _destinations(cfg, output_dirs)
+
+    def operation(report, folder_name):
+        if (not isinstance(frames, int) or frames < 1 or
+                not math.isfinite(fps_tolerance_percent) or fps_tolerance_percent < 0):
+            raise ValueError("Frames must be a positive integer; FPS tolerance must be finite and nonnegative")
+        if cfg.source == "physical" and not cfg.expected_serial:
+            raise ValueError("Set the reviewed physical camera serial before 4E")
+        report["diagnostic_settings"] = {"frames_per_run": frames,
+                                          "fps_tolerance_percent": fps_tolerance_percent,
+                                          "max_output_GB_per_drive": max_output_gb_per_drive}
+        report["limitations"] = [
+            "Sequential short runs and changing load/caches affect the baseline comparison.",
+            "Source SHA-256 costs CPU during capture; full readback begins only after close and fsync.",
+            "Readback may use OS cache; no power-loss guarantee, sensor or external-trigger validation.",
+            "Manifest and data must both be retained; hashes detect accidental changes, not malicious tampering."]
+        frame_bytes, _, free = _preflight(cfg, destinations, frames * 2, 2, max_output_gb_per_drive)
+        if min(frames, cfg.batch_size) * frame_bytes > 256 * 2**20:
+            raise ValueError("Pixel verification block exceeds 256 MiB; reduce CONFIG.batch_size")
+        for label, destination in destinations.items():
+            began = time.perf_counter()
+            folder = destination / folder_name
+            folder.mkdir(parents=True, exist_ok=False)
+            drive = {"output_directory": str(folder), "free_GB_before": free[label] / 1e9}
+            report["drives"][label] = drive
+            run_cfg = replace(cfg, output_dir=folder)
+            with lab.configured_camera(run_cfg) as camera:
+                baseline_started = time.perf_counter()
+                baseline = lab.saved_run(camera, run_cfg, "BENCHMARK_ONLY_baseline", frames)
+                baseline_wall_s = time.perf_counter() - baseline_started
+                drive["baseline"] = {key: baseline[key] for key in
+                                     ("file", "frames", "total_fps", "synced_fps", "total_close_s", "synced_s")}
+                reference = _PixelReferenceCamera(camera)
+                saved_started = time.perf_counter()
+                saved = lab.saved_run(reference, run_cfg, "BENCHMARK_ONLY_pixel_reference", frames)
+                saved_wall_s = time.perf_counter() - saved_started
+            drive["verified_run"] = {key: saved[key] for key in
+                                     ("file", "frames", "total_fps", "synced_fps", "total_close_s", "synced_s",
+                                      "final_os_fsync_s", "consecutive_ids")}
+            manifest_path = Path(saved["file"]).with_suffix(".pixels.sha256.json")
+            post_started = time.perf_counter()
+            manifest_path.write_text(json.dumps({"algorithm": "sha256", "dtype": "<u2",
+                                                 "shape_frame_y_x": saved["shape_frame_y_x"],
+                                                 "blocks": reference.blocks}, separators=(",", ":")), encoding="utf-8")
+            with manifest_path.open("r+b", buffering=0) as handle:
+                os.fsync(handle.fileno())
+            drive["reference_manifest"] = str(manifest_path)
+            drive["source_hash_s"] = reference.hash_s
+            drive["verification"] = {"pixels_equal_source": False}
+            drive["verification"].update(verify_hdf5_pixels(Path(saved["file"]), manifest_path))
+            post_s = time.perf_counter() - post_started
+            delta = 100 * (saved["total_fps"] / baseline["total_fps"] - 1)
+            drive.update(acquisition_fps_change_percent=delta,
+                         acquisition_fps_within_tolerance=abs(delta) <= fps_tolerance_percent,
+                         post_acquisition_added_s=post_s,
+                         source_hash_s_in_acquisition=reference.hash_s,
+                         durable_plus_verification_s=saved["synced_s"] + post_s,
+                         fps_including_durability_and_verification=frames / (saved["synced_s"] + post_s),
+                         measured_durable_time_change_vs_baseline_s=saved["synced_s"] - baseline["synced_s"],
+                         measured_total_added_vs_baseline_s=saved["synced_s"] + post_s - baseline["synced_s"],
+                         baseline_all_checks_s=baseline_wall_s,
+                         verified_run_all_checks_s=saved_wall_s + post_s,
+                         measured_wall_time_added_vs_baseline_s=saved_wall_s + post_s - baseline_wall_s,
+                         whole_trial_s=time.perf_counter() - began)
+            _measure_output(drive, folder, max_output_gb_per_drive)
+
+    return _report("4e", cfg, destinations, operation)
 
 
 def _metadata(start, count):
