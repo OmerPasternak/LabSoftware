@@ -218,15 +218,15 @@ class _ContinuousCamera:
 
 
 def run_complete_pipeline_trial(
-    cfg, *, output_dirs=None, window=None, stage_output_gb=20.0,
+    cfg, *, output_dirs=None, window=None, stage_output_gb=40.0,
     file_raw_gb=2.0, max_pending_files=None, verifier_timeout_s=120.0,
     frames=None, frames_per_file=None,
 ):
     """4F: measure continuous capture through final durable, pixel-verified completion.
 
-    GB are decimal. One selected 20/40/100/200-GB stage is shared across files,
-    including metadata reserves; no automatic stage/ROI sweep. C: defaults to
-    20 GB, fitting 45 GB free with the existing safety margin. Explicit tiny
+    GB are decimal. One destination and a maximum 40-GB stage are shared across
+    all files, including metadata reserves; no automatic stage/ROI sweep. The
+    40-GB default requires about 60.1 GB free with the existing margin. Tiny
     frame overrides support offline mock tests without allocating GB payloads.
     Source hashing is inline; fsync and full pixel/metadata checking run in a
     separate process. Pending verification is bounded by the finite stage's
@@ -238,14 +238,16 @@ def run_complete_pipeline_trial(
     destinations = storage._destinations(cfg, output_dirs)
 
     def operation(report, folder_name):
+        if len(destinations) != 1:
+            raise ValueError("4F uses one destination per run so its total output stays within 40 GB")
         if (not isinstance(cfg.batch_size, int) or cfg.batch_size < 1 or
                 not math.isfinite(file_raw_gb) or file_raw_gb <= 0 or
                 (max_pending_files is not None and
                  (not isinstance(max_pending_files, int) or not 1 <= max_pending_files <= 10000)) or
                 not math.isfinite(verifier_timeout_s) or verifier_timeout_s <= 0):
             raise ValueError("Use positive batch/file sizes, None or 1–10000 pending files and a positive timeout")
-        if stage_output_gb not in (20, 40, 100, 200):
-            raise ValueError("Choose a 20/40/100/200 GB stage")
+        if not math.isfinite(stage_output_gb) or not 0 < stage_output_gb <= 40:
+            raise ValueError("4F total output budget must be positive and at most 40 GB")
         frame_bytes = window_info["bytes_per_frame"]
         if cfg.batch_size * frame_bytes > 256 * 2**20:
             raise ValueError("4F batch exceeds 256 MiB")

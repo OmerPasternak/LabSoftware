@@ -106,3 +106,12 @@ def test_verification_backlog_fails_without_claiming_complete_fps(cfg, monkeypat
     summary = report["drives"]["selected"]["summary"]
     assert summary["frames_verified"] == 0 and summary["whole_trial_fps"] is None
     assert not summary.get("complete_verified_fps")
+
+
+@pytest.mark.parametrize("budget", [40.01, 100, 200])
+def test_hard_total_cap_rejects_larger_stage_before_camera(cfg, monkeypatch, budget):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Budget must fail before worker/camera access")
+    monkeypatch.setattr(trial._Verifier, "start", forbidden)
+    report = trial.run_complete_pipeline_trial(cfg, stage_output_gb=budget)
+    assert report["status"] == "FAILED" and "at most 40 GB" in report["error"]
