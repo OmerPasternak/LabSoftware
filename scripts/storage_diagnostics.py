@@ -260,9 +260,9 @@ def stage_frames(cfg, budget_gb, files):
 
 
 def stage_profile(drive, d_stage_gb=20):
-    """Select exactly one approved notebook stage; never auto-advance a long run."""
+    """Select one notebook stage sized to fit the 45 GB C: space allowance."""
     if drive == "C":
-        return 40.0
+        return 20.0
     if drive == "D" and d_stage_gb in (20, 100, 200):
         return float(d_stage_gb)
     raise ValueError("Choose drive C or D; D stage must be 20, 100 or 200 GB")
@@ -289,7 +289,7 @@ def run_batch_size_trial(
 
     Physical configuration, shutter/exposure and Auto Sequence are unchanged.
     Each batch records exactly the same frame count. All requested drives are
-    preflighted together. Optional 40 GB C or 20/100/200 GB D stage budgets
+    preflighted together. Optional 20 GB C or 20/100/200 GB D stage budgets
     include every retained file and metadata reserve. Stages >=100 GB require
     an explicit selected batch and retain one continuous file. No stage auto-runs.
     Pixel hashes are enabled equally across all three measured modes; an

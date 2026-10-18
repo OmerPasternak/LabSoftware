@@ -213,7 +213,7 @@ def test_stage_budget_includes_all_files_and_metadata(cfg, budget, files):
 
 
 def test_stage_profile_and_continuous_selection_guard(cfg, monkeypatch):
-    assert diagnostics.stage_profile("C", 200) == 40
+    assert diagnostics.stage_profile("C", 200) == 20
     assert diagnostics.stage_profile("D", 100) == 100
     with pytest.raises(ValueError):
         diagnostics.stage_profile("D", 40)
