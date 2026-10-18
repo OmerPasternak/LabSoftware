@@ -57,6 +57,7 @@ ROOT = find_root()
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 from hhg_control.drivers.base_camera import ReadoutMode, TriggerMode
+from hhg_control.drivers.camera_defaults import DEFAULT_CAMERA_SERIAL
 from hhg_control.drivers.mock_camera import MockPcoCamera
 from hhg_control.sequencer.scan_manager import AcquisitionAborted, CameraScanManager
 from scripts.benchmark_capture_pipeline import run_benchmark
@@ -69,7 +70,7 @@ class Settings:
 
     source: str = "mock"  # Change explicitly to "physical" on the lab PC.
     output_dir: Path = ROOT / "data/test_data/lab_acceptance"
-    expected_serial: str | None = None  # Fill in the physical camera serial.
+    expected_serial: str | None = DEFAULT_CAMERA_SERIAL
     usb_port_note: str = "FILL IN: controller, physical port, cable"
     roi: tuple[int, int, int, int] = (0, 1016, 2560, 1144)  # 2560 x 128, centered vertically
     exposure_s: float = 0.001
@@ -167,8 +168,8 @@ def configured_camera(cfg: Settings, trigger=TriggerMode.AUTO_SEQUENCE):
     """Open the requested source, apply reviewed settings, verify them, then close."""
     if cfg.source == "physical":
         from hhg_control.drivers.pco_edge import PcoEdgeCamera
-        require(cfg.expected_serial is not None, "Set expected_serial from the camera label before connecting")
-        camera = PcoEdgeCamera(serial=cfg.expected_serial)
+        expected_serial = cfg.expected_serial or DEFAULT_CAMERA_SERIAL
+        camera = PcoEdgeCamera(serial=expected_serial)
     else:
         camera = MockPcoCamera()
     try:
@@ -180,8 +181,7 @@ def configured_camera(cfg: Settings, trigger=TriggerMode.AUTO_SEQUENCE):
             require(model and "emulator" not in model and "mock" not in model,
                     "Physical source reported a missing or simulated identity")
             require(serial.upper() not in ("", "UNKNOWN", "NONE"), "Physical serial is unknown")
-            if cfg.expected_serial is not None:
-                require(serial == cfg.expected_serial, "Connected camera serial differs from expected_serial")
+            require(serial == expected_serial, "Connected camera serial differs from expected_serial")
         camera.set_exposure_time(cfg.exposure_s)
         camera.set_readout_mode(cfg.readout)
         camera.set_roi(cfg.roi)
@@ -1022,8 +1022,8 @@ if selected(1):
 
 # %% 2 — Physical identity, settings and reconnect
 # 1. Close CamWare/GUI. Review exposure_s, roi, readout; set source="physical".
-# 2. Global Shutter is mode value 2. expected_serial is the camera's unique
-#    hardware serial, not a shutter value. Fill it from the camera label before connecting.
+# 2. The verified serial 61008541 is loaded from the project camera defaults.
+#    A mismatched physical camera is rejected by the driver.
 # 3. In GUI separately check Rolling -> Global -> Rolling -> intended mode.
 #    Camera reboot may take seconds. Confirm final ROI/exposure/trigger readback.
 # 4. Close/reopen the GUI; repeat once. Do not run GUI and script simultaneously.

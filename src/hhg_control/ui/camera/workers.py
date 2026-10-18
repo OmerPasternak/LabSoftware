@@ -9,11 +9,12 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from hhg_control.sequencer.scan_manager import CameraScanManager
 from hhg_control.drivers.base_camera import BaseCamera, ReadoutMode, TriggerMode
+from hhg_control.drivers.camera_defaults import DEFAULT_CAMERA_SERIAL
 from hhg_control.drivers.mock_camera import MockPcoCamera
 
 
 class CameraConnectTask(QThread):
-    """Connect an explicitly selected camera source without blocking the GUI."""
+    """Connect a selected source asynchronously, using the fixed physical serial."""
 
     connected = pyqtSignal(object, bool, float)
     error_occurred = pyqtSignal(str)
@@ -24,7 +25,8 @@ class CameraConnectTask(QThread):
         super().__init__()
         self.source = source
         self.exposure_s = exposure_s
-        self.serial, self.mode, self.roi, self.trigger = serial, mode, roi, trigger
+        self.serial = serial or DEFAULT_CAMERA_SERIAL
+        self.mode, self.roi, self.trigger = mode, roi, trigger
 
     def run(self) -> None:
         started = time.perf_counter()
@@ -58,7 +60,7 @@ class CameraConnectTask(QThread):
 
 
 class CameraDisconnectTask(QThread):
-    """Close the prior camera off the GUI thread before source selection changes."""
+    """Apply disconnect defaults and close the prior source off the GUI thread."""
 
     disconnected = pyqtSignal()
     error_occurred = pyqtSignal(str)

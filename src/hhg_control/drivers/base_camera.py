@@ -88,7 +88,11 @@ class BaseCamera(ABC):
 
     @abstractmethod
     def close(self) -> None:
-        """Safely release the camera handle and reset acquisition hardware."""
+        """Safely release the camera handle after applying disconnect defaults.
+
+        Camera drivers should leave the sensor in Rolling Shutter with a
+        100 ms exposure before releasing the connection.
+        """
         pass
 
     def validate_exposure_time(self, exposure_s: float) -> None:

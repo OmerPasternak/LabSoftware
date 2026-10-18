@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Tuple, List, Dict, Any
 import numpy as np
 from .base_camera import BaseCamera, CameraSafetyError, ReadoutMode, TriggerMode
+from .camera_defaults import DISCONNECT_EXPOSURE_S
 from ..safe_io import check_stack_memory
 
 
@@ -70,7 +71,11 @@ class MockPcoCamera(BaseCamera):
         self._is_connected = True
 
     def close(self) -> None:
+        """Simulate disconnect defaults: Rolling Shutter and 100 ms exposure."""
         self.stop_live()
+        if self._is_connected:
+            self.set_readout_mode(ReadoutMode.ROLLING_SHUTTER)
+            self.set_exposure_time(DISCONNECT_EXPOSURE_S)
         self._is_connected = False
 
     def start_live(self, buffer_size: int = 4) -> None:

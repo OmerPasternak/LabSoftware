@@ -14,6 +14,20 @@ def test_mock_prepares_large_arrays_only_on_connect():
     assert camera._gaussian_profile is not None
     assert camera._dark_bank is not None
     camera.close()
+
+
+def test_mock_close_restores_disconnect_defaults():
+    from hhg_control.drivers.base_camera import ReadoutMode
+
+    camera = MockPcoCamera()
+    camera.connect()
+    camera.set_readout_mode(ReadoutMode.GLOBAL_SHUTTER)
+    camera.set_exposure_time(0.02)
+    camera.close()
+
+    assert not camera.is_connected
+    assert camera.get_readout_mode() is ReadoutMode.ROLLING_SHUTTER
+    assert camera.get_exposure_time() == 0.1
 from hhg_control.drivers.base_camera import CameraSafetyError
 
 

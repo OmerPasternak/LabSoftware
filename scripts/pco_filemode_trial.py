@@ -423,11 +423,7 @@ def _run_hard_drive_decision_test(
     notebook. It runs direct PCO file mode and Section 4's capture-only plus
     saved-HDF5 path on each drive. It does not test external-trigger accounting.
     """
-    if not cfg.expected_serial:
-        raise ValueError(
-            "Enter CONFIG.expected_serial in the setup cell before running the "
-            "hard-drive decision test."
-        )
+    cfg = replace(cfg, expected_serial=cfg.expected_serial or lab.DEFAULT_CAMERA_SERIAL)
     width = cfg.roi[2] - cfg.roi[0]
     height = cfg.roi[3] - cfg.roi[1]
     if (width, height) != (2560, 128):

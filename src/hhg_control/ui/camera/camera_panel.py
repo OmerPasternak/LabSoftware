@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGroupBox, QLabel, QLineEdit, QDoubleSpinBox, QSpinBox,
     QAbstractSpinBox, QPushButton, QFileDialog, QTextEdit, QMessageBox,
-    QGridLayout, QFrame, QSizePolicy, QComboBox, QCheckBox, QInputDialog
+    QGridLayout, QFrame, QSizePolicy, QComboBox, QCheckBox
 )
 
 import matplotlib
@@ -33,9 +33,9 @@ from matplotlib.figure import Figure
 import matplotlib.patches as mpatches
 
 from hhg_control.drivers.base_camera import BaseCamera, ReadoutMode, TriggerMode
+from hhg_control.drivers.camera_defaults import DEFAULT_CAMERA_SERIAL
 from hhg_control.drivers.mock_camera import MockPcoCamera
 from hhg_control.sequencer.scan_manager import CameraScanManager
-from .selection import load_camera_serial, save_camera_serial
 from .workers import (
     CameraConnectTask,
     CameraDisconnectTask,
@@ -159,8 +159,7 @@ class CameraMainWindow(QMainWindow):
             writer_memory_reserve_bytes=int(APPLICATION_WRITER_MEMORY_RESERVE_GIB * 2**30),
         )
 
-        self._camera_selection_path = default_storage / "camera_selection.json"
-        self._physical_serial = load_camera_serial(self._camera_selection_path)
+        self._physical_serial = DEFAULT_CAMERA_SERIAL
         self._configuration_display_preserved = False
         self._command_input_locked = False
         self._go_visual_active = None
@@ -888,13 +887,6 @@ class CameraMainWindow(QMainWindow):
         self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #d97706; padding-left: 8px;")
         self.cmb_camera_source.setEnabled(False)
         source = self.cmb_camera_source.currentData()
-        if source == "physical" and self._physical_serial is None:
-            serial, accepted = QInputDialog.getText(self, "Physical Camera", "Camera serial number (from the camera label).\nRemembered after a successful connection:")
-            if not accepted or not serial.strip().isdigit():
-                self._configuration_controls(False)
-                self._after_connect = None
-                return
-            self._physical_serial = str(int(serial.strip()))
         desired_mode = self.cmb_readout_mode.currentData() if self._mode_requested_before_connect else None
         trigger = TriggerMode.EXTERNAL_EXPOSURE_START if self.chk_external_trigger.isChecked() else TriggerMode.AUTO_SEQUENCE
         self.active_connect_task = CameraConnectTask(
@@ -920,10 +912,6 @@ class CameraMainWindow(QMainWindow):
             self._append_log(f"[CONNECT] Connected to explicitly selected simulated camera in {connection_time:.2f} s.")
             self.lbl_system_status.setText("Status: Connected (Simulated Camera)")
         else:
-            try:
-                save_camera_serial(self._camera_selection_path, self._physical_serial)
-            except (OSError, ValueError, TypeError) as error:
-                self._append_log(f"[CAMERA SELECTION] Could not remember camera: {error}")
             self._append_log(f"[CONNECT] Connected to physical {model_name} on USB 3.0 in {connection_time:.2f} s.")
             self.lbl_system_status.setText(f"Status: Connected ({model_name} USB 3.0)")
         self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #198754; padding-left: 8px;")
@@ -947,8 +935,6 @@ class CameraMainWindow(QMainWindow):
     def _on_camera_connection_error(self, error: str) -> None:
         if "state unknown" in error.lower():
             self._hardware_state_unknown = True
-        elif self.cmb_camera_source.currentData() == "physical":
-            self._physical_serial = None
         source_name = self.cmb_camera_source.currentText()
         self._append_log(f"[CONNECT ERROR] {source_name}: {error}")
         self.lbl_system_status.setText(f"Status: {source_name} connection failed")

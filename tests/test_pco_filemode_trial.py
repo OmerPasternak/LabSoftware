@@ -264,6 +264,7 @@ def test_free_space_probe_accepts_new_destination(tmp_path, monkeypatch):
     assert not destination.exists()
 
 
-def test_one_cell_drive_test_requires_serial_before_camera_use(tmp_path):
-    with pytest.raises(ValueError, match="expected_serial"):
-        run_hard_drive_decision_test(Settings(), c_output_dir=tmp_path)
+def test_one_cell_drive_test_fills_default_serial_before_camera_use(tmp_path):
+    cfg = Settings(expected_serial=None, roi=(0, 0, 1, 1))
+    with pytest.raises(ValueError, match="reviewed 2560 x 128 ROI"):
+        run_hard_drive_decision_test(cfg, c_output_dir=tmp_path)

@@ -612,11 +612,10 @@ def test_source_can_switch_after_stop_without_touching_real_hardware(qtbot, monk
     class FakePhysicalCamera(MockPcoCamera):
         def __init__(self, *, serial):
             super().__init__()
+            self.requested_serial = serial
 
     monkeypatch.setattr(pco_edge, "PcoEdgeCamera", FakePhysicalCamera)
     window = CameraMainWindow()
-    window._physical_serial = "12345"
-    window._camera_selection_path = tmp_path / "camera_selection.json"
     qtbot.addWidget(window)
     window.camera = MockPcoCamera()
     window.camera.connect()
@@ -638,6 +637,7 @@ def test_source_can_switch_after_stop_without_touching_real_hardware(qtbot, monk
     window.btn_go.click()
     qtbot.waitUntil(lambda: window._is_live_active and window._connected_source == "physical", timeout=4000)
     assert isinstance(window.camera, FakePhysicalCamera)
+    assert window.camera.requested_serial == "61008541"
     window.btn_stop.click()
     qtbot.waitUntil(lambda: window.active_live_task is None, timeout=4000)
 

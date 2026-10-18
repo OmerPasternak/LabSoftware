@@ -31,19 +31,58 @@ def test_exposure_model_and_sdk_limits_are_intersected(monkeypatch):
     with pytest.raises(CameraSafetyError):
         camera.set_exposure_time(0.06)
     assert fake.exposure_time == 0.01
+    fake.description.pop("max exposure time")
     camera.close()
     mock = SmallMock()
     with pytest.raises(CameraSafetyError):
         mock.set_exposure_time(2.001)
 
 
-def test_serial_is_required_before_vendor_constructor(monkeypatch):
+def test_default_serial_targets_the_verified_camera(monkeypatch):
+    fake = FakePcoCamera("USB 3.0")
+    fake.camera_serial = pco_edge.DEFAULT_CAMERA_SERIAL
     calls = []
-    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda **kwargs: calls.append(kwargs)))
+
+    def make_camera(**kwargs):
+        calls.append(kwargs)
+        return fake
+
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=make_camera))
     monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
-    with pytest.raises(ValueError, match="serial"):
-        pco_edge.PcoEdgeCamera().connect()
-    assert calls == []
+    camera = pco_edge.PcoEdgeCamera()
+    camera.connect()
+    assert calls == [{"interface": "USB 3.0", "serial": 61008541}]
+    camera.close()
+
+
+def test_explicit_none_serial_uses_the_verified_camera_default(monkeypatch):
+    fake = FakePcoCamera("USB 3.0")
+    fake.camera_serial = pco_edge.DEFAULT_CAMERA_SERIAL
+    calls = []
+
+    def make_camera(**kwargs):
+        calls.append(kwargs)
+        return fake
+
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=make_camera))
+    monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
+    camera = pco_edge.PcoEdgeCamera(serial=None)
+    camera.connect()
+    assert calls == [{"interface": "USB 3.0", "serial": 61008541}]
+    camera.close()
+
+
+def test_acceptance_settings_default_to_the_verified_serial():
+    from scripts import lab_computer_acceptance as lab
+
+    assert lab.Settings().expected_serial == pco_edge.DEFAULT_CAMERA_SERIAL
+
+
+def test_gui_connect_worker_fills_an_omitted_physical_serial():
+    from hhg_control.ui.camera.workers import CameraConnectTask
+
+    task = CameraConnectTask("physical", 0.001, serial=None)
+    assert task.serial == pco_edge.DEFAULT_CAMERA_SERIAL
 
 
 def test_failed_stop_still_closes_and_reports_unknown(monkeypatch):
@@ -208,28 +247,21 @@ def test_configuration_pauses_live_without_label_flicker(qtbot, tmp_path, change
     qtbot.waitUntil(lambda: window._close_disconnect_done)
 
 
-def test_camera_selection_is_remembered_between_windows(qtbot, tmp_path, monkeypatch):
-    from hhg_control.ui.camera.selection import load_camera_serial, save_camera_serial
+def test_gui_uses_fixed_camera_serial_instead_of_saved_selection(qtbot, tmp_path, monkeypatch):
+    from hhg_control.drivers.camera_defaults import DEFAULT_CAMERA_SERIAL
     monkeypatch.chdir(tmp_path)
     path = tmp_path / "data" / "camera_selection.json"
-    assert load_camera_serial(path) is None
+    path.parent.mkdir(parents=True)
+    path.write_text('{"serial": "12345"}', encoding="utf-8")
     window = CameraMainWindow()
     qtbot.addWidget(window)
-    window._physical_serial = "12345"
-    camera = SmallMock()
-    camera.connect()
-    window._on_camera_connected(camera, False, 0)
-    assert load_camera_serial(path) == "12345"
     second = CameraMainWindow()
     qtbot.addWidget(second)
-    assert second._physical_serial == "12345"
+    assert window._physical_serial == DEFAULT_CAMERA_SERIAL
+    assert second._physical_serial == DEFAULT_CAMERA_SERIAL
+    assert path.read_text(encoding="utf-8") == '{"serial": "12345"}'
     window.close()
-    qtbot.waitUntil(lambda: window._close_disconnect_done)
     second.close()
-    path.write_text("invalid JSON", encoding="utf-8")
-    assert load_camera_serial(path) is None
-    with pytest.raises(ValueError):
-        save_camera_serial(path, "not a serial")
 
 
 def test_stop_during_configuration_cancels_live_resume(qtbot, tmp_path):

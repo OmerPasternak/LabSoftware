@@ -235,6 +235,8 @@ def run_complete_pipeline_trial(
     This is a measured candidate, not a proven global optimum.
     """
     cfg, window_info = storage.window_settings(cfg, window)
+    if cfg.source == "physical" and not cfg.expected_serial:
+        cfg = replace(cfg, expected_serial=lab.DEFAULT_CAMERA_SERIAL)
     destinations = storage._destinations(cfg, output_dirs)
 
     def operation(report, folder_name):

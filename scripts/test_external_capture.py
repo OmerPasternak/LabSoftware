@@ -85,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
     """Parse reviewed settings; physical camera access requires --physical."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--physical", action="store_true", help="Apply settings to the real camera (default: mock)")
-    parser.add_argument("--serial", default="61008541")
+    parser.add_argument("--serial", default=lab.DEFAULT_CAMERA_SERIAL)
     parser.add_argument("--frames", type=int, default=100)
     parser.add_argument("--exposure-s", type=float, default=0.001)
     parser.add_argument("--roi", type=int, nargs=4, default=(0, 1016, 2560, 1144), metavar=("X0", "Y0", "X1", "Y1"))

@@ -233,6 +233,34 @@ def test_pco_readout_mode_adapts_to_sdk_dictionary(monkeypatch):
     camera.close()
 
 
+def test_pco_close_resets_rolling_shutter_and_100ms(monkeypatch):
+    created = []
+
+    def make_camera(interface, serial):
+        fake = FakePcoCamera(interface)
+        fake.camera_serial = str(serial)
+        if created:
+            fake.sdk.setup = created[-1].sdk.setup
+        created.append(fake)
+        return fake
+
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=make_camera))
+    monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
+    monkeypatch.setattr(pco_edge.time, "sleep", lambda _: None)
+    camera = pco_edge.PcoEdgeCamera(serial="12345")
+    camera.connect()
+    camera.set_readout_mode(pco_edge.ReadoutMode.GLOBAL_SHUTTER)
+    camera.set_exposure_time(0.001)
+
+    camera.close()
+
+    assert len(created) == 3  # Initial connect, then one reboot in each direction.
+    assert created[-1].sdk.setup == pco_edge.ReadoutMode.ROLLING_SHUTTER.value
+    assert created[-1].exposure_time == pytest.approx(0.1)
+    assert not camera.is_connected
+    assert not camera.state_unknown
+
+
 def test_pco_mode_switch_rejects_mismatched_hardware_readback(monkeypatch):
     """A completed reboot is not success unless the SDK reports the new mode."""
     created = []

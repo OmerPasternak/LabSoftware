@@ -296,6 +296,8 @@ def run_batch_size_trial(
     uninstrumented short control reports diagnostic overhead separately.
     """
     cfg, window_info = window_settings(cfg, window)
+    if cfg.source == "physical" and not cfg.expected_serial:
+        cfg = replace(cfg, expected_serial=lab.DEFAULT_CAMERA_SERIAL)
     destinations = _destinations(cfg, output_dirs)
 
     def operation(report, folder_name):
@@ -518,6 +520,8 @@ def run_hdf5_pixel_verification_trial(
     durable FPS includes fsync. Total trial time includes all checks. The measured
     source-hash overhead is reported honestly; unchanged FPS is never assumed.
     """
+    if cfg.source == "physical" and not cfg.expected_serial:
+        cfg = replace(cfg, expected_serial=lab.DEFAULT_CAMERA_SERIAL)
     destinations = _destinations(cfg, output_dirs)
 
     def operation(report, folder_name):

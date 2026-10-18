@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Tuple, List, Dict, Any
 import numpy as np
 from .base_camera import BaseCamera, CameraSafetyError, ReadoutMode, TriggerMode
+from .camera_defaults import DEFAULT_CAMERA_SERIAL, DISCONNECT_EXPOSURE_S
 from ..safe_io import check_stack_memory
 
 
@@ -53,7 +54,9 @@ def _frame_time_fields(metadata: Dict[str, Any]) -> tuple[Any, str, str]:
 class PcoEdgeCamera(BaseCamera):
     """Driver for pco.edge 5.5 sCMOS using the official Excelitas `pco` SDK."""
 
-    def __init__(self, interface: str = "USB 3.0", *, serial: str | None = None) -> None:
+    def __init__(
+        self, interface: str = "USB 3.0", *, serial: str | None = DEFAULT_CAMERA_SERIAL
+    ) -> None:
         super().__init__()
         if not PCO_AVAILABLE:
             raise ImportError(
@@ -61,7 +64,8 @@ class PcoEdgeCamera(BaseCamera):
                 "Ensure 'pip install pco' is executed and PCO CamWare / USB drivers are installed."
             )
         self._interface_name = interface
-        self._serial = serial
+        # Treat an omitted or legacy None value as the lab's fixed camera ID.
+        self._serial = str(serial or DEFAULT_CAMERA_SERIAL)
         self.state_unknown = False
         self._cam: Any = None
         self._info: Dict[str, Any] = {}
@@ -76,7 +80,7 @@ class PcoEdgeCamera(BaseCamera):
         if self._is_connected:
             return
         if not self._serial or not str(self._serial).isdigit():
-            raise ValueError("Enter the intended physical camera's numeric serial before connecting.")
+            raise ValueError(f"Configured camera serial must be numeric, got {self._serial!r}.")
         try:
             # The GUI owns configuration; the vendor's default reset is intentional.
             self._cam = pco.Camera(interface=self._interface_name, serial=int(self._serial))
@@ -112,17 +116,40 @@ class PcoEdgeCamera(BaseCamera):
             raise ConnectionError(f"Failed to connect to PCO camera: {exc}") from exc
 
     def close(self) -> None:
-        """Attempt stop and close independently; report any uncertain cleanup."""
+        """Reset to Rolling Shutter at 100 ms, then release the camera handle.
+
+        Exposure is in seconds. The mode change may reboot the camera for about
+        3–5 seconds; failures still attempt to close the SDK handle and report
+        an unknown state instead of claiming the reset succeeded.
+        """
         if self._cam is not None:
             errors = []
+            stopped = False
             try:
                 self._cam.stop()
                 if getattr(self._cam, "is_recording", False):
                     raise RuntimeError("Camera still reports recording after stop.")
+                stopped = True
             except Exception as exc:
                 errors.append(f"stop: {exc}")
+            if stopped and self._is_connected:
+                try:
+                    # Apply the mode first so exposure validation uses the
+                    # Rolling Shutter limit, including any SDK-specific cap.
+                    self.set_readout_mode(ReadoutMode.ROLLING_SHUTTER)
+                    self.set_exposure_time(DISCONNECT_EXPOSURE_S)
+                    if self.get_readout_mode() != ReadoutMode.ROLLING_SHUTTER:
+                        raise RuntimeError("Rolling Shutter readback did not match.")
+                    if not math.isclose(
+                        self.get_exposure_time(), DISCONNECT_EXPOSURE_S,
+                        rel_tol=1e-5, abs_tol=1e-9,
+                    ):
+                        raise RuntimeError("100 ms exposure readback did not match.")
+                except Exception as exc:
+                    errors.append(f"disconnect defaults: {exc}")
             try:
-                self._cam.close()
+                if self._cam is not None:
+                    self._cam.close()
             except Exception as exc:
                 errors.append(f"close: {exc}")
             else:
