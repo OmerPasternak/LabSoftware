@@ -1,7 +1,9 @@
 """Small offline controls for 4C/4D; no camera SDK or lab drive is accessed."""
 
 from dataclasses import replace
+import hashlib
 import json
+import os
 from pathlib import Path
 
 import h5py
@@ -10,6 +12,7 @@ import pytest
 
 from scripts import lab_computer_acceptance as lab
 from scripts import storage_diagnostics as diagnostics
+from hhg_control.safe_io import filesystem_path
 
 
 @pytest.fixture
@@ -22,12 +25,48 @@ def cfg(tmp_path, monkeypatch):
                         speed_frames=8, repeats=1, target_fps=400)
 
 
+def test_pixel_manifest_beyond_windows_legacy_path_limit(tmp_path):
+    # The HDF5 name fits MAX_PATH but its longer checksum sidecar does not.
+    # Reproduce this independently of the checkout length and Windows policy.
+    parent = tmp_path.resolve()
+    folder = parent / ("d" * max(1, 245 - len(str(parent)) - 1))
+    filesystem_path(folder).mkdir()
+    path = folder / "pixels.h5"
+    manifest = path.with_suffix(".pixels.sha256.json")
+    assert len(str(manifest)) >= 260
+    images = np.array([[[1, 2]]], dtype="<u2")
+    with h5py.File(filesystem_path(path), "w") as h5:
+        h5.create_dataset("images", data=images)
+        h5.attrs.update(complete=True, frames_written=1)
+    reference = {"shape_frame_y_x": list(images.shape), "blocks": [
+        {"start": 0, "frames": 1, "sha256": hashlib.sha256(images.tobytes()).hexdigest()}]}
+    diagnostics._write_pixel_manifest(manifest, reference)
+    assert diagnostics.verify_hdf5_pixels(path, manifest)["frames_verified"] == 1
+    measured = {}
+    diagnostics._measure_output(measured, folder, 1)
+    assert measured["output_bytes"] == (filesystem_path(path).stat().st_size
+                                        + filesystem_path(manifest).stat().st_size)
+    reference["blocks"][0]["sha256"] = "invalid"
+    diagnostics._write_pixel_manifest(manifest, reference)
+    with pytest.raises(AssertionError, match="pixels differ"):
+        diagnostics.verify_hdf5_pixels(path, manifest)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows path syntax")
+def test_windows_filesystem_paths_support_unc_and_existing_prefixes(tmp_path):
+    absolute = filesystem_path(tmp_path / ".." / tmp_path.name / "manifest.json")
+    assert str(absolute).startswith("\\\\?\\")
+    assert ".." not in absolute.parts
+    assert filesystem_path(absolute) == absolute
+    assert str(filesystem_path(Path(r"\\server\share\manifest.json"))) == r"\\?\UNC\server\share\manifest.json"
+
+
 def test_batch_control_uses_production_writer_and_keeps_config(cfg, capsys):
     report = diagnostics.run_batch_size_trial(
         cfg, batch_sizes=(1, 4), frames=7, repeats=2,
     )
     assert capsys.readouterr().out == ""
-    assert report["status"] == "EXECUTED"
+    assert report["status"] == "EXECUTED", report.get("error")
     runs = report["drives"]["selected"]["runs"]
     assert [run["batch_size"] for run in runs] == [1, 4, 4, 1]
     assert all(run["saved"]["frames"] == 7 and run["saved"]["consecutive_ids"] for run in runs)

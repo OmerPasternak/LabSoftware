@@ -6,6 +6,25 @@ import os
 import shutil
 
 
+def filesystem_path(path: Path) -> Path:
+    """Return a path for filesystem I/O, including long Windows paths.
+
+    Windows extended paths bypass MAX_PATH without changing the machine's
+    registry. Normalize relative components before adding the prefix, and
+    support UNC shares and paths that already have an extended prefix.
+    Keep ordinary paths in reports so users can recognize their filenames.
+    """
+    path = Path(path)
+    if os.name != "nt":
+        return path
+    absolute = os.path.abspath(path)
+    if absolute.startswith("\\\\?\\"):
+        return Path(absolute)
+    if absolute.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + absolute[2:])
+    return Path("\\\\?\\" + absolute)
+
+
 def available_physical_memory_bytes() -> int:
     """Return currently available physical RAM in bytes.
 

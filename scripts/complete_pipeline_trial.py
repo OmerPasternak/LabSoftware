@@ -22,6 +22,7 @@ import numpy as np
 from scripts import capture_diagnostics as capture
 from scripts import lab_computer_acceptance as lab
 from scripts import storage_diagnostics as storage
+from hhg_control.safe_io import filesystem_path
 
 
 def _verify_worker(tasks, results, cfg):
@@ -35,12 +36,12 @@ def _verify_worker(tasks, results, cfg):
         try:
             started = time.perf_counter()
             for name in (path, manifest):
-                with Path(name).open("r+b", buffering=0) as handle:
+                with filesystem_path(name).open("r+b", buffering=0) as handle:
                     os.fsync(handle.fileno())
             synced = time.perf_counter()
             checked = lab.inspect_file(Path(path), cfg)
             pixels = storage.verify_hdf5_pixels(Path(path), Path(manifest))
-            source = json.loads(Path(manifest).read_text(encoding="utf-8"))
+            source = json.loads(filesystem_path(manifest).read_text(encoding="utf-8"))
             with storage.h5py.File(path, "r") as h5:
                 ids = [int(json.loads(h5["frame_metadata/json"][i])["frame_id"]) for i in (0, -1)]
             if ids != [source["first_frame_id"], source["last_frame_id"]]:
@@ -330,7 +331,7 @@ def run_complete_pipeline_trial(
                                     "writer": manager.last_step_timing}
                                 drive["files"].append(row)
                                 manifest = path.with_suffix(".pixels.sha256.json")
-                                manifest.write_text(json.dumps({"algorithm": "sha256", "dtype": "<u2",
+                                filesystem_path(manifest).write_text(json.dumps({"algorithm": "sha256", "dtype": "<u2",
                                     "shape_frame_y_x": [count, cfg.roi[3]-cfg.roi[1], cfg.roi[2]-cfg.roi[0]],
                                     "first_frame_id": row["first_frame_id"], "last_frame_id": row["last_frame_id"],
                                     "blocks": reference.blocks}, separators=(",", ":")), encoding="utf-8")

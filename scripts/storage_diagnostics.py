@@ -24,6 +24,7 @@ import numpy as np
 from scripts import lab_computer_acceptance as lab
 from scripts import capture_diagnostics as capture_diag
 from hhg_control.sequencer.scan_manager import CameraScanManager, _frame_chunk_shape
+from hhg_control.safe_io import filesystem_path
 
 
 ROI_WINDOWS = {
@@ -270,7 +271,7 @@ def stage_profile(drive, d_stage_gb=20):
 
 def _measure_output(drive_report, folder: Path, cap_gb: float):
     """Measure only this diagnostic's retained files, never existing research data."""
-    size = sum(path.stat().st_size for path in folder.rglob("*") if path.is_file())
+    size = sum(path.stat().st_size for path in filesystem_path(folder).rglob("*") if path.is_file())
     drive_report.update(output_bytes=size, output_GB=size / 1e9,
                         within_output_cap=size <= cap_gb * 1e9)
     if not drive_report["within_output_cap"]:
@@ -401,10 +402,8 @@ def run_batch_size_trial(
                                     saved = run[mode]
                                     if verify_pixels:
                                         manifest = Path(saved["file"]).with_suffix(".pixels.sha256.json")
-                                        manifest.write_text(json.dumps({"shape_frame_y_x": saved["shape_frame_y_x"],
-                                                                        "blocks": probe.blocks}, separators=(",", ":")), encoding="utf-8")
-                                        with manifest.open("r+b", buffering=0) as handle:
-                                            os.fsync(handle.fileno())
+                                        _write_pixel_manifest(manifest, {"shape_frame_y_x": saved["shape_frame_y_x"],
+                                                                         "blocks": probe.blocks})
                                         details["pixel_integrity"] = {"status": "FAILED", "manifest": str(manifest)}
                                         details["pixel_integrity"].update(verify_hdf5_pixels(Path(saved["file"]), manifest))
                                         details["pixel_integrity"]["status"] = "VERIFIED"
@@ -474,6 +473,14 @@ class _PixelReferenceCamera:
             iterator.close()
 
 
+def _write_pixel_manifest(path: Path, manifest: dict) -> None:
+    """Write and fsync pixel references even past Windows' legacy path limit."""
+    target = filesystem_path(path)
+    target.write_text(json.dumps(manifest, separators=(",", ":")), encoding="utf-8")
+    with target.open("r+b", buffering=0) as handle:
+        os.fsync(handle.fileno())
+
+
 def verify_hdf5_pixels(path: Path, manifest_path: Path) -> dict:
     """Read every saved pixel against pre-write SHA-256 references, in bounded blocks.
 
@@ -483,7 +490,7 @@ def verify_hdf5_pixels(path: Path, manifest_path: Path) -> dict:
     Cached reads are allowed; this does not prove persistence through power loss.
     """
     started = time.perf_counter()
-    manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    manifest = json.loads(filesystem_path(manifest_path).read_text(encoding="utf-8"))
     count = 0
     with h5py.File(path, "r") as h5:
         images = h5["images"]
@@ -563,11 +570,9 @@ def run_hdf5_pixel_verification_trial(
                                       "final_os_fsync_s", "consecutive_ids")}
             manifest_path = Path(saved["file"]).with_suffix(".pixels.sha256.json")
             post_started = time.perf_counter()
-            manifest_path.write_text(json.dumps({"algorithm": "sha256", "dtype": "<u2",
-                                                 "shape_frame_y_x": saved["shape_frame_y_x"],
-                                                 "blocks": reference.blocks}, separators=(",", ":")), encoding="utf-8")
-            with manifest_path.open("r+b", buffering=0) as handle:
-                os.fsync(handle.fileno())
+            _write_pixel_manifest(manifest_path, {"algorithm": "sha256", "dtype": "<u2",
+                                                  "shape_frame_y_x": saved["shape_frame_y_x"],
+                                                  "blocks": reference.blocks})
             drive["reference_manifest"] = str(manifest_path)
             drive["source_hash_s"] = reference.hash_s
             drive["verification"] = {"pixels_equal_source": False}
