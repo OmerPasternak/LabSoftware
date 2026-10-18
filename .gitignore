@@ -8,6 +8,9 @@ venv/
 .venv/
 .env
 .pytest_cache/
+# Pytest artifacts when a run explicitly overrides the configured basetemp.
+.pytest-run-tmp/
+.pytest-run-cache/
 *.egg-info/
 build/
 dist/
