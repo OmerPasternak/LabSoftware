@@ -50,7 +50,8 @@ from .workers import (
 
 IMAGE_AXIS_RECT = (0.12, 0.08, 0.83, 0.86)
 COLOR_AXIS_RECT = (0.95, 0.08, 0.05, 0.86)
-APPLICATION_WRITER_QUEUE_GIB = 16.0
+# Agent-editable acquisition backlog limit; intentionally absent from the GUI.
+APPLICATION_WRITER_QUEUE_GIB = 32.0
 APPLICATION_WRITER_MEMORY_RESERVE_GIB = 16.0
 
 
@@ -686,20 +687,7 @@ class CameraMainWindow(QMainWindow):
         self.btn_open_folder = QPushButton("Open")
         self.btn_open_folder.clicked.connect(self._open_storage_folder)
 
-        self.spn_writer_buffer_gib = QDoubleSpinBox()
-        self.spn_writer_buffer_gib.setRange(0.5, 24.0)
-        self.spn_writer_buffer_gib.setSingleStep(0.5)
-        self.spn_writer_buffer_gib.setDecimals(1)
-        self.spn_writer_buffer_gib.setSuffix(" GiB")
-        self.spn_writer_buffer_gib.setValue(APPLICATION_WRITER_QUEUE_GIB)
-        self.spn_writer_buffer_gib.setToolTip(
-            "Maximum lazy RAM backlog when storage falls behind. The lab-PC default is 16 GiB; "
-            "acquisition keeps a separate 16 GiB physical-memory reserve and stops safely if reached."
-        )
-        self.spn_writer_buffer_gib.editingFinished.connect(self._on_writer_buffer_edited)
         folder_buttons = QHBoxLayout()
-        folder_buttons.addWidget(QLabel("RAM buffer:"))
-        folder_buttons.addWidget(self.spn_writer_buffer_gib)
         folder_buttons.addStretch(1)
         folder_buttons.addWidget(self.btn_browse)
         folder_buttons.addWidget(self.btn_open_folder)
@@ -1990,18 +1978,6 @@ class CameraMainWindow(QMainWindow):
         folder = Path(self.txt_storage_dir.text().strip()).expanduser()
         self.scan_manager.set_storage_dir(folder)
 
-    def _on_writer_buffer_edited(self) -> None:
-        """Apply the explicit GiB writer backlog while acquisition is idle."""
-        gib = self.spn_writer_buffer_gib.value()
-        self.scan_manager.set_writer_queue_memory(
-            int(gib * 2**30),
-            reserve_bytes=int(APPLICATION_WRITER_MEMORY_RESERVE_GIB * 2**30),
-        )
-        self._append_log(
-            f"[STORAGE] RAM backlog limit set to {gib:.1f} GiB; "
-            f"{APPLICATION_WRITER_MEMORY_RESERVE_GIB:.1f} GiB remains reserved."
-        )
-
     def _browse_directory(self) -> None:
         chosen_dir = QFileDialog.getExistingDirectory(
             self, "Select Destination Folder for HDF5 Datasets", self.txt_storage_dir.text()
@@ -2138,7 +2114,7 @@ class CameraMainWindow(QMainWindow):
             return
         self.scan_manager.set_storage_dir(target_dir)
         self.scan_manager.set_writer_queue_memory(
-            int(self.spn_writer_buffer_gib.value() * 2**30),
+            int(APPLICATION_WRITER_QUEUE_GIB * 2**30),
             reserve_bytes=int(APPLICATION_WRITER_MEMORY_RESERVE_GIB * 2**30),
         )
 
@@ -2222,7 +2198,6 @@ class CameraMainWindow(QMainWindow):
             self.spn_end_val.setEnabled(False)
             self.spn_step_size.setEnabled(False)
             self.spn_num_steps.setEnabled(False)
-            self.spn_writer_buffer_gib.setEnabled(False)
             self.btn_apply_roi.setEnabled(False)
             self.btn_full_sensor.setEnabled(False)
             self.btn_draw_roi.setEnabled(False)
@@ -2236,7 +2211,6 @@ class CameraMainWindow(QMainWindow):
             self.spn_end_val.setEnabled(True)
             self.spn_step_size.setEnabled(self.spn_num_steps.value() > 1)
             self.spn_num_steps.setEnabled(True)
-            self.spn_writer_buffer_gib.setEnabled(True)
             self.btn_apply_roi.setEnabled(not self._roi_change_pending)
             self.btn_full_sensor.setEnabled(not self._roi_change_pending)
             self.btn_draw_roi.setEnabled(not self._roi_change_pending)
