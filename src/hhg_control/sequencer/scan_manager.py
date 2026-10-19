@@ -18,7 +18,7 @@ from typing import Any, Optional
 import numpy as np
 
 from ..drivers.base_camera import BaseCamera, TriggerMode
-from ..safe_io import available_physical_memory_bytes, check_disk_space
+from ..safe_io import available_physical_memory_bytes, check_disk_space, filesystem_path
 
 
 HDF5_SCHEMA_VERSION = "2.0"
@@ -395,7 +395,7 @@ class CameraScanManager:
             queue_get_wait_s = 0.0
             close_started = 0.0
             try:
-                with h5py.File(partial_path, "x") as h5f:
+                with h5py.File(filesystem_path(partial_path), "x") as h5f:
                     h5f.attrs["schema_version"] = HDF5_SCHEMA_VERSION
                     h5f.attrs["complete"] = False
                     for key, value in attrs.items():
@@ -628,7 +628,7 @@ class CameraScanManager:
         # exclusive hard link to publish, so a concurrent writer cannot be replaced.
         rename_started = time.perf_counter()
         if os.name == "nt":
-            os.rename(partial_path, filepath)
+            os.rename(filesystem_path(partial_path), filesystem_path(filepath))
         else:
             os.link(partial_path, filepath)
             partial_path.unlink()

@@ -60,6 +60,7 @@ from hhg_control.drivers.base_camera import ReadoutMode, TriggerMode
 from hhg_control.drivers.camera_defaults import DEFAULT_CAMERA_SERIAL
 from hhg_control.drivers.mock_camera import MockPcoCamera
 from hhg_control.sequencer.scan_manager import AcquisitionAborted, CameraScanManager
+from hhg_control.safe_io import filesystem_path
 from scripts.benchmark_capture_pipeline import run_benchmark
 from scripts.stress_camera_storage import ReplayCamera, run_case
 
@@ -204,20 +205,26 @@ def configured_camera(cfg: Settings, trigger=TriggerMode.AUTO_SEQUENCE):
         camera.close()
 
 
-def inspect_file(path: Path, cfg: Settings | None = None, full_read: bool = False) -> dict:
+def inspect_file(path: Path, cfg: Settings | None = None, full_read: bool = False,
+                 *, sample_pixels: bool = True, profile: bool = False) -> dict:
     """Check all metadata in bounded batches; optionally hash/read every raw pixel.
 
     Hardware IDs must increment modulo 2**32. Host intervals describe software
     receipt, never exposure timing. File hashes establish a copy-verification
     reference; they cannot independently establish the camera's original pixels.
+    sample_pixels=False skips optional image statistics when a separate full
+    pixel check follows. profile=True returns metadata read/decode wall and CPU
+    seconds. IDs are returned from the same metadata pass, avoiding rereads.
     """
     path = Path(path)
     require(path.suffix == ".h5", "Incomplete .partial files are not accepted as research inputs")
     intervals, sources, previous_id, previous_time = [], {}, None, None
+    first_id = None
+    metadata_read_s = metadata_read_cpu_s = metadata_decode_s = metadata_decode_cpu_s = 0.0
     valid_host_times, count = True, 0
     digest = hashlib.sha256()
     metadata_digest = hashlib.sha256()
-    with h5py.File(path, "r") as h5:
+    with h5py.File(filesystem_path(path), "r") as h5:
         attrs = h5.attrs
         require(bool(attrs["complete"]), f"Incomplete file: {path}")
         count = int(attrs["num_frames"])
@@ -240,12 +247,19 @@ def inspect_file(path: Path, cfg: Settings | None = None, full_read: bool = Fals
                 if cfg.expected_serial:
                     require(str(attrs["camera_serial"]) == cfg.expected_serial, "Saved serial differs")
         for start in range(0, count, 256):
-            for raw in metadata[start:start + 256]:
+            began, cpu_began = time.perf_counter(), time.process_time()
+            block = metadata[start:start + 256]
+            metadata_read_s += time.perf_counter() - began
+            metadata_read_cpu_s += time.process_time() - cpu_began
+            began, cpu_began = time.perf_counter(), time.process_time()
+            for raw in block:
                 encoded = raw.encode("utf-8") if isinstance(raw, str) else bytes(raw)
                 metadata_digest.update(len(encoded).to_bytes(8, "little"))
                 metadata_digest.update(encoded)
                 item = json.loads(raw)
                 frame_id = int(item["frame_id"])
+                if first_id is None:
+                    first_id = frame_id
                 require(previous_id is None or frame_id == (previous_id + 1) % 2**32,
                         f"Missing, duplicate or reordered frame ID near {frame_id}")
                 previous_id = frame_id
@@ -259,8 +273,10 @@ def inspect_file(path: Path, cfg: Settings | None = None, full_read: bool = Fals
                     require(delta > 0, "Host read times are not increasing")
                     intervals.append(delta / 1e6)
                 previous_time = int(timestamp) if timestamp is not None else None
+            metadata_decode_s += time.perf_counter() - began
+            metadata_decode_cpu_s += time.process_time() - cpu_began
         sample_stats = []
-        for index in sorted({0, count // 2, count - 1}):
+        for index in (sorted({0, count // 2, count - 1}) if sample_pixels else []):
             frame = images[index]
             sample_stats.append({"frame": index, "min_adu": int(frame.min()),
                                  "max_adu": int(frame.max()), "mean_adu": float(frame.mean()),
@@ -271,6 +287,7 @@ def inspect_file(path: Path, cfg: Settings | None = None, full_read: bool = Fals
             for start in range(0, count, block):
                 digest.update(images[start:start + block].tobytes(order="C"))
         result = {"file": str(path.resolve()), "frames": count, "complete": True,
+                  "first_frame_id": first_id, "last_frame_id": previous_id,
                   "consecutive_ids": True, "shape_frame_y_x": list(images.shape),
                   "camera_model": str(attrs["camera_model"]), "camera_serial": str(attrs["camera_serial"]),
                   "roi_bounds": roi, "exposure_s": float(attrs["exposure_time_s"]),
@@ -289,6 +306,11 @@ def inspect_file(path: Path, cfg: Settings | None = None, full_read: bool = Fals
                   "sample_statistics": sample_stats, "full_pixel_read": full_read,
                   "pixel_sha256": digest.hexdigest() if full_read else None,
                   "metadata_sha256": metadata_digest.hexdigest()}
+    if profile:
+        result["metadata_timing_s"] = {
+            "metadata_read": metadata_read_s, "metadata_read_cpu": metadata_read_cpu_s,
+            "metadata_decode_validate": metadata_decode_s,
+            "metadata_decode_validate_cpu": metadata_decode_cpu_s}
     if valid_host_times and intervals:
         result.update(host_read_fps=1000 * len(intervals) / sum(intervals),
                       host_interval_median_ms=float(np.median(intervals)),

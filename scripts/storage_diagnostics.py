@@ -93,7 +93,8 @@ def _analysis_report(report: dict) -> dict:
         packet = {key: report[key] for key in (
             "section", "utc", "status", "source", "error", "report_file", "execution_log",
             "diagnostic_settings", "drives", "limitations", "windows", "window_tag") if key in report}
-        packet.update(report_schema_version="2.0", settings=lab.compact_settings(report["settings"]),
+        packet.update(report_schema_version="3.0" if report["section"] == "4f" else "2.0",
+                      settings=lab.compact_settings(report["settings"]),
                       physical_acceptance=False)
         return _rounded_values(packet)
     settings = report["settings"]
@@ -452,6 +453,7 @@ class _PixelReferenceCamera:
         self.camera = camera
         self.blocks = []
         self.hash_s = 0.0
+        self.hash_cpu_s = 0.0
 
     def __getattr__(self, name):
         return getattr(self.camera, name)
@@ -463,9 +465,11 @@ class _PixelReferenceCamera:
         try:
             for images, metadata in iterator:
                 began = time.perf_counter()
+                cpu_began = time.thread_time()
                 pixels = np.ascontiguousarray(images, dtype="<u2")
                 digest = hashlib.sha256(memoryview(pixels).cast("B")).hexdigest()
                 self.hash_s += time.perf_counter() - began
+                self.hash_cpu_s += time.thread_time() - cpu_began
                 self.blocks.append({"start": start, "frames": len(images), "sha256": digest})
                 start += len(images)
                 yield images, metadata
@@ -481,35 +485,73 @@ def _write_pixel_manifest(path: Path, manifest: dict) -> None:
         os.fsync(handle.fileno())
 
 
-def verify_hdf5_pixels(path: Path, manifest_path: Path) -> dict:
+def verify_hdf5_pixels(path: Path, manifest_path: Path, *, read_block_bytes=None, manifest=None) -> dict:
     """Read every saved pixel against pre-write SHA-256 references, in bounded blocks.
 
     The acquisition must be closed and synced first. No camera is opened. A
     mismatch, missing frame, incomplete file or invalid layout raises an error.
     SHA-256 verifies storage against host source pixels, not sensor correctness.
     Cached reads are allowed; this does not prove persistence through power loss.
+    read_block_bytes bounds a reusable read_direct buffer independently of the
+    manifest's hash blocks. Every hash is preserved even across read boundaries.
+    An already loaded manifest avoids a second JSON file read. Wall/CPU seconds
+    for HDF5 reads and pixel hashing are returned independently.
     """
     started = time.perf_counter()
-    manifest = json.loads(filesystem_path(manifest_path).read_text(encoding="utf-8"))
+    if manifest is None:
+        manifest = json.loads(filesystem_path(manifest_path).read_text(encoding="utf-8"))
     count = 0
-    with h5py.File(path, "r") as h5:
+    read_s = read_cpu_s = hash_s = hash_cpu_s = 0.0
+    read_calls = 0
+    with h5py.File(filesystem_path(path), "r") as h5:
         images = h5["images"]
-        if (images.shape != tuple(manifest["shape_frame_y_x"]) or images.dtype != np.dtype("<u2")
+        if (not len(images) or images.shape != tuple(manifest["shape_frame_y_x"]) or images.dtype != np.dtype("<u2")
                 or not h5.attrs.get("complete", False)
                 or int(h5.attrs.get("frames_written", -1)) != len(images)):
             raise AssertionError("HDF5 shape/dtype/completion differs from source manifest")
         for block in manifest["blocks"]:
             start, frames = block["start"], block["frames"]
-            if start != count or frames < 1 or start + frames > len(images):
+            if (not isinstance(start, int) or not isinstance(frames, int) or
+                    start != count or frames < 1 or start + frames > len(images)):
                 raise AssertionError("Pixel manifest has a gap or invalid block range")
-            pixels = np.ascontiguousarray(images[start:start + frames], dtype="<u2")
-            if hashlib.sha256(memoryview(pixels).cast("B")).hexdigest() != block["sha256"]:
-                raise AssertionError(f"HDF5 pixels differ from source at frames {start}:{start + frames}")
             count += frames
         if count != len(images):
             raise AssertionError("Pixel manifest does not cover every saved frame")
+        frame_bytes = int(np.prod(images.shape[1:])) * 2
+        if read_block_bytes is None:
+            read_block_bytes = max(block["frames"] for block in manifest["blocks"]) * frame_bytes
+        if not isinstance(read_block_bytes, int) or read_block_bytes < frame_bytes:
+            raise ValueError("Pixel read buffer must fit at least one frame")
+        block_frames = min(len(images), read_block_bytes // frame_bytes)
+        buffer = np.empty((block_frames, *images.shape[1:]), dtype="<u2")
+        block_index, reference_hash = 0, hashlib.sha256()
+        for start in range(0, len(images), block_frames):
+            stop = min(start + block_frames, len(images))
+            began, cpu_began = time.perf_counter(), time.process_time()
+            images.read_direct(buffer, np.s_[start:stop], np.s_[:stop-start])
+            read_s += time.perf_counter() - began
+            read_cpu_s += time.process_time() - cpu_began
+            read_calls += 1
+            began, cpu_began = time.perf_counter(), time.process_time()
+            position = start
+            while position < stop:
+                block = manifest["blocks"][block_index]
+                boundary = block["start"] + block["frames"]
+                end = min(stop, boundary)
+                reference_hash.update(memoryview(buffer[position-start:end-start]).cast("B"))
+                position = end
+                if position == boundary:
+                    if reference_hash.hexdigest() != block["sha256"]:
+                        raise AssertionError(f"HDF5 pixels differ from source at frames {block['start']}:{boundary}")
+                    block_index += 1
+                    reference_hash = hashlib.sha256()
+            hash_s += time.perf_counter() - began
+            hash_cpu_s += time.process_time() - cpu_began
     elapsed = time.perf_counter() - started
     return {"pixels_equal_source": True, "frames_verified": count,
+            "pixel_read_calls": read_calls, "pixel_read_buffer_bytes": buffer.nbytes,
+            "pixel_read_s": read_s, "pixel_read_cpu_s": read_cpu_s,
+            "pixel_hash_s": hash_s, "pixel_hash_cpu_s": hash_cpu_s,
             "verification_s": elapsed,
             "verification_raw_MB_per_s": count * np.prod(manifest["shape_frame_y_x"][1:]) * 2 / 1e6 / elapsed}
 

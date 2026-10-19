@@ -26,14 +26,16 @@ def cfg(tmp_path, monkeypatch):
                         writer_memory_reserve_gib=0)
 
 
-def test_continuous_files_use_one_iterator_and_verify_all_pixels(cfg, monkeypatch, capsys):
+@pytest.mark.parametrize("verification_mode", ["concurrent", "after_capture"])
+def test_continuous_files_use_one_iterator_and_verify_all_pixels(cfg, monkeypatch, capsys, verification_mode):
     original = lab.MockPcoCamera.iter_frames
     calls = []
     def tracked(self, *args, **kwargs):
         calls.append(args[0])
         yield from original(self, *args, **kwargs)
     monkeypatch.setattr(lab.MockPcoCamera, "iter_frames", tracked)
-    report = trial.run_complete_pipeline_trial(cfg, frames=7, frames_per_file=4)
+    report = trial.run_complete_pipeline_trial(cfg, frames=7, frames_per_file=4,
+                                              verification_mode=verification_mode)
     assert capsys.readouterr().out == ""
     assert report["status"] == "EXECUTED", report.get("error")
     assert calls == [7]
@@ -41,6 +43,8 @@ def test_continuous_files_use_one_iterator_and_verify_all_pixels(cfg, monkeypatc
     summary = drive["summary"]
     assert summary["frames_captured"] == summary["frames_written"] == summary["frames_verified"] == 7
     assert summary["files_verified"] == 2 and summary["all_files_verified"]
+    assert summary["files_synced"] == 2 and summary["frames_synced"] == 7
+    assert summary["verification_timing_totals"]["pixel_read_calls"] == 2
     assert summary["complete_verified_fps"] > 0
     assert summary["all_verified_s"] >= summary["all_synced_s"] > 0
     ids = []
@@ -57,6 +61,103 @@ def test_continuous_files_use_one_iterator_and_verify_all_pixels(cfg, monkeypatc
     assert saved["diagnostic_settings"]["camera_reader"] == "dedicated_thread"
     assert drive["reader_buffer"]["read_complete"] and drive["reader_buffer"]["reader_stopped"]
     assert drive["reader_buffer"]["frames_retrieved"] == drive["reader_buffer"]["frames_delivered"] == 7
+    assert not drive["sustainability"]["long_run_validated"]
+    if verification_mode == "after_capture":
+        ended = drive["reader_buffer"]["reader_started_at_capture_s"] + drive["reader_buffer"]["reader_elapsed_s"]
+        assert summary["verification_released_at_s"] >= ended
+        assert all(row["verification_started_at_s"] >= ended for row in drive["files"])
+
+
+@pytest.mark.parametrize("read_frames", [2, 7])
+def test_coalesced_pixel_reads_keep_hash_boundaries_and_detect_corruption(tmp_path, read_frames):
+    """Read windows may split or combine reference hashes without losing coverage."""
+    import hashlib
+    import numpy as np
+    pixels = np.arange(11 * 6, dtype=np.uint16).reshape(11, 2, 3)
+    path, manifest = tmp_path / "pixels.h5", tmp_path / "pixels.json"
+    with h5py.File(path, "w") as h5:
+        h5.attrs.update(complete=True, frames_written=11)
+        h5.create_dataset("images", data=pixels)
+    blocks = [{"start": start, "frames": len(pixels[start:start+3]),
+               "sha256": hashlib.sha256(memoryview(pixels[start:start+3]).cast("B")).hexdigest()}
+              for start in range(0, 11, 3)]
+    manifest.write_text(json.dumps({"shape_frame_y_x": list(pixels.shape), "blocks": blocks}))
+    result = storage.verify_hdf5_pixels(path, manifest, read_block_bytes=read_frames * 12)
+    assert result["pixels_equal_source"] and result["frames_verified"] == 11
+    assert result["pixel_read_calls"] == ceil(11/read_frames)
+    assert result["pixel_read_buffer_bytes"] == read_frames * 12
+    with h5py.File(path, "r+") as h5:
+        h5["images"][7, 0, 0] += 1
+    with pytest.raises(AssertionError, match="pixels differ.*6:9"):
+        storage.verify_hdf5_pixels(path, manifest, read_block_bytes=read_frames * 12)
+
+
+def test_sync_completion_is_independent_of_deferred_verification(cfg, monkeypatch):
+    """Synced results remain visible while all pixel checks are deliberately held."""
+    from queue import Queue
+    class LocalQueue(Queue):
+        def close(self):
+            pass
+        def cancel_join_thread(self):
+            pass
+    class IdleProcess:
+        pid = exitcode = None
+        def __init__(self, **kwargs):
+            pass
+    monkeypatch.setattr(trial.multiprocessing, "get_context", lambda _: SimpleNamespace(
+        Queue=LocalQueue, Process=IdleProcess))
+    verifier = trial._Verifier(cfg, 2, 10, verification_mode="after_capture")
+    try:
+        for index in range(2):
+            verifier.submit(index, f"{index}.h5", f"{index}.json")
+            verifier.tasks.get_nowait()  # Controlled stand-in for the sync worker.
+            verifier.results.put(("synced", {"index": index, "sync_started_at": index,
+                                             "synced_at": index + 0.5}))
+            verifier.collect()
+        assert len(verifier.synced) == 2 and verifier.sync_pending == 0
+        assert not verifier.completed and verifier.pending == 2 and verifier.verify_tasks.empty()
+        verifier.release_verification()
+        for index in range(2):
+            assert verifier.verify_tasks.get_nowait()[0] == index
+            verifier.results.put(("verified", {"index": index, "verified_at": index + 5,
+                                               "verification_started_at": index + 4}))
+        verifier.collect()
+        assert len(verifier.completed) == 2 and verifier.pending == 0
+    finally:
+        verifier.close()
+
+
+def test_sync_failure_reports_error_without_claiming_durability(cfg, tmp_path):
+    from queue import Queue
+    tasks, results = Queue(), Queue()
+    tasks.put((0, str(tmp_path / "absent.h5"), str(tmp_path / "absent.json")))
+    trial._sync_worker(tasks, results)
+    assert results.get()[0] == "sync_ready"
+    kind, error = results.get()
+    assert kind == "error" and "Sync worker" in error and "FileNotFoundError" in error
+
+
+def test_sustainability_reports_conditional_headroom_without_claiming_long_run():
+    source = SimpleNamespace(buffer_samples=SimpleNamespace(rows=[
+        [0, 0, 0, 0], [10, 100, 90, 5], [20, 200, 180, 10], [40, 400, 360, 20]]),
+        max_pending=20, cfg=SimpleNamespace(batch_size=2), reader_started=0, reader_finished=40,
+        backlog_at_reader_stop_frames=40, plan={"capacity_bytes": 1000})
+    result = trial._sustainability(source, frame_bytes=10, reference_fps=100)
+    assert result["status"] == "GROWING_BACKLOG" and not result["long_run_validated"]
+    assert result["last_window_backlog_growth_MB_per_s"] == pytest.approx(10/1e6)
+    assert result["headroom_s_if_last_window_growth_persists"] == pytest.approx(60)
+
+
+def test_policy_tagged_pipeline_handles_long_windows_hdf5_paths(cfg, tmp_path):
+    """Creation, publication and verification must all support deep lab checkouts."""
+    cfg = replace(cfg, output_dir=tmp_path / ("nested_" + "x" * 35))
+    report = trial.run_complete_pipeline_trial(cfg, frames=7, frames_per_file=4,
+                                              verification_mode="after_capture")
+    assert report["status"] == "EXECUTED", report.get("error")
+    drive = report["drives"]["selected"]
+    assert drive["summary"]["frames_verified"] == drive["summary"]["frames_synced"] == 7
+    saved = json.loads(Path(report["report_file"]).read_text())
+    assert saved["report_schema_version"] == "3.0"
 
 
 @pytest.mark.parametrize("stall", ["hashing", "file_rotation", "HDF5_writer"])
@@ -291,7 +392,7 @@ def test_worker_rejects_corrupt_pixels(cfg, tmp_path):
     from unittest.mock import patch
     with patch.object(lab, "inspect_file", return_value={}):
         trial._verify_worker(tasks, results, cfg)
-    assert results.get()[0] == "ready"
+    assert results.get()[0] == "verify_ready"
     kind, error = results.get()
     assert kind == "error" and "pixels differ" in error
 

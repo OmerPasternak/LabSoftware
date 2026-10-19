@@ -53,9 +53,9 @@ def _buffer_plan(cfg, frames, frame_bytes):
             "memory_reserve_bytes": reserve, "available_bytes_before_start": available}
 
 
-def _verify_worker(tasks, results, cfg):
-    """Sync and verify closed files in another process, with no camera access."""
-    results.put(("ready", None))
+def _sync_worker(tasks, results):
+    """Durably sync closed data/manifests independently of pixel readback."""
+    results.put(("sync_ready", None))
     while True:
         task = tasks.get()
         if task is None:
@@ -63,49 +63,90 @@ def _verify_worker(tasks, results, cfg):
         index, path, manifest = task
         try:
             started = time.perf_counter()
+            open_s = fsync_s = 0.0
             for name in (path, manifest):
+                began = time.perf_counter()
                 with filesystem_path(name).open("r+b", buffering=0) as handle:
+                    open_s += time.perf_counter() - began
+                    began = time.perf_counter()
                     os.fsync(handle.fileno())
+                    fsync_s += time.perf_counter() - began
             synced = time.perf_counter()
-            checked = lab.inspect_file(Path(path), cfg)
-            pixels = storage.verify_hdf5_pixels(Path(path), Path(manifest))
+            results.put(("synced", {"index": index, "sync_started_at": started, "synced_at": synced,
+                "fsync_s": synced - started, "os_fsync_s": fsync_s, "sync_open_s": open_s}))
+        except BaseException:
+            results.put(("error", "Sync worker: " + traceback.format_exc()))
+            return
+
+
+def _verify_worker(tasks, results, cfg, read_block_bytes=64 * 2**20):
+    """Check synced files in another process, retaining every source hash check."""
+    results.put(("verify_ready", None))
+    while True:
+        task = tasks.get()
+        if task is None:
+            return
+        index, path, manifest = task
+        try:
+            started, cpu_started = time.perf_counter(), time.process_time()
             source = json.loads(filesystem_path(manifest).read_text(encoding="utf-8"))
-            with storage.h5py.File(path, "r") as h5:
-                ids = [int(json.loads(h5["frame_metadata/json"][i])["frame_id"]) for i in (0, -1)]
+            metadata_started = time.perf_counter()
+            checked = lab.inspect_file(Path(path), cfg, sample_pixels=False, profile=True)
+            metadata_s = time.perf_counter() - metadata_started
+            pixels = storage.verify_hdf5_pixels(Path(path), Path(manifest),
+                read_block_bytes=read_block_bytes, manifest=source)
+            ids = [checked["first_frame_id"], checked["last_frame_id"]]
             if ids != [source["first_frame_id"], source["last_frame_id"]]:
                 raise AssertionError("Saved frame-ID range differs from source across file boundary")
             finished = time.perf_counter()
-            results.put(("verified", {"index": index, "started_at": started, "synced_at": synced,
-                "verified_at": finished, "fsync_s": synced - started,
-                "metadata_and_pixel_check_s": finished - synced,
+            results.put(("verified", {"index": index, "verification_started_at": started,
+                "verified_at": finished, "metadata_and_pixel_check_s": finished - started,
+                "verification_cpu_s": time.process_time() - cpu_started,
+                "metadata_check_s": metadata_s, **checked["metadata_timing_s"],
+                **{key: value for key, value in pixels.items() if key.startswith("pixel_")},
                 "frames_verified": pixels["frames_verified"],
                 "pixels_equal_source": pixels["pixels_equal_source"],
                 "consecutive_ids": checked["consecutive_ids"], "complete": checked["complete"]}))
         except BaseException:
-            results.put(("error", traceback.format_exc()))
+            results.put(("error", "Pixel verifier: " + traceback.format_exc()))
             return
 
 
 class _Verifier:
-    """Bound outstanding file work and stop the owned process on errors/timeouts."""
+    """Bound file work across independent sync/readback workers; stop both on failure."""
 
-    def __init__(self, cfg, limit, timeout_s):
+    def __init__(self, cfg, limit, timeout_s, *, verification_mode="concurrent", read_block_bytes=64 * 2**20):
         ctx = multiprocessing.get_context("spawn")
-        self.tasks, self.results = ctx.Queue(maxsize=limit), ctx.Queue()
-        self.process = ctx.Process(target=_verify_worker, args=(self.tasks, self.results, cfg),
+        self.tasks, self.verify_tasks, self.results = ctx.Queue(maxsize=limit), ctx.Queue(maxsize=limit), ctx.Queue()
+        self.process = ctx.Process(target=_sync_worker, args=(self.tasks, self.results),
+                                  name="4f-file-sync", daemon=True)
+        self.verify_process = ctx.Process(target=_verify_worker,
+                                   args=(self.verify_tasks, self.results, cfg, read_block_bytes),
                                    name="4f-pixel-verifier", daemon=True)
         self.limit, self.timeout_s = limit, timeout_s
         self.pending, self.completed = 0, []
         self.max_pending, self.error = 0, None
+        self.synced, self.file_tasks, self.verification_submitted = {}, {}, set()
+        self.sync_pending = self.verify_pending = 0
+        self.max_sync_pending = self.max_verify_pending = 0
+        self.verification_enabled = verification_mode == "concurrent"
+        self.verification_released_at = None
+        self._closed = False
         self.last_completion = time.perf_counter()
+        self.last_sync = self.last_verification = self.last_completion
 
     def start(self):
-        """Warm the spawned Python/HDF5 process before opening the camera."""
-        self.process.start()
+        """Warm both owned processes before opening the camera."""
         try:
-            kind, _ = self.results.get(timeout=self.timeout_s)
-            if kind != "ready":
-                raise RuntimeError("Verifier did not initialize")
+            self.process.start()
+            self.verify_process.start()
+            ready = set()
+            deadline = time.perf_counter() + self.timeout_s
+            while len(ready) < 2:
+                kind, data = self.results.get(timeout=max(0.001, deadline - time.perf_counter()))
+                if kind not in ("sync_ready", "verify_ready"):
+                    raise RuntimeError(f"Postprocessing did not initialize: {kind}: {data}")
+                ready.add(kind)
         except BaseException:
             self.close()
             raise
@@ -120,16 +161,48 @@ class _Verifier:
             timeout = 0
             if kind == "error":
                 self.error = data
+            elif kind == "synced":
+                self.synced[data["index"]] = data
+                self.sync_pending -= 1
+                self.last_sync = time.perf_counter()
+                if self.verification_enabled:
+                    self._dispatch_verification(data["index"])
             elif kind == "verified":
-                self.completed.append(data)
+                synced = self.synced[data["index"]]
+                self.completed.append({**synced, **data, "started_at": synced["sync_started_at"]})
                 self.pending -= 1
+                self.verify_pending -= 1
                 self.last_completion = time.perf_counter()
+                self.last_verification = self.last_completion
         if self.error:
             raise RuntimeError(f"Background verification failed: {self.error}")
-        if self.pending and time.perf_counter() - self.last_completion > self.timeout_s:
-            raise TimeoutError("Background verification made no completed-file progress within its timeout")
-        if self.process.exitcode is not None and self.pending:
-            raise RuntimeError("Verifier exited with files still pending")
+        now = time.perf_counter()
+        for label, pending, last, process in (
+                ("sync", self.sync_pending, self.last_sync, self.process),
+                ("verification", self.verify_pending, self.last_verification, self.verify_process)):
+            if pending and now - last > self.timeout_s:
+                raise TimeoutError(f"Background {label} made no completed-file progress within its timeout")
+            if process.exitcode is not None and pending:
+                raise RuntimeError(f"Background {label} exited with files still pending")
+
+    def _dispatch_verification(self, index):
+        """Queue only successfully synced files, once, within the stage bound."""
+        if index in self.verification_submitted:
+            return
+        if not self.verify_pending:
+            self.last_verification = time.perf_counter()
+        self.verify_tasks.put_nowait(self.file_tasks[index])
+        self.verification_submitted.add(index)
+        self.verify_pending += 1
+        self.max_verify_pending = max(self.max_verify_pending, self.verify_pending)
+
+    def release_verification(self):
+        """Release deferred readback after physical capture, while syncing stays live."""
+        if not self.verification_enabled:
+            self.verification_enabled = True
+            self.verification_released_at = time.perf_counter()
+            for index in self.synced:
+                self._dispatch_verification(index)
 
     def submit(self, index, path, manifest):
         """Fail before building an unbounded disk verification backlog."""
@@ -138,26 +211,37 @@ class _Verifier:
             raise RuntimeError("Verification backlog reached the configured file limit; pipeline is not sustainable")
         if not self.pending:
             self.last_completion = time.perf_counter()
-        self.tasks.put_nowait((index, str(path), str(manifest)))
+        if not self.sync_pending:
+            self.last_sync = time.perf_counter()
+        task = index, str(path), str(manifest)
+        self.file_tasks[index] = task
+        self.tasks.put_nowait(task)
         self.pending += 1
+        self.sync_pending += 1
+        self.max_sync_pending = max(self.max_sync_pending, self.sync_pending)
         self.max_pending = max(self.max_pending, self.pending)
 
     def finish(self):
         """Wait for every submitted file, including the final verification tail."""
+        self.release_verification()
         while self.pending:
             self.collect(timeout=0.1)
 
     def close(self):
-        """Join or terminate only this diagnostic's verifier; retain all files."""
-        if self.process.pid is not None:
-            if self.process.is_alive() and not self.pending:
-                self.tasks.put_nowait(None)
-                self.process.join(timeout=5)
-            if self.process.is_alive():
-                self.process.terminate()
-                self.process.join(timeout=5)
-        self.tasks.cancel_join_thread()
-        self.tasks.close()
+        """Join or terminate only this diagnostic's two workers; retain all files."""
+        if self._closed:
+            return
+        self._closed = True
+        for process, tasks in ((self.process, self.tasks), (self.verify_process, self.verify_tasks)):
+            if process.pid is not None:
+                if process.is_alive() and not self.pending:
+                    tasks.put_nowait(None)
+                    process.join(timeout=5)
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=5)
+            tasks.cancel_join_thread()
+            tasks.close()
         self.results.close()
 
 
@@ -192,6 +276,7 @@ class _ContinuousCamera:
         self.read_previous = None
         self.delivered = self.discarded_on_abort = 0
         self.read_complete = False
+        self.backlog_at_reader_stop_frames = None
         self.buffer_samples = capture.Samples()
         self.count, self.first, self.previous, self.gaps = 0, None, None, 0
 
@@ -253,6 +338,7 @@ class _ContinuousCamera:
                 if self.error is None:
                     self.error = exc
             self.reader_finished = time.perf_counter()
+            self.backlog_at_reader_stop_frames = max(0, self.count - self.delivered)
             self.done.set()
 
     def check_error(self):
@@ -264,6 +350,7 @@ class _ContinuousCamera:
         """Describe actual retrieval and RAM backlog, including failed/aborted runs."""
         return {**self.plan, "frames_retrieved": self.count, "frames_delivered": self.delivered,
                 "read_complete": self.read_complete, "max_pending_batches": self.max_pending,
+                "backlog_at_capture_end_frames": self.backlog_at_reader_stop_frames,
                 "queue_full_events": self.full_events, "queue_put_s": self.put_s,
                 "queue_put_max_s": self.put_max_s, "copy_s": self.copy_s,
                 "discarded_buffered_frames_on_abort": self.discarded_on_abort,
@@ -356,10 +443,38 @@ class _ContinuousCamera:
                 break
 
 
+def _sustainability(source, frame_bytes, reference_fps, measured_host_fps=None):
+    """Describe measured backlog growth; conditional headroom is not a forecast."""
+    rows = source.buffer_samples.rows
+    result = {"long_run_validated": False,
+              "warning": "Finite run only; growing RAM backlog cannot establish sustainable TB acquisition.",
+              "peak_reader_backlog_GB": source.max_pending * source.cfg.batch_size * frame_bytes / 1e9,
+              "configured_reference_raw_MB_per_s": reference_fps * frame_bytes / 1e6,
+              "measured_host_fps": measured_host_fps,
+              "one_TB_capture_s_at_measured_host_fps": 1e12 / (measured_host_fps * frame_bytes)
+                  if measured_host_fps and measured_host_fps > 0 else None}
+    if source.reader_finished is None or not rows:
+        return result
+    end = source.reader_finished - source.reader_started
+    backlog = source.backlog_at_reader_stop_frames * frame_bytes
+    start = next((row for row in rows if row[0] >= max(0, end - 30)), rows[0])
+    duration = end - start[0]
+    growth = (backlog - (start[1] - start[2]) * frame_bytes) / duration if duration > 0 else 0
+    headroom = max(0, source.plan["capacity_bytes"] - backlog)
+    result.update(backlog_at_capture_end_GB=backlog / 1e9,
+                  last_window_s=duration, last_window_backlog_growth_MB_per_s=growth / 1e6,
+                  remaining_reader_headroom_GB=headroom / 1e9,
+                  headroom_s_if_last_window_growth_persists=headroom / growth if growth > 0 else None,
+                  status="GROWING_BACKLOG" if growth > 0 else "NO_GROWTH_IN_LAST_WINDOW",
+                  estimate_note="Conditional arithmetic only: caching, system load and verification scheduling may change rates.")
+    return result
+
+
 def run_complete_pipeline_trial(
     cfg, *, output_dirs=None, window=None, stage_output_gb=30.0,
     file_raw_gb=2.0, max_pending_files=None, verifier_timeout_s=120.0,
     frames=None, frames_per_file=None,
+    verification_mode="concurrent", pixel_read_mib=64,
 ):
     """4F: measure continuous capture through final durable, pixel-verified completion.
 
@@ -369,7 +484,10 @@ def run_complete_pipeline_trial(
     Tiny frame overrides support offline mock tests without allocating GB payloads.
     A dedicated reader drains the camera into bounded RAM across file rotations.
     Hashing runs downstream before writing; fsync and full pixel/metadata checks
-    run in a separate process. The configured queue budget is shared with the
+    have independent processes. Verification is concurrent or after_capture;
+    syncing always starts as files close. One policy per run preserves the
+    total disk budget. Pixel reads use a reusable pixel_read_mib buffer, while
+    every original SHA-256 reference is still checked. The queue budget is shared with the
     one-batch HDF5 queue and the RAM reserve is checked before/during reads.
     Pending verification is bounded by the finite stage's
     file count unless a stricter file limit is explicitly selected. This lets
@@ -384,6 +502,10 @@ def run_complete_pipeline_trial(
     def operation(report, folder_name):
         if len(destinations) != 1:
             raise ValueError("4F uses one destination per run so its total output stays within 40 GB")
+        if verification_mode not in ("concurrent", "after_capture"):
+            raise ValueError("verification_mode must be concurrent or after_capture")
+        if not isinstance(pixel_read_mib, int) or not 1 <= pixel_read_mib <= 256:
+            raise ValueError("pixel_read_mib must be an integer from 1 to 256")
         if (not isinstance(cfg.batch_size, int) or cfg.batch_size < 1 or
                 not math.isfinite(file_raw_gb) or file_raw_gb <= 0 or
                 (max_pending_files is not None and
@@ -393,6 +515,8 @@ def run_complete_pipeline_trial(
         if not math.isfinite(stage_output_gb) or not 0 < stage_output_gb <= 40:
             raise ValueError("4F total output budget must be positive and at most 40 GB")
         frame_bytes = window_info["bytes_per_frame"]
+        if pixel_read_mib * 2**20 < frame_bytes:
+            raise ValueError("Pixel verification read buffer must fit at least one full frame")
         if cfg.batch_size * frame_bytes > 256 * 2**20:
             raise ValueError("4F batch exceeds 256 MiB")
         if cfg.source == "physical" and not cfg.expected_serial:
@@ -417,6 +541,9 @@ def run_complete_pipeline_trial(
                 "planned_raw_GB": total * frame_bytes / 1e9,
                 "max_pending_files": pending_limit, "verifier_timeout_s": verifier_timeout_s,
                 "verification_processes": 1, "source_hashing": True, "compression": "none",
+                "sync_processes": 1, "verification_mode": verification_mode,
+                "pixel_read_MiB": pixel_read_mib,
+                "durability_boundary": "independent sync completion; excludes verification queue wait",
                 "camera_reader": "dedicated_thread", "hashing_location": "after_reader_RAM_queue",
                 "reader_queue_capacity_bytes": plan["capacity_bytes"],
                 "HDF5_queue_capacity_bytes": plan["writer_queue_bytes"]},
@@ -431,16 +558,23 @@ def run_complete_pipeline_trial(
             folder.mkdir(parents=True, exist_ok=False)
             drive = {"output_directory": str(folder), "files": [], "summary": {}}
             report["drives"][label] = drive
-            verifier = _Verifier(cfg, pending_limit, verifier_timeout_s)
+            verifier = _Verifier(cfg, pending_limit, verifier_timeout_s,
+                                 verification_mode=verification_mode, read_block_bytes=pixel_read_mib * 2**20)
             source, probe, started = None, None, None
             written, queued_for_verification, pending_at_capture_close = 0, 0, None
             samples = capture.Samples()
             def collect():
+                nonlocal pending_at_capture_close
                 verifier.collect()
                 if started is not None and source is not None:
                     source.check_error()
+                    if source.done.is_set() and source.read_complete:
+                        if pending_at_capture_close is None:
+                            pending_at_capture_close = verifier.pending
+                        verifier.release_verification()
                     samples.add(time.perf_counter()-started, source.count, written,
-                                sum(r["frames_verified"] for r in verifier.completed), verifier.pending)
+                                sum(r["frames_verified"] for r in verifier.completed), verifier.pending,
+                                sum(drive["files"][i]["frames"] for i in verifier.synced))
             try:
                 verifier.start()  # Warm spawn/imports before configuring or recording.
                 with lab.configured_camera(replace(cfg, output_dir=folder)) as camera:
@@ -476,6 +610,7 @@ def run_complete_pipeline_trial(
                                 row = {"index": index, "file": path.name, "frames": count,
                                     "closed_at_s": closed_at - started, "save_close_s": closed_at - file_started,
                                     "source_hash_s": reference.hash_s, "verification_status": "PENDING",
+                                    "source_hash_cpu_s": reference.hash_cpu_s,
                                     "first_frame_id": (source.first + written-count) % 2**32,
                                     "last_frame_id": source.previous,
                                     "writer": manager.last_step_timing}
@@ -488,50 +623,79 @@ def run_complete_pipeline_trial(
                                 verifier.submit(index, path, manifest)
                                 queued_for_verification += 1
                                 samples.add(time.perf_counter()-started, source.count, written,
-                                            sum(r["frames_verified"] for r in verifier.completed), verifier.pending)
-                            pending_at_capture_close = verifier.pending
+                                            sum(r["frames_verified"] for r in verifier.completed), verifier.pending,
+                                            sum(drive["files"][i]["frames"] for i in verifier.synced))
+                            if pending_at_capture_close is None:
+                                pending_at_capture_close = verifier.pending
                             verifier.finish()
                         finally:
                             source.close_iterator()
             finally:
                 verifier.close()
                 now = time.perf_counter()
+                for synced in verifier.synced.values():
+                    row = drive["files"][synced["index"]]
+                    row.update(sync_status="SYNCED", synced_at_s=synced["synced_at"]-started,
+                               fsync_s=synced["fsync_s"], os_fsync_s=synced["os_fsync_s"],
+                               sync_open_s=synced["sync_open_s"],
+                               sync_queue_wait_s=max(0, synced["sync_started_at"]-started-row["closed_at_s"]))
                 for checked in verifier.completed:
                     row = drive["files"][checked["index"]]
                     row.update({key: value for key, value in checked.items()
-                                if key not in ("index", "started_at", "synced_at", "verified_at")})
+                                if key not in ("index", "started_at", "sync_started_at", "synced_at",
+                                               "verification_started_at", "verified_at")})
                     row.update(verification_status="VERIFIED", synced_at_s=checked["synced_at"]-started,
                                verified_at_s=checked["verified_at"]-started,
-                               verifier_queue_wait_s=max(0, checked["started_at"]-started-row["closed_at_s"]))
+                               verification_started_at_s=checked["verification_started_at"]-started,
+                               verifier_queue_wait_s=max(0, checked["verification_started_at"]-checked["synced_at"]))
                 summary = drive["summary"]
                 summary.update(frames_requested=total, frames_captured=source.count if source else 0,
                     frames_written=written, frames_verified=sum(r["frames_verified"] for r in verifier.completed),
                     files_closed=len(drive["files"]), files_submitted=queued_for_verification,
+                    files_synced=len(verifier.synced),
+                    frames_synced=sum(drive["files"][i]["frames"] for i in verifier.synced),
+                    sync_max_pending_files=verifier.max_sync_pending,
+                    verification_max_pending_files=verifier.max_verify_pending,
+                    verification_released_at_s=(verifier.verification_released_at-started
+                        if started is not None and verifier.verification_released_at is not None else None),
                     files_verified=len(verifier.completed), verifier_max_pending_files=verifier.max_pending,
                     verifier_pending_files=verifier.pending,
                     files_pending_at_capture_close=pending_at_capture_close, whole_trial_s=now-whole_started,
                     whole_trial_fps=total/(now-whole_started) if written == total and len(verifier.completed) == files else None,
                     consecutive_frame_ids=(source.gaps == 0 and source.read_complete and
                                            source.delivered == total) if source else False)
-                drive.update(progress_columns=["seconds", "captured", "frames_in_closed_files", "verified", "pending_files"],
+                drive.update(progress_columns=["seconds", "captured", "frames_in_closed_files", "verified", "pending_files", "synced"],
                              progress=samples.rows,
-                             partial_files=[path.name for path in folder.glob("*.partial")])
+                             partial_files=[path.name for path in filesystem_path(folder).glob("*.partial")])
                 if probe is not None:
                     drive["capture_profile"] = probe.summary()
                 if source is not None:
                     drive["reader_buffer"] = source.buffer_summary(started)
+                    drive["sustainability"] = _sustainability(source, frame_bytes, cfg.target_fps,
+                        drive.get("capture_profile", {}).get("host_first_to_last_fps"))
+                if started is not None and verifier.synced:
+                    synced_at = max(r["synced_at"] for r in verifier.synced.values())
+                    all_synced = len(verifier.synced) == files and written == total
+                    summary.update(all_files_synced=all_synced,
+                        all_synced_s=synced_at-started if all_synced else None,
+                        durable_fps=total/(synced_at-started) if all_synced else None,
+                        durable_raw_MB_per_s=total*frame_bytes/1e6/(synced_at-started) if all_synced else None,
+                        fsync_total_s=sum(r["fsync_s"] for r in verifier.synced.values()))
                 if started is not None and verifier.completed:
                     verified_at = max(r["verified_at"] for r in verifier.completed)
-                    synced_at = max(r["synced_at"] for r in verifier.completed)
                     all_verified = len(verifier.completed) == files and written == total
                     summary.update(all_files_verified=all_verified,
-                        all_synced_s=synced_at-started if all_verified else None,
                         all_verified_s=verified_at-started if all_verified else None,
                         complete_verified_fps=total/(verified_at-started) if all_verified else None,
                         complete_verified_raw_MB_per_s=total*frame_bytes/1e6/(verified_at-started) if all_verified else None,
-                        durable_fps=total/(synced_at-started) if all_verified else None,
                         verification_tail_after_last_close_s=max(0, verified_at-(started+drive["files"][-1]["closed_at_s"])),
-                        source_hash_s=sum(r["source_hash_s"] for r in drive["files"]))
+                        source_hash_s=sum(r["source_hash_s"] for r in drive["files"]),
+                        source_hash_cpu_s=sum(r["source_hash_cpu_s"] for r in drive["files"]),
+                        verification_timing_totals={key: sum(r[key] for r in verifier.completed) for key in
+                            ("metadata_check_s", "metadata_read", "metadata_decode_validate",
+                             "metadata_read_cpu", "metadata_decode_validate_cpu", "pixel_read_s",
+                             "pixel_read_cpu_s", "pixel_hash_s", "pixel_hash_cpu_s", "pixel_read_calls",
+                             "verification_cpu_s")})
                 storage._measure_output(drive, folder, stage_output_gb)
             if summary["frames_verified"] != total or not summary["consecutive_frame_ids"]:
                 raise AssertionError("4F did not complete every requested frame and pixel check")
@@ -542,13 +706,20 @@ def run_complete_pipeline_trial(
             summary["host_first_to_last_fps"] = drive["capture_profile"]["host_first_to_last_fps"]
             summary["writer_queue_max_batches"] = max(r["writer"]["writer_queue_max_batches_used"] for r in drive["files"])
             summary["writer_queue_full_wait_events"] = sum(r["writer"]["producer_queue_full_wait_events"] for r in drive["files"])
-            summary["sync_and_verification_work_overlapping_capture_s"] = sum(
-                max(0, min(r["verified_at"], probe.iterator_finished) - max(r["started_at"], probe.iterator_started))
+            summary["sync_work_overlapping_capture_s"] = sum(
+                max(0, min(r["synced_at"], probe.iterator_finished) - max(r["sync_started_at"], probe.iterator_started))
+                for r in verifier.synced.values())
+            summary["verification_work_overlapping_capture_s"] = sum(
+                max(0, min(r["verified_at"], probe.iterator_finished) - max(r["verification_started_at"], probe.iterator_started))
                 for r in verifier.completed)
             drive["interpretation"] = {
                 "complete_rate_includes_final_verification": True,
+                "durability_measured_independently_of_verification_scheduling": True,
+                "verification_mode": verification_mode,
+                "RAM_backlog_status": drive["sustainability"].get("status", "UNAVAILABLE"),
                 "absolute_fastest_configuration_established": False,
                 "external_trigger_accounting": "NOT_TESTED",
-                "next_action": "Compare reader cadence and RAM backlog with hashing/writer timings and verifier backlog; growing reader RAM with a small HDF5 queue points to downstream producer work or rotation."}
+                "next_action": "Compare matched concurrent/after_capture runs, including independent durable time, total verified time, read/hash/metadata CPU costs and RAM growth. Growing backlog does not establish sustainable TB acquisition."}
 
-    return storage._report("4f", cfg, destinations, operation, tag=window_info["tag"])
+    return storage._report("4f", cfg, destinations, operation,
+                           tag=f"{window_info['tag']}_{verification_mode}")
