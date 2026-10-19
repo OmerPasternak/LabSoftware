@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import json
+import threading
 from dataclasses import replace
 from math import ceil
 from types import SimpleNamespace
@@ -20,7 +21,9 @@ def cfg(tmp_path, monkeypatch):
         WIDTH, HEIGHT = 64, 32
 
     monkeypatch.setattr(lab, "MockPcoCamera", SmallMock)
-    return lab.Settings(output_dir=tmp_path, roi=(0, 0, 64, 32), batch_size=2)
+    monkeypatch.setattr(trial, "available_physical_memory_bytes", lambda: 64 * 2**30)
+    return lab.Settings(output_dir=tmp_path, roi=(0, 0, 64, 32), batch_size=2,
+                        writer_memory_reserve_gib=0)
 
 
 def test_continuous_files_use_one_iterator_and_verify_all_pixels(cfg, monkeypatch, capsys):
@@ -51,6 +54,186 @@ def test_continuous_files_use_one_iterator_and_verify_all_pixels(cfg, monkeypatc
     assert saved["source"] == "mock" and saved["section"] == "4f"
     assert saved["drives"]["selected"]["summary"]["complete_verified_fps"] > 0
     assert saved["diagnostic_settings"]["stage_output_GB"] == 30.0
+    assert saved["diagnostic_settings"]["camera_reader"] == "dedicated_thread"
+    assert drive["reader_buffer"]["read_complete"] and drive["reader_buffer"]["reader_stopped"]
+    assert drive["reader_buffer"]["frames_retrieved"] == drive["reader_buffer"]["frames_delivered"] == 7
+
+
+@pytest.mark.parametrize("stall", ["hashing", "file_rotation", "HDF5_writer"])
+def test_reader_keeps_draining_while_downstream_is_stalled(cfg, monkeypatch, stall):
+    """Reproduce the old FIFO starvation: a downstream gate must not stop reads.
+
+    Events, not assumed scheduling or throughput thresholds, establish that all
+    later frames were read/stopped before releasing hashing, rotation or writing.
+    """
+    read_finished = threading.Event()
+    owners = []
+    original = lab.MockPcoCamera.iter_frames
+
+    def tracked(self, *args, **kwargs):
+        owners.append(threading.get_ident())
+        try:
+            yield from original(self, *args, **kwargs)
+        finally:
+            owners.append(threading.get_ident())
+            read_finished.set()
+
+    monkeypatch.setattr(lab.MockPcoCamera, "iter_frames", tracked)
+    gates = []
+    if stall == "hashing":
+        original_reference = storage._PixelReferenceCamera.iter_frames
+        def gate_hash(self, *args, **kwargs):
+            for images, metadata in original_reference(self, *args, **kwargs):
+                if not gates:
+                    gates.append(True)
+                    assert read_finished.wait(5), "Hashing stalled camera retrieval"
+                yield images, metadata
+        monkeypatch.setattr(storage._PixelReferenceCamera, "iter_frames", gate_hash)
+    elif stall == "file_rotation":
+        original_save = storage._WindowManager.acquire_and_save_step
+        def gate_rotation(self, *args, **kwargs):
+            result = original_save(self, *args, **kwargs)
+            if not gates:
+                gates.append(True)
+                assert read_finished.wait(5), "File rotation stalled camera retrieval"
+            return result
+        monkeypatch.setattr(storage._WindowManager, "acquire_and_save_step", gate_rotation)
+    else:
+        original_write = storage._WindowManager._write_batch
+        def gate_write(self, *args, **kwargs):
+            if not gates:
+                gates.append(True)
+                assert read_finished.wait(5), "HDF5 writing stalled camera retrieval"
+            return original_write(self, *args, **kwargs)
+        monkeypatch.setattr(storage._WindowManager, "_write_batch", gate_write)
+
+    report = trial.run_complete_pipeline_trial(cfg, frames=7, frames_per_file=4)
+    assert report["status"] == "EXECUTED", report.get("error")
+    assert gates and len(set(owners)) == 1 and owners[0] != threading.get_ident()
+    drive = report["drives"]["selected"]
+    assert drive["summary"]["frames_verified"] == 7
+    assert drive["reader_buffer"]["max_pending_batches"] > 0
+    assert drive["reader_buffer"]["queue_full_events"] == 0
+
+
+def test_reader_copies_reusable_driver_buffers_before_reading_ahead(cfg, monkeypatch):
+    """A mutable SDK/mock buffer must not overwrite frames waiting in RAM."""
+    import numpy as np
+    def reusable(self, num_frames, batch_size=2, stop_check=None):
+        images = np.empty((batch_size, 32, 64), dtype=np.uint16)
+        metadata = [{"frame_id": 0, "camera_timestamp": 0} for _ in range(batch_size)]
+        for start in range(0, num_frames, batch_size):
+            for offset in range(batch_size):
+                images[offset].fill(start + offset + 1)
+                metadata[offset]["frame_id"] = start + offset + 1
+            yield images, metadata
+        images.fill(999)
+    monkeypatch.setattr(lab.MockPcoCamera, "iter_frames", reusable)
+    report = trial.run_complete_pipeline_trial(cfg, frames=8, frames_per_file=4)
+    assert report["status"] == "EXECUTED", report.get("error")
+    drive = report["drives"]["selected"]
+    pixels = []
+    for row in drive["files"]:
+        with h5py.File(Path(drive["output_directory"]) / row["file"]) as h5:
+            pixels.extend(h5["images"][:, 0, 0].tolist())
+    assert pixels == list(range(1, 9))
+
+
+def test_reader_buffer_is_bounded_and_stops_on_full_without_a_consumer(cfg):
+    """An exhausted RAM buffer aborts and stops its owned iterator; no drop/retry."""
+    with lab.configured_camera(cfg) as camera:
+        plan = trial._buffer_plan(cfg, 10, 64 * 32 * 2)
+        source = trial._ContinuousCamera(camera, cfg, 10, lambda: None,
+                                       dict(plan, capacity_batches=1))
+        try:
+            source.reader.start()
+            assert source.done.wait(5), "Reader failed to stop at its finite queue limit"
+            with pytest.raises(RuntimeError, match="camera-reader RAM queue filled"):
+                source.check_error()
+            assert source.pending.qsize() == source.max_pending == 1
+            assert source.full_events == 1 and not source.read_complete
+        finally:
+            source.close_iterator()
+        assert not source.reader.is_alive() and source.discarded_on_abort == 2
+
+
+def test_reader_failure_is_reported_and_camera_iterator_is_closed(cfg, monkeypatch):
+    stopped = threading.Event()
+    original = lab.MockPcoCamera.iter_frames
+    def overflow(self, *args, **kwargs):
+        iterator = original(self, *args, **kwargs)
+        try:
+            yield next(iterator)
+            raise RuntimeError("PCO FIFO overflow TEST DOUBLE")
+        finally:
+            iterator.close()
+            stopped.set()
+    monkeypatch.setattr(lab.MockPcoCamera, "iter_frames", overflow)
+    report = trial.run_complete_pipeline_trial(cfg, frames=7, frames_per_file=4)
+    assert report["status"] == "FAILED" and "PCO FIFO overflow TEST DOUBLE" in report["error"]
+    assert stopped.is_set()
+    drive = report["drives"]["selected"]
+    assert drive["reader_buffer"]["reader_stopped"]
+    assert not drive["summary"].get("complete_verified_fps")
+    saved = json.loads(Path(report["report_file"]).read_text())
+    assert saved["drives"]["selected"]["reader_buffer"]["error"]
+
+
+def test_abort_stops_reader_on_its_owner_thread_before_camera_cleanup(cfg, monkeypatch):
+    """Closing a file slice must cancel SDK waiting without concurrent close()."""
+    waiting, stopped = threading.Event(), threading.Event()
+    owners, cancelled = [], []
+    original = lab.MockPcoCamera.iter_frames
+    def wait_for_trigger(self, *args, stop_check=None, **kwargs):
+        iterator = original(self, *args, stop_check=stop_check, **kwargs)
+        owners.append(threading.get_ident())
+        try:
+            yield next(iterator)
+            waiting.set()
+            # A bounded stand-in for the driver's cancellable image wait.
+            for _ in range(100):
+                if stop_check():
+                    cancelled.append(True)
+                    return
+                stopped.wait(0.05)
+            raise TimeoutError("Test camera wait was not cancelled")
+        finally:
+            iterator.close()
+            owners.append(threading.get_ident())
+            stopped.set()
+    monkeypatch.setattr(lab.MockPcoCamera, "iter_frames", wait_for_trigger)
+    with lab.configured_camera(cfg) as camera:
+        source = trial._ContinuousCamera(camera, cfg, 10, lambda: None,
+                                        trial._buffer_plan(cfg, 10, 64 * 32 * 2))
+        segment = source.iter_frames(4, batch_size=2)
+        try:
+            next(segment)
+            assert waiting.wait(5)
+        finally:
+            # The segment is suspended mid-file: this exercises GeneratorExit.
+            segment.close()
+            source.close_iterator()
+        assert stopped.is_set() and cancelled
+        assert len(set(owners)) == 1 and owners[0] != threading.get_ident()
+        assert source.done.is_set() and not source.reader.is_alive()
+        assert not source.read_complete
+
+
+def test_ram_reserve_is_checked_before_camera_start_and_during_reads(cfg, monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Must fail RAM preflight before camera/worker startup")
+    with monkeypatch.context() as patch:
+        patch.setattr(trial, "available_physical_memory_bytes", lambda: 0)
+        patch.setattr(trial._Verifier, "start", forbidden)
+        patch.setattr(lab, "configured_camera", forbidden)
+        report = trial.run_complete_pipeline_trial(cfg, frames=7, frames_per_file=4)
+        assert report["status"] == "FAILED" and "RAM reserve need" in report["error"]
+
+    monkeypatch.setattr(trial, "available_physical_memory_bytes", lambda:
+                        0 if threading.current_thread().name == "4f-camera-reader" else 64 * 2**30)
+    report = trial.run_complete_pipeline_trial(cfg, frames=7, frames_per_file=4)
+    assert report["status"] == "FAILED" and "reached the configured RAM reserve" in report["error"]
+    assert report["drives"]["selected"]["reader_buffer"]["reader_stopped"]
 
 
 def test_default_stage_fits_drive_with_50gb_free(cfg, tmp_path, monkeypatch):
