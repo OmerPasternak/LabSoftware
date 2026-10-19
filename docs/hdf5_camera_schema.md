@@ -106,6 +106,12 @@ and retains a partial step, then completes checks for already closed steps.
 Frames already buffered ahead of the stopped file are counted as unsaved in
 reader diagnostics; they are never relabelled as a completed measurement step.
 
+Successful completion also logs `Durable FPS: <value>`: total synced frames in
+the current scan segment divided by first-file acquisition preparation through
+final-file sync completion. File transitions count; worker startup and the
+verification tail do not. A continuation is labelled `resumed segment` and
+excludes earlier segments and pauses. Calculating the rate adds no image work.
+
 This preserves older MATLAB/Python readers: `/images`, `/frame_metadata/json`,
 root metadata and schema version 2.0 are unchanged. Sidecar names do not match
 the readers' `*.h5` scan-file pattern. Timing totals/maxima remain exact;

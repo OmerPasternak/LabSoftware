@@ -2,6 +2,7 @@
 
 import json
 import threading
+from queue import Queue
 
 import h5py
 import numpy as np
@@ -209,6 +210,34 @@ def test_dead_worker_cannot_leave_a_silent_infinite_wait():
         workers.close()
 
 
+def test_durable_scan_rate_uses_final_sync_not_verification_completion():
+    """Controlled timestamps cover file transitions without real sleep timing."""
+    workers = pipeline.ClosedFilePipeline()
+    workers.results.close()
+    workers.results = Queue()
+    tasks = [
+        {"path": "first", "timeout_s": 120, "synced_at": 110.0,
+         "acquisition": {"started_at": 100.0, "writer": {"written_frames": 40}}},
+        {"path": "second", "timeout_s": 120, "synced_at": 120.0,
+         "acquisition": {"started_at": 115.0, "writer": {"written_frames": 60}}},
+    ]
+    try:
+        for task in tasks:
+            workers.pending[task["path"]] = task
+            workers.results.put(("synced", task))
+        workers.collect()
+        for task in tasks:
+            workers.results.put(("verified", {**task, "verified_at": 999.0}))
+        workers.collect()
+        assert workers.completed == 2
+        assert workers.durable_summary() == {
+            "frames_synced": 100, "durable_elapsed_s": 20.0, "durable_fps": 5.0}
+    finally:
+        # The in-memory results control has no OS queue handle to close.
+        workers.results.close = lambda: None
+        workers.close()
+
+
 def test_reader_queue_stops_unpausable_camera_instead_of_dropping(camera, monkeypatch):
     monkeypatch.setattr(type(camera), "can_pause_acquisition", property(lambda self: False))
     source = pipeline.BufferedCamera(camera, 100, 4, 3 * 4 * 64 * 16 * 2, 0, lambda: None)
@@ -380,6 +409,9 @@ def test_gui_measurement_button_waits_for_verified_completion(qtbot, camera, tmp
     assert "[SCAN COMPLETE][SIMULATED]" in window.txt_activity_log.toPlainText()
     assert window.scan_manager.last_scan_pipeline["files_verified"] == 2
     assert window.scan_manager.last_scan_pipeline["continuous_recording"]
+    rate = window.scan_manager.last_scan_pipeline["durable_fps"]
+    assert rate > 0
+    assert f"[MEASUREMENT COMPLETE] Durable FPS: {rate:.1f}" in window.txt_activity_log.toPlainText()
     records = list(tmp_path.glob("*.verification.json"))
     assert len(records) == 2
     assert all(json.loads(p.read_text())["status"] == "VERIFIED" for p in records)

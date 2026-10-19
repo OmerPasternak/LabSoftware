@@ -762,7 +762,8 @@ class CameraScanManager:
                 self.last_scan_pipeline = {"files_verified": storage.completed,
                                            "max_pending_files": storage.peak_pending,
                                            "batch_size": 4, "compression": self.compression or "none",
-                                           "continuous_recording": continuous}
+                                           "continuous_recording": continuous, "start_step": start_step,
+                                           **storage.durable_summary()}
             finally:
                 if continuous_source is not None:
                     continuous_source.close()

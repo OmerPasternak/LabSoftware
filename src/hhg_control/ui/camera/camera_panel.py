@@ -2277,6 +2277,11 @@ class CameraMainWindow(QMainWindow):
             f"[SCAN COMPLETE][{self._scan_source_label()}] All {self._step_count_label(total_steps)} saved to disk. "
             f"Measurement duration: {elapsed_s:.2f} s."
         )
+        pipeline = self.scan_manager.last_scan_pipeline
+        durable_fps = pipeline.get("durable_fps")
+        if durable_fps is not None:
+            segment = " (resumed segment)" if pipeline.get("start_step", 0) else ""
+            self._append_log(f"[MEASUREMENT COMPLETE] Durable FPS: {durable_fps:.1f}{segment}")
         self._scan_active_elapsed_s = 0.0
 
     def _on_scan_aborted(

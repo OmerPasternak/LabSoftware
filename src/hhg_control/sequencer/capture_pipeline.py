@@ -393,6 +393,8 @@ class ClosedFilePipeline:
         self.limit, self.startup_timeout_s = limit, startup_timeout_s
         self.pending = {}
         self.completed = 0
+        self.first_capture_at = self.last_synced_at = None
+        self.frames_synced = 0
         self.peak_pending = 0
         self.closed = False
 
@@ -434,6 +436,13 @@ class ClosedFilePipeline:
                 _write_status(task["report"], {"status": "FAILED", "file": task["path"], "error": task["error"]})
                 raise RuntimeError("Acquisition file sync/pixel verification failed: " + task["error"])
             if kind == "synced":
+                acquisition = task.get("acquisition")
+                if acquisition is not None:
+                    began = acquisition["started_at"]
+                    self.first_capture_at = began if self.first_capture_at is None else min(self.first_capture_at, began)
+                    self.last_synced_at = (task["synced_at"] if self.last_synced_at is None
+                                           else max(self.last_synced_at, task["synced_at"]))
+                    self.frames_synced += acquisition["writer"]["written_frames"]
                 task["deadline"] = time.monotonic() + task["timeout_s"]
                 self.pending[task["path"]] = task
                 self.verify_tasks.put_nowait(task)
@@ -476,6 +485,20 @@ class ClosedFilePipeline:
         """Complete all submitted durability and integrity work before success."""
         while self.pending:
             self.collect(timeout=0.05)
+
+    def durable_summary(self):
+        """Rate for this scan segment: first capture preparation to final sync.
+
+        Includes file transitions and sync queue delays, excludes worker startup
+        and verification after final sync. Uses stored timestamps only.
+        """
+        if self.first_capture_at is None or self.last_synced_at is None:
+            return {}
+        elapsed = self.last_synced_at - self.first_capture_at
+        if elapsed <= 0:
+            return {}
+        return {"frames_synced": self.frames_synced, "durable_elapsed_s": elapsed,
+                "durable_fps": self.frames_synced / elapsed}
 
     def close(self):
         """Join owned workers; failure leaves files and explicit UNVERIFIED reports."""
