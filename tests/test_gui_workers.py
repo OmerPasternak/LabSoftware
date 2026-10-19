@@ -15,6 +15,49 @@ import hhg_control.ui.camera.camera_panel as camera_panel
 from hhg_control.ui.camera.workers import LiveStreamTask
 
 
+def test_typing_defers_preview_without_blocking_camera_delivery(qtbot, monkeypatch):
+    """Typing edits stay local; live frames are acknowledged and repaint resumes."""
+    window = CameraMainWindow()
+    qtbot.addWidget(window)
+    clock = [100.0]
+    monkeypatch.setattr(camera_panel, "perf_counter", lambda: clock[0])
+    rendered, acknowledged = [], []
+    monkeypatch.setattr(window, "_update_display", lambda *args, **kwargs: rendered.append(args))
+    window._is_live_active = True
+    window.active_live_task = SimpleNamespace(acknowledge_frame=lambda: acknowledged.append(True))
+    try:
+        for spin, text in ((window.spn_exposure, "12"), (window.spn_roi_y0, "1016")):
+            old_value = spin.value()
+            spin.lineEdit().selectAll()
+            qtbot.keyClicks(spin.lineEdit(), text)
+            assert spin.value() == old_value  # No partial settings command while typing.
+            window._on_live_frame_ready(np.zeros((2, 2), dtype=np.uint16), {})
+        assert not rendered
+        assert len(acknowledged) == 2
+        clock[0] += 0.31
+        window._on_live_frame_ready(np.zeros((2, 2), dtype=np.uint16), {})
+        assert len(rendered) == 1
+        assert len(acknowledged) == 3
+        qtbot.keyPress(window.spn_roi_y0.lineEdit(), Qt.Key.Key_Return)
+        assert window.spn_roi_y0.value() == 1016
+        assert window.spn_roi_y1.value() == 1144
+    finally:
+        window._is_live_active = False
+        window.active_live_task = None
+        window.close()
+
+
+def test_live_image_uses_fast_pixel_preserving_display(qtbot):
+    """Preview avoids smooth resampling while retaining original pixels for analysis."""
+    window = CameraMainWindow()
+    qtbot.addWidget(window)
+    frame = np.arange(64, dtype=np.uint16).reshape(8, 8)
+    window._update_display(frame)
+    assert window._image_artist.get_interpolation() == "nearest"
+    assert window._last_frame is frame
+    window.close()
+
+
 def test_measurement_log_reports_complete_scan_duration(qtbot, tmp_path):
     """A mock-camera GUI scan reports elapsed capture and save time."""
     camera = MockPcoCamera()

@@ -223,6 +223,8 @@ class CameraMainWindow(QMainWindow):
         self._clim_high: int = 65535     # current upper color limit (ADU)
         self._current_displayed_roi: Optional[tuple[int, int, int, int]] = None
         self._is_dragging_roi: bool = False
+        self._preview_edit_until = 0.0
+        self._numeric_editors = set()
 
         self._build_ui()
         # Block competing edits without greying out the entire settings area.
@@ -235,6 +237,13 @@ class CameraMainWindow(QMainWindow):
         for control in inputs:
             self._command_inputs.update(control.findChildren(QWidget))
         for control in self._command_inputs:
+            control.installEventFilter(self)
+        # Numeric editors and their line edits receive separate Qt input events.
+        # Keep preview painting out of a burst of typing without stopping SDK reads.
+        self._numeric_editors = set(self.findChildren(QAbstractSpinBox))
+        for control in tuple(self._numeric_editors):
+            self._numeric_editors.update(control.findChildren(QLineEdit))
+        for control in self._numeric_editors:
             control.installEventFilter(self)
 
     def eventFilter(self, watched, event) -> bool:
@@ -249,6 +258,10 @@ class CameraMainWindow(QMainWindow):
                                      QEvent.Type.TouchEnd)):
             event.accept()
             return True
+        if (watched in self._numeric_editors
+                and event.type() in (QEvent.Type.KeyPress, QEvent.Type.InputMethod,
+                                     QEvent.Type.MouseButtonPress, QEvent.Type.Wheel)):
+            self._preview_edit_until = perf_counter() + 0.3
         return super().eventFilter(watched, event)
 
     def _build_ui(self) -> None:
@@ -1281,11 +1294,13 @@ class CameraMainWindow(QMainWindow):
         self.active_preview_task.start()
 
     def _on_live_frame_ready(self, frame: np.ndarray, meta: dict) -> None:
-        """Handle incoming live stream frame from persistent LiveStreamTask."""
+        """Paint live frames between edits, acknowledging skipped frames immediately."""
         if not self._is_live_active or self._is_dragging_roi:
             return
 
         try:
+            if perf_counter() < self._preview_edit_until:
+                return
             self._update_display(frame, meta=meta)
         finally:
             if self.active_live_task is not None:
@@ -1482,6 +1497,10 @@ class CameraMainWindow(QMainWindow):
             self._image_artist = self.axis.imshow(
                 display_frame,
                 cmap="viridis",
+                interpolation="nearest",
+                # Resample scalar pixels before color conversion: avoid allocating
+                # and resampling a larger RGBA image on the GUI event thread.
+                interpolation_stage="data",
                 origin="upper",
                 aspect="auto",
                 extent=[x0, x1, y1, y0]
