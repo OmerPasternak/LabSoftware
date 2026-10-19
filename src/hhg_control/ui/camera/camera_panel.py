@@ -51,7 +51,7 @@ from .workers import (
 IMAGE_AXIS_RECT = (0.12, 0.08, 0.83, 0.86)
 COLOR_AXIS_RECT = (0.95, 0.08, 0.05, 0.86)
 # Agent-editable acquisition backlog limit; intentionally absent from the GUI.
-APPLICATION_WRITER_QUEUE_GIB = 32.0
+APPLICATION_WRITER_QUEUE_GIB = 16.0
 APPLICATION_WRITER_MEMORY_RESERVE_GIB = 16.0
 
 

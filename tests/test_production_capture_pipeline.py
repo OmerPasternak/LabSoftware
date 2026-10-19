@@ -400,7 +400,7 @@ def test_gui_measurement_button_waits_for_verified_completion(qtbot, camera, tmp
     for widget, value in zip((window.spn_roi_x0, window.spn_roi_y0,
                               window.spn_roi_x1, window.spn_roi_y1), camera.get_roi()):
         widget.setValue(value)
-    assert window.scan_manager.writer_queue_byte_budget == 32 * 2**30
+    assert window.scan_manager.writer_queue_byte_budget == 16 * 2**30
     assert not hasattr(window, "spn_writer_buffer_gib")
     window.spn_frames.setValue(9)
     window.spn_num_steps.setValue(2)
