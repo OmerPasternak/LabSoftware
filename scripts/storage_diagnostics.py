@@ -89,11 +89,15 @@ def _destinations(cfg: lab.Settings, output_dirs: dict[str, Path] | None) -> dic
 
 def _analysis_report(report: dict) -> dict:
     """Build one small, chart-ready table with shared context instead of repeated dumps."""
-    if report["section"] in ("4e", "4f"):
+    if report["section"] in ("4e", "4f", "4g"):
         packet = {key: report[key] for key in (
             "section", "utc", "status", "source", "error", "report_file", "execution_log",
             "diagnostic_settings", "drives", "limitations", "windows", "window_tag") if key in report}
-        packet.update(report_schema_version="3.0" if report["section"] == "4f" else "2.0",
+        if report["section"] == "4g":
+            packet["drives"] = {label: dict(drive, files=drive.get("files", [])[-8:],
+                files_in_report="Last eight only; complete per-file verification journal is retained")
+                for label, drive in report["drives"].items()}
+        packet.update(report_schema_version="3.0" if report["section"] in ("4f", "4g") else "2.0",
                       settings=lab.compact_settings(report["settings"]),
                       physical_acceptance=False)
         return _rounded_values(packet)
@@ -202,7 +206,7 @@ def _report(section: str, cfg: lab.Settings, destinations: dict[str, Path], oper
     report_path = destination / f"section_{section}_{stamp}{suffix}.json"
     log_path = report_path.with_suffix(".log")
     report = {"section": section, "utc": datetime.now(timezone.utc).isoformat(),
-              "status": "FAILED", "source": cfg.source if section in ("4c", "4e", "4f") else "synthetic",
+              "status": "FAILED", "source": cfg.source if section in ("4c", "4e", "4f", "4g") else "synthetic",
               "settings": asdict(cfg), "report_file": str(report_path),
               "execution_log": str(log_path), "drives": {}, "physical_acceptance": False}
     interrupted = None

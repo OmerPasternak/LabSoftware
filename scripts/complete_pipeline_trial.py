@@ -261,7 +261,7 @@ class _ContinuousCamera:
     # camera and fails independently if its bounded upstream queue fills.
     can_pause_acquisition = True
 
-    def __init__(self, camera, cfg, frames, poll, plan):
+    def __init__(self, camera, cfg, frames, poll, plan, *, duration_s=None, file_frames=None, label="4F"):
         self.camera, self.cfg, self.frames, self.poll = camera, cfg, frames, poll
         self.sensor = camera.get_sensor_info()
         self.exposure_s = camera.get_exposure_time()
@@ -272,10 +272,15 @@ class _ContinuousCamera:
         self.error = None
         self.max_pending = self.full_events = 0
         self.put_s = self.put_max_s = self.copy_s = 0.0
+        self.min_available_memory_bytes = plan["available_bytes_before_start"]
         self.reader_started = self.reader_finished = None
         self.read_previous = None
         self.delivered = self.discarded_on_abort = 0
         self.read_complete = False
+        self.duration_s, self.file_frames = duration_s, file_frames
+        self.label = label
+        self.capture_started_at = None
+        self.duration_reached = False
         self.backlog_at_reader_stop_frames = None
         self.buffer_samples = capture.Samples()
         self.count, self.first, self.previous, self.gaps = 0, None, None, 0
@@ -290,6 +295,8 @@ class _ContinuousCamera:
             for images, metadata in iterator:
                 if self.stop.is_set():
                     break
+                if self.capture_started_at is None:
+                    self.capture_started_at = time.perf_counter()
                 expected = (min(self.cfg.batch_size, self.frames - self.count),
                             self.cfg.roi[3] - self.cfg.roi[1], self.cfg.roi[2] - self.cfg.roi[0])
                 if images.shape != expected or images.dtype != np.uint16 or len(metadata) != len(images):
@@ -301,9 +308,10 @@ class _ContinuousCamera:
                         raise RuntimeError("Frame-ID gap across continuous acquisition/file boundary")
                     self.read_previous = frame_id
                 self.count += len(images)
-                if available_physical_memory_bytes() < (self.plan["memory_reserve_bytes"] +
-                                                        self.plan["working_allowance_bytes"]):
-                    raise MemoryError("4F camera reader reached the configured RAM reserve; partial data retained")
+                available_now = available_physical_memory_bytes()
+                self.min_available_memory_bytes = min(self.min_available_memory_bytes, available_now)
+                if available_now < (self.plan["memory_reserve_bytes"] + self.plan["working_allowance_bytes"]):
+                    raise MemoryError(f"{self.label} camera reader reached the configured RAM reserve; partial data retained")
                 began = time.perf_counter()
                 owned = images if self.camera.yields_owned_batches else images.copy()
                 batch = owned, [dict(item) for item in metadata]
@@ -315,17 +323,30 @@ class _ContinuousCamera:
                     if self.stop.is_set():
                         break
                     self.full_events += 1
-                    raise RuntimeError("4F camera-reader RAM queue filled; hashing/writing/rotation cannot "
+                    raise RuntimeError(f"{self.label} camera-reader RAM queue filled; hashing/writing/rotation cannot "
                                        "keep up within the configured buffer; acquisition stopped") from exc
                 elapsed = time.perf_counter() - began
                 self.put_s += elapsed
                 self.put_max_s = max(self.put_max_s, elapsed)
                 self.max_pending = max(self.max_pending, self.pending.qsize())
                 self.buffer_samples.add(time.perf_counter() - self.reader_started,
-                                        self.count, self.delivered, self.pending.qsize())
+                                        self.count, self.delivered, self.pending.qsize(), available_now)
+                if (self.duration_s is not None and self.count % self.file_frames == 0 and
+                        time.perf_counter() - self.capture_started_at >= self.duration_s):
+                    # Finish on a whole-file boundary without restarting/pacing
+                    # the camera or publishing an intentionally partial file.
+                    self.frames = self.count
+                    self.duration_reached = True
+                    break
             if not self.stop.is_set():
+                if self.duration_s is not None and not self.duration_reached:
+                    raise RuntimeError("Rolling capture reached its frame ceiling before the duration")
                 if self.count != self.frames:
                     raise RuntimeError("Continuous camera returned fewer frames than requested")
+                if self.duration_reached and getattr(self.camera, "_cam", None) is not None:
+                    status = self.camera._cam.rec.get_status()
+                    if status.get("bFIFOOverflow") or status.get("dwLastError"):
+                        raise RuntimeError(f"PCO FIFO overflow or recorder error at rolling capture end: {status}")
                 self.read_complete = True
         except BaseException as exc:
             self.error = exc
@@ -350,7 +371,12 @@ class _ContinuousCamera:
         """Describe actual retrieval and RAM backlog, including failed/aborted runs."""
         return {**self.plan, "frames_retrieved": self.count, "frames_delivered": self.delivered,
                 "read_complete": self.read_complete, "max_pending_batches": self.max_pending,
+                "minimum_available_physical_memory_bytes": self.min_available_memory_bytes,
                 "backlog_at_capture_end_frames": self.backlog_at_reader_stop_frames,
+                "requested_capture_duration_s": self.duration_s,
+                "capture_duration_reached": self.duration_reached,
+                "capture_from_first_batch_s": (self.reader_finished - self.capture_started_at
+                    if self.reader_finished is not None and self.capture_started_at is not None else None),
                 "queue_full_events": self.full_events, "queue_put_s": self.put_s,
                 "queue_put_max_s": self.put_max_s, "copy_s": self.copy_s,
                 "discarded_buffered_frames_on_abort": self.discarded_on_abort,
@@ -360,7 +386,7 @@ class _ContinuousCamera:
                     if self.reader_started is not None and capture_started is not None else None),
                 "reader_elapsed_s": (self.reader_finished - self.reader_started
                     if self.reader_finished is not None else None),
-                "progress_columns": ["seconds", "retrieved", "delivered", "pending_batches"],
+                "progress_columns": ["seconds", "retrieved", "delivered", "pending_batches", "available_physical_memory_bytes"],
                 "progress": self.buffer_samples.rows}
 
     def __getattr__(self, name):
@@ -470,13 +496,14 @@ def _sustainability(source, frame_bytes, reference_fps, measured_host_fps=None):
     return result
 
 
-def run_complete_pipeline_trial(
+def _run_pipeline_trial(
     cfg, *, output_dirs=None, window=None, stage_output_gb=30.0,
     file_raw_gb=2.0, max_pending_files=None, verifier_timeout_s=120.0,
     frames=None, frames_per_file=None,
     verification_mode="concurrent", pixel_read_mib=64,
+    rolling_duration_s=None,
 ):
-    """4F: measure continuous capture through final durable, pixel-verified completion.
+    """Shared 4F/4G camera-to-durable, pixel-verified pipeline.
 
     GB are decimal. One destination and a maximum 40-GB stage are shared across
     all files, including metadata reserves; the default 30-GB stage requires
@@ -493,11 +520,15 @@ def run_complete_pipeline_trial(
     file count unless a stricter file limit is explicitly selected. This lets
     a slow verifier finish the test and exposes its cost in complete FPS.
     This is a measured candidate, not a proven global optimum.
+    The 4G wrapper uses rolling_duration_s and recycles verified file slots;
+    its budget limits live files instead of cumulative bytes written.
     """
     cfg, window_info = storage.window_settings(cfg, window)
     if cfg.source == "physical" and not cfg.expected_serial:
         cfg = replace(cfg, expected_serial=lab.DEFAULT_CAMERA_SERIAL)
     destinations = storage._destinations(cfg, output_dirs)
+    rolling = rolling_duration_s is not None
+    section = "4g" if rolling else "4f"
 
     def operation(report, folder_name):
         if len(destinations) != 1:
@@ -512,7 +543,7 @@ def run_complete_pipeline_trial(
                  (not isinstance(max_pending_files, int) or not 1 <= max_pending_files <= 10000)) or
                 not math.isfinite(verifier_timeout_s) or verifier_timeout_s <= 0):
             raise ValueError("Use positive batch/file sizes, None or 1–10000 pending files and a positive timeout")
-        if not math.isfinite(stage_output_gb) or not 0 < stage_output_gb <= 40:
+        if not math.isfinite(stage_output_gb) or not 0 < stage_output_gb <= (30 if rolling else 40):
             raise ValueError("4F total output budget must be positive and at most 40 GB")
         frame_bytes = window_info["bytes_per_frame"]
         if pixel_read_mib * 2**20 < frame_bytes:
@@ -525,20 +556,32 @@ def run_complete_pipeline_trial(
                  if frames_per_file is None else frames_per_file)
         if not isinstance(chunk, int) or chunk < 1 or chunk % cfg.batch_size:
             raise ValueError("frames_per_file must be a positive multiple of batch_size")
-        # Conservative upper bound on files, then fit pixels AND per-file reserves.
-        files_upper = math.ceil(stage_output_gb * 1e9 / (chunk * frame_bytes))
-        total = (int((stage_output_gb * 1e9 - files_upper * 100_000_000) // (frame_bytes + 4096))
-                 if frames is None else frames)
+        # Fixed 4F budgets all retained files; rolling 4G reserves only live
+        # slots. A large iterator ceiling allocates no image stack (FIFO/RAM
+        # allocations remain bounded); duration ends it at a file boundary.
+        slot_bytes = chunk * (frame_bytes + 4096) + 100_000_000
+        slots = int(stage_output_gb * 1e9 // slot_bytes) if rolling else None
+        if rolling and slots < 2:
+            raise ValueError("Rolling budget must fit at least two full pixel/metadata file slots")
+        if rolling:
+            if frames is not None and frames % chunk:
+                raise ValueError("4G mock frames must be a positive multiple of frames_per_file")
+            total = ((2**31 - 1) // chunk * chunk) if frames is None else frames
+        else:
+            files_upper = math.ceil(stage_output_gb * 1e9 / (chunk * frame_bytes))
+            total = (int((stage_output_gb * 1e9 - files_upper * 100_000_000) // (frame_bytes + 4096))
+                     if frames is None else frames)
         if not isinstance(total, int) or total < 1:
             raise ValueError("Frame count/stage must fit at least one frame")
         files = math.ceil(total / chunk)
-        pending_limit = files if max_pending_files is None else min(max_pending_files, files)
-        storage._preflight(cfg, destinations, total, files, stage_output_gb, approved_stage=True)
+        pending_limit = slots if rolling else (files if max_pending_files is None else min(max_pending_files, files))
+        storage._preflight(cfg, destinations, chunk * slots if rolling else total,
+                           slots if rolling else files, stage_output_gb, approved_stage=True)
         plan = _buffer_plan(cfg, total, frame_bytes)
         report.update(windows={window_info["name"]: window_info}, window_tag=window_info["tag"],
-            diagnostic_settings={"batch_size": cfg.batch_size, "frames": total,
-                "frames_per_file": chunk, "files": files, "stage_output_GB": stage_output_gb,
-                "planned_raw_GB": total * frame_bytes / 1e9,
+            diagnostic_settings={"batch_size": cfg.batch_size, "frames": None if rolling and frames is None else total,
+                "frames_per_file": chunk, "files": None if rolling and frames is None else files, "stage_output_GB": stage_output_gb,
+                "planned_raw_GB": None if rolling and frames is None else total * frame_bytes / 1e9,
                 "max_pending_files": pending_limit, "verifier_timeout_s": verifier_timeout_s,
                 "verification_processes": 1, "source_hashing": True, "compression": "none",
                 "sync_processes": 1, "verification_mode": verification_mode,
@@ -552,20 +595,41 @@ def run_complete_pipeline_trial(
                 "OS fsync is requested; cached readback does not prove power-loss persistence.",
                 "Reader RAM absorbs downstream pauses; sustained slow hashing/writing can still exhaust it.",
                 "Verifier backlog bounds the disk work remaining, not an acquisition pacing mechanism."])
+        if rolling:
+            report["diagnostic_settings"].update(rolling=True, requested_capture_s=rolling_duration_s,
+                live_disk_budget_GB=stage_output_gb, live_file_slots=slots,
+                recycle_only_after="sync + complete metadata and pixel verification",
+                mock_frame_override=frames is not None, preview_copy_behavior="unchanged production baseline")
+            report["limitations"].append("Rolling deletion/TRIM, repeated free space and recycling waits differ from retaining a TB measurement.")
         for label, destination in destinations.items():
             whole_started = time.perf_counter()
             folder = destination / folder_name
             folder.mkdir(parents=True, exist_ok=False)
             drive = {"output_directory": str(folder), "files": [], "summary": {}}
+            store = None
+            recycled_cursor = 0
+            if rolling:
+                from scripts.rolling_pipeline_trial import _RollingFiles
+                store = _RollingFiles(folder, int(stage_output_gb * 1e9), slot_bytes)
             report["drives"][label] = drive
             verifier = _Verifier(cfg, pending_limit, verifier_timeout_s,
                                  verification_mode=verification_mode, read_block_bytes=pixel_read_mib * 2**20)
             source, probe, started = None, None, None
             written, queued_for_verification, pending_at_capture_close = 0, 0, None
             samples = capture.Samples()
+            def recycle_verified():
+                nonlocal recycled_cursor
+                if store is not None:
+                    while recycled_cursor < len(verifier.completed):
+                        checked = verifier.completed[recycled_cursor]
+                        row = drive["files"][checked["index"]]
+                        store.recycle(checked, row)
+                        row["recycled_at_s"] = row.pop("recycled_at") - started
+                        recycled_cursor += 1
             def collect():
                 nonlocal pending_at_capture_close
                 verifier.collect()
+                recycle_verified()
                 if started is not None and source is not None:
                     source.check_error()
                     if source.done.is_set() and source.read_complete:
@@ -587,11 +651,23 @@ def run_complete_pipeline_trial(
                         if "binning" in configuration and tuple(configuration["binning"][:2]) != (1, 1):
                             raise ValueError("Camera reports binning; 4F requires unbinned acquisition")
                     with capture.profiled_camera(camera, hash_pixels=False) as (profiled, probe):
-                        source = _ContinuousCamera(profiled, cfg, total, collect, plan)
+                        source = _ContinuousCamera(profiled, cfg, total, collect, plan,
+                            duration_s=rolling_duration_s if rolling and frames is None else None,
+                            file_frames=chunk if rolling else None, label=section.upper())
                         started = time.perf_counter()
                         try:
                             for index in range(files):
                                 collect()
+                                if rolling and source.done.is_set() and source.read_complete and written == source.count:
+                                    break
+                                if store is not None:
+                                    wait_started = time.perf_counter()
+                                    try:
+                                        while not store.reserve(index):
+                                            collect()  # Reader remains live; never pace camera for disk slots.
+                                            time.sleep(0.01)
+                                    finally:
+                                        store.slot_wait_s += time.perf_counter() - wait_started
                                 count = min(chunk, total - written)
                                 reference = storage._PixelReferenceCamera(source)
                                 manager = storage._WindowManager(reference, folder, window_tag=window_info["tag"],
@@ -599,7 +675,7 @@ def run_complete_pipeline_trial(
                                     writer_memory_reserve_bytes=int(cfg.writer_memory_reserve_gib * 2**30))
                                 file_started = time.perf_counter()
                                 try:
-                                    path, _ = manager.acquire_and_save_step("BENCHMARK_ONLY_4f", index,
+                                    path, _ = manager.acquire_and_save_step(f"BENCHMARK_ONLY_{section}", index,
                                         "Continuous recording file index (metadata only)", float(index), count,
                                         batch_size=cfg.batch_size, abort_check=collect)
                                 except BaseException:
@@ -620,6 +696,8 @@ def run_complete_pipeline_trial(
                                     "shape_frame_y_x": [count, cfg.roi[3]-cfg.roi[1], cfg.roi[2]-cfg.roi[0]],
                                     "first_frame_id": row["first_frame_id"], "last_frame_id": row["last_frame_id"],
                                     "blocks": reference.blocks}, separators=(",", ":")), encoding="utf-8")
+                                if store is not None:
+                                    store.register(index, path, manifest)
                                 verifier.submit(index, path, manifest)
                                 queued_for_verification += 1
                                 samples.add(time.perf_counter()-started, source.count, written,
@@ -628,11 +706,15 @@ def run_complete_pipeline_trial(
                             if pending_at_capture_close is None:
                                 pending_at_capture_close = verifier.pending
                             verifier.finish()
+                            recycle_verified()
                         finally:
                             source.close_iterator()
             finally:
                 verifier.close()
                 now = time.perf_counter()
+                if rolling:
+                    total = source.count if source is not None else written
+                    files = len(drive["files"])
                 for synced in verifier.synced.values():
                     row = drive["files"][synced["index"]]
                     row.update(sync_status="SYNCED", synced_at_s=synced["synced_at"]-started,
@@ -649,6 +731,7 @@ def run_complete_pipeline_trial(
                                verification_started_at_s=checked["verification_started_at"]-started,
                                verifier_queue_wait_s=max(0, checked["verification_started_at"]-checked["synced_at"]))
                 summary = drive["summary"]
+                reader_complete = source is not None and source.read_complete and source.delivered == total
                 summary.update(frames_requested=total, frames_captured=source.count if source else 0,
                     frames_written=written, frames_verified=sum(r["frames_verified"] for r in verifier.completed),
                     files_closed=len(drive["files"]), files_submitted=queued_for_verification,
@@ -661,7 +744,7 @@ def run_complete_pipeline_trial(
                     files_verified=len(verifier.completed), verifier_max_pending_files=verifier.max_pending,
                     verifier_pending_files=verifier.pending,
                     files_pending_at_capture_close=pending_at_capture_close, whole_trial_s=now-whole_started,
-                    whole_trial_fps=total/(now-whole_started) if written == total and len(verifier.completed) == files else None,
+                    whole_trial_fps=total/(now-whole_started) if reader_complete and written == total and len(verifier.completed) == files else None,
                     consecutive_frame_ids=(source.gaps == 0 and source.read_complete and
                                            source.delivered == total) if source else False)
                 drive.update(progress_columns=["seconds", "captured", "frames_in_closed_files", "verified", "pending_files", "synced"],
@@ -673,9 +756,12 @@ def run_complete_pipeline_trial(
                     drive["reader_buffer"] = source.buffer_summary(started)
                     drive["sustainability"] = _sustainability(source, frame_bytes, cfg.target_fps,
                         drive.get("capture_profile", {}).get("host_first_to_last_fps"))
+                if store is not None:
+                    drive["rolling_storage"] = store.summary()
+                    drive["summary"]["cumulative_raw_GB_written"] = written * frame_bytes / 1e9
                 if started is not None and verifier.synced:
                     synced_at = max(r["synced_at"] for r in verifier.synced.values())
-                    all_synced = len(verifier.synced) == files and written == total
+                    all_synced = reader_complete and len(verifier.synced) == files and written == total
                     summary.update(all_files_synced=all_synced,
                         all_synced_s=synced_at-started if all_synced else None,
                         durable_fps=total/(synced_at-started) if all_synced else None,
@@ -683,7 +769,7 @@ def run_complete_pipeline_trial(
                         fsync_total_s=sum(r["fsync_s"] for r in verifier.synced.values()))
                 if started is not None and verifier.completed:
                     verified_at = max(r["verified_at"] for r in verifier.completed)
-                    all_verified = len(verifier.completed) == files and written == total
+                    all_verified = reader_complete and len(verifier.completed) == files and written == total
                     summary.update(all_files_verified=all_verified,
                         all_verified_s=verified_at-started if all_verified else None,
                         complete_verified_fps=total/(verified_at-started) if all_verified else None,
@@ -720,6 +806,22 @@ def run_complete_pipeline_trial(
                 "absolute_fastest_configuration_established": False,
                 "external_trigger_accounting": "NOT_TESTED",
                 "next_action": "Compare matched concurrent/after_capture runs, including independent durable time, total verified time, read/hash/metadata CPU costs and RAM growth. Growing backlog does not establish sustainable TB acquisition."}
+            if rolling:
+                drive["interpretation"].update(
+                    next_action="Review RAM growth, remaining headroom, recycling/slot waits and independent sync/verification rates; completion alone is not long-run stability.",
+                    benchmark_files_recycled=True, long_run_validated=False)
 
-    return storage._report("4f", cfg, destinations, operation,
+    return storage._report(section, cfg, destinations, operation,
                            tag=f"{window_info['tag']}_{verification_mode}")
+
+
+def run_complete_pipeline_trial(cfg, *, output_dirs=None, window=None, stage_output_gb=30.0,
+                                file_raw_gb=2.0, max_pending_files=None, verifier_timeout_s=120.0,
+                                frames=None, frames_per_file=None, verification_mode="concurrent",
+                                pixel_read_mib=64):
+    """Run the finite, retained-output 4F candidate with its existing defaults."""
+    return _run_pipeline_trial(cfg, output_dirs=output_dirs, window=window,
+        stage_output_gb=stage_output_gb, file_raw_gb=file_raw_gb,
+        max_pending_files=max_pending_files, verifier_timeout_s=verifier_timeout_s,
+        frames=frames, frames_per_file=frames_per_file,
+        verification_mode=verification_mode, pixel_read_mib=pixel_read_mib)
