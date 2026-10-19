@@ -2,12 +2,16 @@
 
 from pathlib import Path
 import json
+from dataclasses import replace
+from math import ceil
+from types import SimpleNamespace
 
 import h5py
 import pytest
 
 from scripts import complete_pipeline_trial as trial
 from scripts import lab_computer_acceptance as lab
+from scripts import storage_diagnostics as storage
 
 
 @pytest.fixture
@@ -46,6 +50,30 @@ def test_continuous_files_use_one_iterator_and_verify_all_pixels(cfg, monkeypatc
     saved = json.loads(Path(report["report_file"]).read_text())
     assert saved["source"] == "mock" and saved["section"] == "4f"
     assert saved["drives"]["selected"]["summary"]["complete_verified_fps"] > 0
+    assert saved["diagnostic_settings"]["stage_output_GB"] == 30.0
+
+
+def test_default_stage_fits_drive_with_50gb_free(cfg, tmp_path, monkeypatch):
+    """The default 30-GB plan fits 50 GB free under the 1.5x reserve rule."""
+    cfg = replace(cfg, roi=(0, 0, 2560, 128))
+    stage_gb, file_gb = 30.0, 2.0
+    frame_bytes = 2560 * 128 * 2
+    chunk = max(cfg.batch_size, int(file_gb * 1e9 / frame_bytes) // cfg.batch_size * cfg.batch_size)
+    files_upper = ceil(stage_gb * 1e9 / (chunk * frame_bytes))
+    total = int((stage_gb * 1e9 - files_upper * 100_000_000) // (frame_bytes + 4096))
+    files = ceil(total / chunk)
+    raw = total * frame_bytes
+    reserve = total * 4096 + files * 100_000_000
+    required_free = 1.5 * (raw + reserve) + 100_000_000
+    assert required_free < 50e9
+    monkeypatch.setattr(lab, "prepare", lambda *args, **kwargs: None)
+    monkeypatch.setattr(storage.shutil, "disk_usage", lambda _: SimpleNamespace(free=50e9))
+
+    storage._preflight(cfg, {"C": tmp_path}, total, files, stage_gb, approved_stage=True)
+
+    monkeypatch.setattr(storage.shutil, "disk_usage", lambda _: SimpleNamespace(free=required_free - 1))
+    with pytest.raises(OSError, match="Not enough free space"):
+        storage._preflight(cfg, {"C": tmp_path}, total, files, stage_gb, approved_stage=True)
 
 
 def test_cross_file_frame_gap_stops_and_preserves_report(cfg, monkeypatch):

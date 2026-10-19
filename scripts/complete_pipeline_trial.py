@@ -219,16 +219,16 @@ class _ContinuousCamera:
 
 
 def run_complete_pipeline_trial(
-    cfg, *, output_dirs=None, window=None, stage_output_gb=40.0,
+    cfg, *, output_dirs=None, window=None, stage_output_gb=30.0,
     file_raw_gb=2.0, max_pending_files=None, verifier_timeout_s=120.0,
     frames=None, frames_per_file=None,
 ):
     """4F: measure continuous capture through final durable, pixel-verified completion.
 
     GB are decimal. One destination and a maximum 40-GB stage are shared across
-    all files, including metadata reserves; no automatic stage/ROI sweep. The
-    40-GB default requires about 60.1 GB free with the existing margin. Tiny
-    frame overrides support offline mock tests without allocating GB payloads.
+    all files, including metadata reserves; the default 30-GB stage requires
+    about 45.1 GB free with the existing margin. No automatic stage/ROI sweep.
+    Tiny frame overrides support offline mock tests without allocating GB payloads.
     Source hashing is inline; fsync and full pixel/metadata checking run in a
     separate process. Pending verification is bounded by the finite stage's
     file count unless a stricter file limit is explicitly selected. This lets
