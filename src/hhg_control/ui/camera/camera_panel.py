@@ -17,7 +17,7 @@ from datetime import datetime
 import numpy as np
 
 from PyQt6 import sip
-from PyQt6.QtCore import Qt, QPointF, QEvent
+from PyQt6.QtCore import Qt, QPointF, QEvent, QProcess
 from PyQt6.QtGui import QColor, QPainter
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -226,6 +226,7 @@ class CameraMainWindow(QMainWindow):
         self._is_dragging_roi: bool = False
         self._preview_edit_until = 0.0
         self._numeric_editors = set()
+        self._analysis_processes: list[QProcess] = []
 
         self._build_ui()
         # Block competing edits without greying out the entire settings area.
@@ -687,10 +688,24 @@ class CameraMainWindow(QMainWindow):
         self.btn_open_folder = QPushButton("Open")
         self.btn_open_folder.clicked.connect(self._open_storage_folder)
 
+        self.btn_spectral_covariance = QPushButton("X Covariance")
+        self.btn_spectral_covariance.setToolTip(
+            "Compute covariance between x-axis spectral pixels across frames in one completed HDF5 step."
+        )
+        self.btn_spectral_covariance.clicked.connect(self._launch_spectral_covariance)
+        self.btn_mark_harmonics = QPushButton("Mark Harmonics")
+        self.btn_mark_harmonics.setToolTip(
+            "Open a completed step's mean-frame snapshot; drag x ranges and save them for later analysis."
+        )
+        self.btn_mark_harmonics.clicked.connect(self._launch_harmonic_marker)
+
         folder_buttons = QHBoxLayout()
-        folder_buttons.addStretch(1)
+        folder_buttons.setSpacing(4)
         folder_buttons.addWidget(self.btn_browse)
         folder_buttons.addWidget(self.btn_open_folder)
+        folder_buttons.addStretch(1)
+        folder_buttons.addWidget(self.btn_spectral_covariance)
+        folder_buttons.addWidget(self.btn_mark_harmonics)
         store_grid.addLayout(folder_buttons, 1, 0, 1, 2)
 
         store_grid.addWidget(QLabel("Header:"), 2, 0)
@@ -717,6 +732,78 @@ class CameraMainWindow(QMainWindow):
         root_layout.addWidget(self.control_panel)
 
         self._update_progress_display()
+
+    def _launch_spectral_covariance(self) -> None:
+        """Launch offline covariance analysis for one completed scan step."""
+        filepath, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choose one completed scan-step HDF5 file",
+            self.txt_storage_dir.text().strip(),
+            "HDF5 camera scans (*.h5 *.hdf5)",
+        )
+        if filepath:
+            self._launch_analysis_script("analyze_spectral_covariance.py", Path(filepath))
+
+    def _launch_harmonic_marker(self) -> None:
+        """Open a completed HDF5 step's mean snapshot in the harmonic marker."""
+        filepath, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choose a completed scan-step HDF5 file",
+            self.txt_storage_dir.text().strip(),
+            "HDF5 camera scans (*.h5 *.hdf5)",
+        )
+        if filepath:
+            self._launch_analysis_script("mark_harmonic_limits.py", Path(filepath))
+
+    def _launch_analysis_script(self, script_name: str, input_path: Path) -> None:
+        """Run a GUI analysis script asynchronously, leaving the acquisition UI responsive."""
+        script_path = Path(__file__).resolve().parents[4] / "scripts" / script_name
+        if not script_path.is_file():
+            QMessageBox.warning(self, "Analysis Tool Missing", f"Could not find analysis script:\n{script_path}")
+            return
+
+        process = QProcess(self)
+        process.setProgram(sys.executable)
+        process.setArguments([str(script_path), str(input_path)])
+        process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        process.readyReadStandardOutput.connect(
+            lambda proc=process: self._read_analysis_output(proc)
+        )
+        process.finished.connect(
+            lambda exit_code, _status, proc=process, name=script_name:
+                self._on_analysis_finished(proc, name, exit_code)
+        )
+        process.errorOccurred.connect(
+            lambda error, proc=process, name=script_name:
+                self._on_analysis_process_error(proc, name, error)
+        )
+        self._analysis_processes.append(process)
+        self._append_log(f"[ANALYSIS] Starting {script_name} for {input_path}.")
+        process.start()
+
+    def _read_analysis_output(self, process: QProcess) -> None:
+        """Forward child-process output into the existing activity log."""
+        output = bytes(process.readAllStandardOutput()).decode("utf-8", errors="replace").strip()
+        if output:
+            for line in output.splitlines():
+                self._append_log(f"[ANALYSIS] {line}")
+
+    def _on_analysis_finished(self, process: QProcess, script_name: str, exit_code: int) -> None:
+        """Record the completion status and release the process wrapper."""
+        self._read_analysis_output(process)
+        status = "completed" if exit_code == 0 else f"failed (exit code {exit_code})"
+        self._append_log(f"[ANALYSIS] {script_name} {status}.")
+        if process in self._analysis_processes:
+            self._analysis_processes.remove(process)
+        process.deleteLater()
+
+    def _on_analysis_process_error(self, process: QProcess, script_name: str, error) -> None:
+        """Report failed script startup or an unexpected child-process error."""
+        self._append_log(f"[ANALYSIS ERROR] {script_name}: {process.errorString()} ({error}).")
+        if error == QProcess.ProcessError.FailedToStart:
+            if process in self._analysis_processes:
+                self._analysis_processes.remove(process)
+            process.deleteLater()
 
     # =========================================================================
     # GO and STOP Controls (Top-Left Docked)
