@@ -42,3 +42,79 @@ The older `/entry/...` layout described in some general lab examples is not
 this camera schema. Do not silently mix the two layouts in one analysis path;
 introduce a new schema version and reader migration if the storage hierarchy
 changes.
+
+## GUI measurement pipeline (4F/4G conclusions)
+
+The measurement button calls `CameraScanManager.execute_scan`. This path uses
+uncompressed HDF5 and batches of four frames by default, preserving the existing
+one-file-per-step schema, naming, resume behavior and final-frame preview.
+An explicitly configured gzip manager remains supported for slower workflows.
+The underlying `acquire_and_save_step` method remains the camera-to-writer
+primitive used by diagnostics; callers using it directly must arrange their
+own durability/verification as the diagnostic suites already do.
+
+For a GUI measurement, a dedicated reader owns one SDK iterator across its
+files, including the final FIFO/error check and stop. It retrieves continuously into a bounded RAM queue;
+hashing, HDF5 writes and closed-file work do not run in that reader. The GUI's
+existing RAM budget is shared between this queue and a one-batch HDF5 queue.
+Buffers allocate only as data arrives, and expanded buffers enforce the
+existing physical-memory reserve. FIFO/recorder errors, frame-ID gaps, exhausted
+RAM and physical queue overflow fail explicitly and retain partial files.
+
+One frame is copied for the existing step-completion preview. Pixels are never
+display-scaled or binned for storage. Exposure, ROI, shutter and trigger remain
+the selected, verified settings. The current GUI labels metadata setpoints;
+it explicitly selects `execute_scan(continuous=True)`, so camera reads can
+advance ahead of the next file's metadata callback. Default API calls keep
+`continuous=False`: a new reader starts after each step-start callback, preserving
+the required setpoint boundary for future actuator scans. Never use continuous
+metadata mode to assign frames across a physical instrument state change.
+The camera remains connected; no constructor, reconnect or shutter reset is
+introduced by this pipeline.
+
+The consumer computes SHA-256 source hashes after the reader queue and before
+HDF5 writing, using canonical little-endian uint16 pixels. Source references
+are streamed to `<stem>.pixels.sha256.jsonl`, not accumulated as a whole-run
+Python list. The header records shape and acquisition settings; each subsequent
+line records a contiguous source range, digest and first/last SDK frame ID.
+Interrupted manifests retain `.partial`. Keep the completed manifest beside
+its HDF5 file if later source comparisons are needed.
+
+Two independent spawned processes handle closed files: one fsyncs HDF5 and its
+manifest; the other verifies every saved pixel, consecutive IDs, exact counts,
+completion and acquisition settings. They receive paths/plain metadata only,
+never a camera, Qt object or open HDF5 handle. Verification reads at most
+64 MiB of pixels at a time (or one frame if larger). At most five files await
+checks. At a file boundary it can wait for a verification slot. The continuous
+GUI reader keeps draining into RAM during that wait and stops with an error if
+the bounded queue fills; a gated actuator scan instead starts exposures only
+after a slot is available. No measurement file is recycled or deleted.
+
+Each file gets `<stem>.verification.json` with PENDING, VERIFIED, FAILED or
+UNVERIFIED status. Verified reports retain source/reader/queue/write timings,
+minimum available RAM, FIFO capacity and independent durable/verified rates.
+Those rates begin at that file's preparation and include downstream queue waits.
+With continuous read-ahead they describe per-file processing throughput, not
+independent sensor cadence. Reader counters are for the whole recording;
+writer counters are file-local. Overlapping stage times must not be summed. `complete=True` in
+HDF5 still means capture/write completion;
+the sidecar separately establishes durability request and source-pixel fidelity.
+Existing step-completed GUI signals mean the file has closed. The existing
+scan-finished signal is emitted only after every completed step passes sync
+and verification. Errors use the existing GUI error path. STOP stops retrieval
+and retains a partial step, then completes checks for already closed steps.
+Frames already buffered ahead of the stopped file are counted as unsaved in
+reader diagnostics; they are never relabelled as a completed measurement step.
+
+This preserves older MATLAB/Python readers: `/images`, `/frame_metadata/json`,
+root metadata and schema version 2.0 are unchanged. Sidecar names do not match
+the readers' `*.h5` scan-file pattern. Timing totals/maxima remain exact;
+percentiles use at most the latest 4,096 batches to bound diagnostic RAM.
+
+Fsync and cached readback do not prove persistence through power loss. Pixel
+equality compares saved images with host source pixels; it cannot establish
+sensor accuracy or one image per external trigger. The 4F/4G physical evidence
+supports the scheduling strategy, but this integrated GUI path still needs a
+short physical run followed by sustained acceptance on the actual data drive.
+For very large individual steps, sync/readback starts after that step's file
+closes; automatic file splitting would require an explicit reader/schema plan.

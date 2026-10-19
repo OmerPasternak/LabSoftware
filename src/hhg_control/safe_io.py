@@ -61,7 +61,7 @@ def unique_output(path: Path) -> Path:
 
 def check_disk_space(directory: Path, required_bytes: int = 0) -> None:
     """Reserve 100 MB beyond planned bytes; raise before filling the drive."""
-    if shutil.disk_usage(directory).free < required_bytes + 100_000_000:
+    if shutil.disk_usage(filesystem_path(directory)).free < required_bytes + 100_000_000:
         raise OSError("Insufficient free disk space; acquisition stopped and partial data retained.")
 
 

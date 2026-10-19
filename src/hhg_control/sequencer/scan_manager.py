@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+from collections import deque
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
@@ -36,6 +37,24 @@ class AcquisitionAborted(RuntimeError):
 
 class AcquisitionBackpressure(RuntimeError):
     """Raised when storage cannot accept frames within the bounded queue."""
+
+
+class _Timings:
+    """Retain exact totals/maxima and bounded recent samples for long recordings."""
+
+    def __init__(self):
+        self.total = self.maximum = 0.0
+        self.samples = deque(maxlen=4096)
+
+    def append(self, seconds):
+        """Record elapsed seconds without an ever-growing per-batch history."""
+        self.total += seconds
+        self.maximum = max(self.maximum, seconds)
+        self.samples.append(seconds)
+
+    def percentile(self, value):
+        """Describe at most the most recent 4,096 batches, in seconds."""
+        return float(np.percentile(self.samples, value)) if self.samples else 0.0
 
 
 def _frame_chunk_shape(height: int, width: int) -> tuple[int, int, int]:
@@ -106,11 +125,12 @@ class CameraScanManager:
         self.writer_queue_byte_budget = int(writer_queue_byte_budget)
         self.writer_memory_reserve_bytes = int(writer_memory_reserve_bytes)
         self.storage_dir = Path(storage_dir)
-        self.storage_dir.mkdir(parents=True, exist_ok=True)
+        filesystem_path(self.storage_dir).mkdir(parents=True, exist_ok=True)
         self._camera_lock = threading.RLock()
         self._state_lock = threading.Lock()
         self._state = "IDLE"
         self.last_step_timing: dict[str, Any] = {}
+        self.last_scan_pipeline: dict[str, Any] = {}
 
     @property
     def state(self) -> str:
@@ -133,7 +153,7 @@ class CameraScanManager:
     def set_storage_dir(self, new_dir: Path | str) -> None:
         """Set and create the scan output directory."""
         self.storage_dir = Path(new_dir)
-        self.storage_dir.mkdir(parents=True, exist_ok=True)
+        filesystem_path(self.storage_dir).mkdir(parents=True, exist_ok=True)
 
     def set_writer_queue_memory(
         self, byte_budget: int, *, reserve_bytes: int | None = None,
@@ -240,7 +260,7 @@ class CameraScanManager:
         clean_exp = sanitize_filename_component(experiment_name)
         clean_run = sanitize_filename_component(run_id, fallback="run")
         base = self.storage_dir / f"{clean_exp}_{clean_run}_step_{step_index:04d}.h5"
-        if not base.exists() and not base.with_suffix(".h5.partial").exists():
+        if not filesystem_path(base).exists() and not filesystem_path(base.with_suffix(".h5.partial")).exists():
             return base
         suffix = datetime.now(timezone.utc).strftime("%H%M%S_%f")
         return self.storage_dir / f"{clean_exp}_{clean_run}_{suffix}_step_{step_index:04d}.h5"
@@ -284,6 +304,7 @@ class CameraScanManager:
         batch_size: int,
         queue_batches: int | None,
         abort_check: Optional[Callable[[], bool]],
+        source=None,
     ) -> tuple[Path, np.ndarray]:
         step_started = time.perf_counter()
         self.last_step_timing = {}
@@ -367,6 +388,8 @@ class CameraScanManager:
         mode = self.camera.get_readout_mode()
         attrs["readout_mode"] = mode.name
         attrs["readout_mode_value"] = int(mode.value)
+        if source is not None:
+            source.prepare_manifest(filepath, attrs)
         pending: Queue[tuple[np.ndarray, list[dict[str, Any]]]] = Queue(maxsize=queue_batches)
         producer_done = threading.Event()
         writer_ready = threading.Event()
@@ -382,7 +405,7 @@ class CameraScanManager:
         producer_copy_s = 0.0
         producer_latest_frame_copy_s = 0.0
         producer_copied_image_bytes = 0
-        queue_put_durations: list[float] = []
+        queue_put_durations = _Timings()
         queue_full_wait_events = 0
         writer_timing: dict[str, Any] = {}
 
@@ -390,8 +413,8 @@ class CameraScanManager:
             """Own the HDF5 handle and drain copied frame batches in order."""
             nonlocal written
             writer_started = time.perf_counter()
-            batch_write_durations: list[float] = []
-            periodic_flush_durations: list[float] = []
+            batch_write_durations = _Timings()
+            periodic_flush_durations = _Timings()
             queue_get_wait_s = 0.0
             close_started = 0.0
             try:
@@ -468,23 +491,14 @@ class CameraScanManager:
                     final_flush_started = time.perf_counter()
                     h5f.flush()
                     writer_timing["hdf5_final_flush_s"] = time.perf_counter() - final_flush_started
-                    writer_timing["hdf5_batch_write_s"] = float(sum(batch_write_durations))
-                    writer_timing["hdf5_batch_write_max_s"] = (
-                        float(max(batch_write_durations)) if batch_write_durations else 0.0
-                    )
-                    writer_timing["hdf5_batch_write_p50_s"] = (
-                        float(np.percentile(batch_write_durations, 50)) if batch_write_durations else 0.0
-                    )
-                    writer_timing["hdf5_batch_write_p95_s"] = (
-                        float(np.percentile(batch_write_durations, 95)) if batch_write_durations else 0.0
-                    )
-                    writer_timing["hdf5_batch_write_p99_s"] = (
-                        float(np.percentile(batch_write_durations, 99)) if batch_write_durations else 0.0
-                    )
-                    writer_timing["hdf5_periodic_flush_s"] = float(sum(periodic_flush_durations))
-                    writer_timing["hdf5_periodic_flush_max_s"] = (
-                        float(max(periodic_flush_durations)) if periodic_flush_durations else 0.0
-                    )
+                    writer_timing["hdf5_batch_write_s"] = batch_write_durations.total
+                    writer_timing["hdf5_batch_write_max_s"] = batch_write_durations.maximum
+                    writer_timing["hdf5_batch_write_p50_s"] = batch_write_durations.percentile(50)
+                    writer_timing["hdf5_batch_write_p95_s"] = batch_write_durations.percentile(95)
+                    writer_timing["hdf5_batch_write_p99_s"] = batch_write_durations.percentile(99)
+                    writer_timing["hdf5_percentile_sample_limit"] = 4096
+                    writer_timing["hdf5_periodic_flush_s"] = periodic_flush_durations.total
+                    writer_timing["hdf5_periodic_flush_max_s"] = periodic_flush_durations.maximum
                     writer_timing["writer_queue_get_wait_s"] = queue_get_wait_s
                     for key, value in writer_timing.items():
                         if key.startswith("hdf5_"):
@@ -574,9 +588,12 @@ class CameraScanManager:
                     if diagnostics is not None:
                         diagnostics.queue_sample(captured, written, pending.qsize(),
                                                  queue_capacity_frames, queue_capacity_bytes)
-                    latest_copy_started = time.perf_counter()
-                    latest_frame = images[-1].copy()
-                    producer_latest_frame_copy_s += time.perf_counter() - latest_copy_started
+                    # The GUI emits one preview only after the step completes.
+                    # Copy its final image once, outside the ordinary batch path.
+                    if captured == num_frames:
+                        latest_copy_started = time.perf_counter()
+                        latest_frame = images[-1].copy()
+                        producer_latest_frame_copy_s += time.perf_counter() - latest_copy_started
                 if abort_check is not None and abort_check() and captured != num_frames:
                     raise AcquisitionAborted(
                         f"Acquisition stopped after {captured} of {num_frames} frames."
@@ -608,8 +625,8 @@ class CameraScanManager:
             "producer_copy_s": producer_copy_s,
             "producer_latest_frame_copy_s": producer_latest_frame_copy_s,
             "producer_copied_image_bytes": producer_copied_image_bytes,
-            "producer_queue_put_s": float(sum(queue_put_durations)),
-            "producer_queue_put_max_s": float(max(queue_put_durations)) if queue_put_durations else 0.0,
+            "producer_queue_put_s": queue_put_durations.total,
+            "producer_queue_put_max_s": queue_put_durations.maximum,
             "producer_queue_full_wait_events": queue_full_wait_events,
             "writer_drain_after_producer_s": writer_drain_s,
             "writer_queue_max_batches_used": max_pending_batches,
@@ -659,29 +676,94 @@ class CameraScanManager:
         on_step_start: Optional[Callable[[int, float], None]] = None,
         abort_check: Optional[Callable[[], bool]] = None,
         run_id: str | None = None,
+        continuous: bool = False,
     ) -> Iterator[tuple[int, float, Path, np.ndarray]]:
-        """Execute a metadata setpoint scan without commanding an actuator."""
+        """Run steps with dedicated retrieval and overlapped durable pixel checks.
+
+        Each metadata setpoint keeps one schema-2.0 file. A yielded step has
+        closed successfully; sync/verification may still be pending in its
+        sidecar. Normal exhaustion means every yielded file passed both.
+        STOP ends camera retrieval, retains partial data, then finishes checks
+        for already closed steps. By default, no acquisition is performed for
+        a later setpoint before its on_step_start callback. ``continuous=True``
+        is only for metadata-only scans (the current GUI): one SDK recording
+        spans all file slices and may read ahead of their metadata callbacks.
+        Never enable it around physical actuator changes.
+        """
         if not self.camera.is_connected:
             raise RuntimeError("Cannot execute scan: Camera is disconnected.")
         if num_steps < 1:
             raise ValueError(f"Number of steps must be at least 1, got {num_steps}.")
+        if num_frames < 1:
+            raise ValueError("num_frames must be >= 1.")
         if start_step < 0 or start_step >= num_steps:
             raise ValueError(f"start_step must be between 0 and {num_steps - 1}, got {start_step}.")
         run_id = run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
 
-        with self._operation("SCANNING"):
-            for step in range(start_step, num_steps):
-                if abort_check is not None and abort_check():
-                    break
-                value = start_value + step * step_size
-                if on_step_start is not None:
-                    on_step_start(step, value)
+        from .capture_pipeline import BufferedCamera, ClosedFilePipeline
+        self.last_scan_pipeline = {}
+
+        # Keep the original camera identity and the established setpoint/file
+        # boundary. Only SDK retrieval, hashing and closed-file work move apart.
+        with self._operation("SCANNING"), self._camera_lock:
+            storage = ClosedFilePipeline()
+            continuous_source = None
+            try:
                 try:
-                    filepath, latest_frame = self._acquire_and_save_step(
-                        experiment_name, step, param_name, value, num_frames,
-                        run_id=run_id, batch_size=4, queue_batches=None,
-                        abort_check=abort_check,
-                    )
+                    storage.start(abort_check)
                 except AcquisitionAborted:
-                    break
-                yield step, value, filepath, latest_frame
+                    return
+                for step in range(start_step, num_steps):
+                    if abort_check is not None and abort_check():
+                        break
+                    try:
+                        storage.wait_for_slot(abort_check)
+                    except AcquisitionAborted:
+                        break
+                    value = start_value + step * step_size
+                    if on_step_start is not None:
+                        on_step_start(step, value)
+                    if continuous and continuous_source is None:
+                        continuous_source = BufferedCamera(self.camera, (num_steps-start_step)*num_frames, 4,
+                            self.writer_queue_byte_budget, self.writer_memory_reserve_bytes, storage.collect,
+                            continuous=True)
+                    source = continuous_source if continuous else BufferedCamera(self.camera, num_frames, 4,
+                        self.writer_queue_byte_budget, self.writer_memory_reserve_bytes, storage.collect)
+                    # Reuse exactly the existing writer and schema. Its one-batch
+                    # queue shares the configured byte limit with the SDK reader.
+                    writer = CameraScanManager(source, self.storage_dir, compression=self.compression,
+                                               writer_queue_byte_budget=self.writer_queue_byte_budget,
+                                               writer_memory_reserve_bytes=self.writer_memory_reserve_bytes)
+                    try:
+                        started_at = time.perf_counter()
+                        filepath, latest_frame = writer._acquire_and_save_step(
+                            experiment_name, step, param_name, value, num_frames,
+                            run_id=run_id, batch_size=4, queue_batches=1,
+                            abort_check=abort_check, source=source,
+                        )
+                        manifest = source.finish_manifest()
+                        storage.submit(filepath, manifest, acquisition={"started_at": started_at,
+                            "capture_and_save_s": time.perf_counter() - started_at,
+                            "writer": writer.last_step_timing, "reader": source.summary()})
+                    except AcquisitionAborted:
+                        break
+                    finally:
+                        if not continuous:
+                            source.close()
+                        self.last_step_timing = {**writer.last_step_timing, "reader": source.summary()}
+                    yield step, value, filepath, latest_frame
+                # The GUI's existing finished signal occurs only after all
+                # completed steps are durable and pixel/frame-ID checks pass.
+                if continuous_source is not None:
+                    # STOP between files must end SDK retrieval immediately,
+                    # before waiting for outstanding closed-file checks.
+                    continuous_source.close()
+                storage.finish()
+                self.last_scan_pipeline = {"files_verified": storage.completed,
+                                           "max_pending_files": storage.peak_pending,
+                                           "batch_size": 4, "compression": self.compression or "none",
+                                           "continuous_recording": continuous}
+            finally:
+                if continuous_source is not None:
+                    continuous_source.close()
+                storage.close()

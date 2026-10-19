@@ -307,6 +307,9 @@ class ScanSequenceTask(QThread):
                 on_step_start=on_start,
                 abort_check=lambda: self._abort_requested,
                 run_id=self.run_id,
+                # GUI setpoints are metadata only; keep one recorder session
+                # across files. Actuator scans must use the gated default.
+                continuous=True,
             ):
                 self.step_completed.emit(
                     step, self.num_steps, value, self.param_name, latest_frame, filepath
