@@ -11,7 +11,7 @@ import sys
 
 import h5py
 import matplotlib
-matplotlib.use("Agg")
+matplotlib.use("Agg" if "--no-show" in sys.argv else "QtAgg")
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -19,6 +19,7 @@ from hhg_control.analysis import compute_harmonic_g2_from_scan
 from hhg_control.safe_io import unique_output
 from hhg_control.analysis.spectral import default_harmonic_map_path
 from hhg_control.analysis.harmonic_statistics import compute_si_harmonic_g2
+from hhg_control.analysis.plot_windows import show_analysis_figures
 
 
 def _si_outputs(args) -> int:
@@ -33,10 +34,14 @@ def _si_outputs(args) -> int:
     report = unique_output(base.with_suffix(".json"))
     table = unique_output(base.with_suffix(".csv"))
     plot = unique_output(base.with_suffix(".png"))
-    fig, axes = plt.subplots(len(result["harmonics"]), 1, figsize=(8, 3*len(result["harmonics"])),
+    calibration_plot = unique_output(base.with_name(base.name + "_calibration").with_suffix(".png"))
+    count = len(result["harmonics"])
+    columns = min(3, count)
+    nrows = (count + columns - 1) // columns
+    fig, axes = plt.subplots(nrows, columns, figsize=(4*columns, 3*nrows),
                              squeeze=False, constrained_layout=True)
     rows = []
-    for axis, harmonic in zip(axes[:, 0], result["harmonics"]):
+    for axis, harmonic in zip(axes.ravel(), result["harmonics"]):
         fit = harmonic["fit"]
         x = np.array(fit.get("inverse_mean_adu", []))
         y = np.array(fit.get("detected_g2", []))
@@ -44,23 +49,41 @@ def _si_outputs(args) -> int:
         if "unconstrained_intercept" in fit:
             xx = np.linspace(0, x.max(), 100)
             axis.plot(xx, fit["unconstrained_intercept"] + fit["mcp_coefficient_adu"]*xx)
-        axis.set(xlabel="Inverse net mean intensity (1/ADU)", ylabel="Background-corrected pixel g²",
-                 title=f"{harmonic['label']}: {fit['status']}; inferred light g² = {fit['g2_light']}")
+        estimate = f"{fit['g2_light']:.3g}" if fit['g2_light'] is not None else "unavailable"
+        axis.set(xlabel="1 / mean (1/ADU)", ylabel="Pixel g²",
+                 title=f"{harmonic['label']}: g² = {estimate}")
         rows.append(dict(harmonic=harmonic["label"], order=harmonic["order"],
                          reference=harmonic["reference"], status=fit["status"], g2_light=fit["g2_light"],
                          pixels_used=fit["pixels_used"], integrated_net_mean_adu=harmonic["integrated_net_mean_adu"],
                          integrated_background_corrected_g2=harmonic["background_corrected_integrated_g2"]))
-    fig.savefig(plot, dpi=160)
-    plt.close(fig)
+    for axis in axes.ravel()[count:]:
+        axis.set_visible(False)
+    fig.canvas.manager.set_window_title("MCP calibration")
+    fig.savefig(calibration_plot, dpi=160)
+    summary, axis = plt.subplots(figsize=(9, 5), constrained_layout=True)
+    summary.canvas.manager.set_window_title("Harmonic g²")
+    available = [h for h in result["harmonics"] if h["fit"]["g2_light"] is not None]
+    axis.plot([h["order"] for h in available], [h["fit"]["g2_light"] for h in available], "o")
+    axis.set(xlabel="Harmonic order", ylabel="Estimated light g²", title="Harmonic g²")
+    axis.grid(True, alpha=.2)
+    missing = [h["label"] for h in result["harmonics"] if h["fit"]["g2_light"] is None]
+    if missing:
+        axis.text(.02, .98, "Unavailable: " + ", ".join(missing), transform=axis.transAxes, va="top")
+    summary.savefig(plot, dpi=160)
     with report.open("x", encoding="utf-8") as handle:
         json.dump(result, handle, indent=2, allow_nan=False)
     with table.open("x", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
-    print(f"Saved SI estimates and fit diagnostics: {report}\n{table}\n{plot}", flush=True)
+    print(f"Saved SI estimates and fit diagnostics: {report}\n{table}\n{plot}\n{calibration_plot}", flush=True)
     if any(h["fit"]["g2_light"] is None for h in result["harmonics"]):
         print("[WARNING] Some harmonics could not be calibrated; see fit status. No raw fallback was substituted.")
+    if args.no_show:
+        plt.close(fig)
+        plt.close(summary)
+    else:
+        show_analysis_figures()
     return 0
 
 
@@ -90,7 +113,7 @@ def _output_directory(path: Path) -> Path:
     return output
 
 
-def _plot(results: list[dict], path: Path) -> None:
+def _plot(results: list[dict], path: Path, *, show: bool = True) -> None:
     labels = list(dict.fromkeys(h["label"] for result in results for h in result["harmonics"]))
     fig, axis = plt.subplots(figsize=(9, 5), constrained_layout=True)
     x = np.arange(len(results))
@@ -108,7 +131,10 @@ def _plot(results: list[dict], path: Path) -> None:
     axis.grid(True, alpha=0.25)
     axis.legend(title="Harmonic")
     fig.savefig(path, dpi=160)
-    plt.close(fig)
+    if show:
+        show_analysis_figures()
+    else:
+        plt.close(fig)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -123,6 +149,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--raw-intensity", action="store_true",
                         help="Explicit legacy raw ADU statistic; does not estimate corrected light g2.")
     parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--no-show", action="store_true", help="Save plots without opening windows (automation only).")
     args = parser.parse_args(argv)
     args.harmonic_map = args.harmonic_map or default_harmonic_map_path()
     try:
@@ -170,7 +197,7 @@ def main(argv: list[str] | None = None) -> int:
                         "mean_signal_adu": item["mean_signal_adu"], "g2_zero_delay": item["g2_zero_delay"],
                         "standard_error": item["standard_error"], "ci95_low": ci[0], "ci95_high": ci[1],
                     })
-        _plot(results, plot_path)
+        _plot(results, plot_path, show=not args.no_show)
         print(f"Analyzed {len(files)} HDF5 step(s), {sum(r['total_frames'] for r in results)} frames.")
         print(f"Saved results: {report_path}")
         print(f"Saved table: {csv_path}")

@@ -53,14 +53,18 @@ def test_analysis_hdf5_loaders_and_beam_profiling(tmp_path):
     assert np.allclose(full_scan["setpoints"], [0.0, 0.2, 0.4])
     assert full_scan["mean_frames"].shape == (3, 2160, 2560)
 
+    # The default camera now emits multiple spectral peaks. A single Gaussian
+    # beam fit needs separate Gaussian ground truth, not that multi-line image.
+    y, x = np.ogrid[:2160, :2560]
+    beam = (100 + 8000*np.exp(-((x-1280)**2 + (y-1080)**2)/(2*120.0**2))).astype(np.uint16)
     # 4. Test compute_beam_centroid
-    cx, cy = compute_beam_centroid(images[0])
+    cx, cy = compute_beam_centroid(beam)
     # Expected centered at (x0=1280, y0=1080) within tolerance
     assert 1200 <= cx <= 1360
     assert 1000 <= cy <= 1160
 
     # 5. Test fit_gaussian_beam_profile
-    fit_results = fit_gaussian_beam_profile(images[0])
+    fit_results = fit_gaussian_beam_profile(beam)
     assert 1200 <= fit_results["centroid_x"] <= 1360
     assert 1000 <= fit_results["centroid_y"] <= 1160
     # Sigma is simulated at 120 pixels

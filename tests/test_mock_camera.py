@@ -124,3 +124,24 @@ def test_mock_global_shutter_enforces_mode_specific_exposure_limit():
     with pytest.raises(CameraSafetyError, match="at most 0.1 s"):
         cam.set_exposure_time(0.101)
     assert cam.get_exposure_time() == 0.1
+
+
+def test_mock_spectrum_has_separated_bright_weak_peaks_and_noise():
+    """Saved mock frames exercise weak-line detection, not just one easy spot."""
+    from hhg_control.analysis.spectral import detect_harmonic_regions
+    camera = MockPcoCamera()
+    camera.connect()
+    try:
+        camera.set_roi((0, 1016, 2560, 1144))
+        camera.set_exposure_time(.001)
+        frames, metadata = camera.acquire_frames(8)
+        mean_image = frames.mean(axis=0)
+        regions, _ = detect_harmonic_regions(mean_image)
+        for center in (240, 655, 830, 1040, 1595, 2005, 2240):
+            assert any(r['x_start'] <= center < r['x_stop'] for r in regions)
+        spectrum = mean_image.sum(axis=0)
+        assert spectrum[240] > 20 * spectrum[830]
+        assert not np.array_equal(frames[0], frames[1])
+        assert 'spectral lines' in metadata[0]['data_type']
+    finally:
+        camera.close()

@@ -212,7 +212,7 @@ def test_harmonic_g2_cli_writes_separate_report_table_and_plot(tmp_path):
     )
     script = Path(__file__).resolve().parents[1] / "scripts" / "analyze_harmonic_g2.py"
     result = subprocess.run(
-        [sys.executable, str(script), str(source), str(map_path), "--raw-intensity"],
+        [sys.executable, str(script), str(source), str(map_path), "--raw-intensity", "--no-show"],
         capture_output=True, text=True, timeout=30, check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr

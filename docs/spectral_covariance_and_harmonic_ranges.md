@@ -40,7 +40,7 @@ relative to the strongest peak, which could remove weak even/half-integer peaks.
 Noise and overlapping tails prevent a guarantee of complete, noise-free windows.
 There is no equal-spacing assumption or automatic harmonic-order assignment.
 
-- Adjust **Peak sigma** to re-detect (lower values retain weaker features but
+- Adjust **Threshold** to re-detect (lower values retain weaker features but
   increase false positives). Changing it replaces all current manual edits.
 - Drag across x to add a missing window or replace overlapping windows.
 - Right-click a window to remove it. Check weak peaks, tails and hot-pixel artifacts.
@@ -146,3 +146,23 @@ Separate reference runs cannot reveal the ON signal/background covariance.
 The previous raw-ADU estimator is still available only through an explicit
 `--raw-intensity` CLI flag, and retains its original meaning
 `mean(S^2)/mean(S)^2`. It is not used by the GUI's corrected analysis.
+
+## Plot windows and simulated spectrum
+
+The GUI analysis buttons open ordinary Python Matplotlib/Qt result windows
+automatically when calculation finishes. Covariance opens its heatmap; harmonic
+g2 opens a compact summary and the calibration plots. Results are also saved.
+Close plot windows to finish the analysis child process; the camera GUI stays
+responsive. CLI automation can pass `--no-show` to harmonic g2, or `--no-plot`
+to covariance. GUI buttons show plots by default.
+
+The harmonic marker uses native Threshold, Orders and Save controls outside
+the plot. Dark signal and pale gaps mark the proposed windows; drag to edit and
+right-click to remove a window. Actual harmonic orders must still be entered
+once for SI reference selection.
+
+Simulated acquisition now produces eleven separated spectral lines with unequal
+widths and spacings, a strength ratio exceeding 160:1, shot/read noise and a
+structured sloping background. This stresses weak-peak detection and covariance
+viewing. It is synthetic test data, not a calibrated BSV/MCP statistics model.
+The bounded simulation buffer and all physical-camera settings are unchanged.

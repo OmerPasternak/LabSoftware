@@ -1,6 +1,6 @@
 """
 Hardware-independent mock emulator for pco.edge 5.5 sCMOS camera.
-Simulates dark counts, read noise, and a Gaussian beam profile.
+Simulates a challenging multi-line spectrum, read noise and structured background.
 """
 
 import time
@@ -17,6 +17,14 @@ class MockPcoCamera(BaseCamera):
 
     WIDTH: int  = 2560
     HEIGHT: int = 2160
+    # Deliberately unequal/irregular lines, including weak even-like features.
+    # Synthetic detector positions only: these are not wavelength calibrations.
+    SPECTRAL_PEAKS = (
+        (240, 18, 1.0), (440, 25, 0.025), (655, 16, 0.18),
+        (830, 30, 0.006), (1040, 21, 0.65), (1215, 35, 0.06),
+        (1400, 17, 0.012), (1595, 28, 0.40), (1780, 20, 0.032),
+        (2005, 32, 0.80), (2240, 22, 0.009),
+    )
 
     @property
     def can_pause_acquisition(self) -> bool:
@@ -37,27 +45,35 @@ class MockPcoCamera(BaseCamera):
         self._frame_count = 0
 
     def _prepare_simulation_data(self) -> None:
-        """Build synthetic full-sensor patterns when the mock connects."""
+        """Build separated bright/weak lines and a noisy sloping background.
+
+        Relative peaks span over 160:1 with different widths and spacings.
+        This stresses segmentation; it is not a validated optical/MCP model.
+        Full-sensor arrays stay fixed-size, independent of measurement length.
+        """
         if self._gaussian_profile is not None and self._dark_bank is not None:
             return
 
-        # Precompute static 2D spatial Gaussian beam profile (sigma = 120 px, centred at (1280, 1080))
+        # Narrow spectral lines share a vertically confined Gaussian envelope.
         y, x = np.ogrid[:self.HEIGHT, :self.WIDTH]
-        center_y, center_x = self.HEIGHT // 2, self.WIDTH // 2
-        sigma_x, sigma_y = 120.0, 120.0
-        self._gaussian_profile = np.exp(
-            -(((x - center_x) ** 2) / (2 * sigma_x ** 2) + ((y - center_y) ** 2) / (2 * sigma_y ** 2))
-        ).astype(np.float32)
+        center_y = self.HEIGHT // 2
+        sigma_y = 100.0
+        spectrum = np.zeros(self.WIDTH, dtype=np.float32)
+        for center, sigma, strength in self.SPECTRAL_PEAKS:
+            spectrum += (strength * np.exp(-0.5 * ((x.ravel()-center)/sigma)**2)).astype(np.float32)
+        self._gaussian_profile = (np.exp(-0.5*((y-center_y)/sigma_y)**2)
+                                  * spectrum[None, :]).astype(np.float32)
 
-        # Region bounding box for shot noise (±4σ; outside this, signal ≈ 0)
+        # Shot noise covers every spectral line, within ±4 sigma vertically.
         self._roi_y1 = max(0, int(center_y - 4 * sigma_y))
         self._roi_y2 = min(self.HEIGHT, int(center_y + 4 * sigma_y))
-        self._roi_x1 = max(0, int(center_x - 4 * sigma_x))
-        self._roi_x2 = min(self.WIDTH, int(center_x + 4 * sigma_x))
+        self._roi_x1 = 0
+        self._roi_x2 = self.WIDTH
 
         # Pre-generate bank of realistic dark noise patterns directly in uint16 for speed
+        background = 100.0 + 0.008*x + 8*np.sin(x/135.0) + 3*np.sin(x/11.0)
         self._dark_bank = np.clip(
-            self._rng.normal(loc=100.0, scale=3.0, size=(4, self.HEIGHT, self.WIDTH)),
+            self._rng.normal(loc=background, scale=6.0, size=(4, self.HEIGHT, self.WIDTH)),
             0, 65535
         ).astype(np.uint16)
 
@@ -241,7 +257,7 @@ class MockPcoCamera(BaseCamera):
                 "roi":               (x0, y0, x1, y1),
                 "readout_mode":      self._readout_mode.name,
                 "trigger_mode":      self._trigger_mode.value,
-                "data_type":         "Synthetic 2D Gaussian + Poisson shot noise + dark pedestal",
+                "data_type":         "Synthetic unequal spectral lines + Gaussian-approximated shot noise + structured background",
                 "simulated":         True,
             })
 

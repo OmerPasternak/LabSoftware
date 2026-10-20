@@ -16,6 +16,7 @@ import numpy as np
 
 from hhg_control.analysis import compute_spectral_covariance_from_scan
 from hhg_control.safe_io import unique_output
+from hhg_control.analysis.plot_windows import show_analysis_figures
 
 
 def _default_output(input_path: Path) -> Path:
@@ -90,7 +91,7 @@ def _plot_result(
     figure.colorbar(image, ax=axis, label="Covariance (ADU²)")
     figure.savefig(output_png, dpi=160)
     print(f"Saved covariance heatmap: {output_png.resolve()}")
-    plt.show()
+    show_analysis_figures()
 
 
 def main(argv: list[str] | None = None) -> int:

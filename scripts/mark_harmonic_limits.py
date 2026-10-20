@@ -8,7 +8,9 @@ import sys
 import matplotlib
 matplotlib.use("QtAgg")
 import matplotlib.pyplot as plt
-from matplotlib.widgets import SpanSelector, Slider, Button, TextBox
+from matplotlib.widgets import SpanSelector
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QApplication, QToolBar, QLabel, QDoubleSpinBox, QLineEdit, QPushButton
 import numpy as np
 
 from hhg_control.analysis.spectral import (
@@ -16,6 +18,7 @@ from hhg_control.analysis.spectral import (
     save_harmonic_regions, validate_harmonic_regions,
 )
 from hhg_control.safe_io import unique_output
+from hhg_control.analysis.plot_windows import show_analysis_figures
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -35,14 +38,28 @@ def main(argv: list[str] | None = None) -> int:
     width = image.shape[1]
     output = args.output or default_harmonic_map_path()
     figure, axis = plt.subplots(figsize=(12, 6))
-    figure.subplots_adjust(bottom=0.27, top=0.84)
-    status = figure.text(0.08, 0.91, "", fontsize=10)
-    sensitivity_axis = figure.add_axes((0.18, 0.12, 0.45, 0.035))
-    sensitivity = Slider(sensitivity_axis, "Peak sigma", 2.0, 12.0, valinit=5.0, valstep=0.5)
-    save_axis = figure.add_axes((0.73, 0.07, 0.19, 0.065))
-    save_button = Button(save_axis, "Confirm and save")
-    order_axis = figure.add_axes((0.18, 0.045, 0.45, 0.04))
-    orders = TextBox(order_axis, "Orders left to right ", initial="")
+    figure.subplots_adjust(bottom=0.13, top=0.90)
+    window = figure.canvas.manager.window
+    window.setWindowTitle("Harmonics")
+    controls = QToolBar("Harmonic windows", window)
+    controls.setMovable(False)
+    window.addToolBar(Qt.ToolBarArea.BottomToolBarArea, controls)
+    controls.addWidget(QLabel("  Threshold "))
+    sensitivity = QDoubleSpinBox()
+    sensitivity.setRange(2.0, 12.0)
+    sensitivity.setSingleStep(0.5)
+    sensitivity.setValue(5.0)
+    sensitivity.setToolTip("Lower to detect weaker peaks. Replaces manual edits.")
+    controls.addWidget(sensitivity)
+    controls.addSeparator()
+    controls.addWidget(QLabel(" Orders "))
+    orders = QLineEdit()
+    orders.setPlaceholderText("Left to right: 11, 11.5, 12, ...")
+    orders.setMinimumWidth(260)
+    controls.addWidget(orders)
+    save_button = QPushButton("Save")
+    controls.addWidget(save_button)
+    status = window.statusBar()
     save_error = False
     saved = False
     light_line, = axis.plot([], [], color="0.8", linewidth=1, label="Outside windows")
@@ -65,20 +82,17 @@ def main(argv: list[str] | None = None) -> int:
             a, b = region["x_start"], region["x_stop"]
             annotations.append(axis.axvspan(a - 0.5, b - 0.5, color="#102d50", alpha=0.10))
             annotations.append(axis.text((a+b-1)/2, spectrum[a:b].max(), region["label"], ha="center", fontsize=9))
-        axis.set(xlabel="Detector x pixel (P labels are peaks, not harmonic orders)",
-                 ylabel="Mean image summed along y (ADU)", xlim=(-0.5, width-0.5))
-        axis.legend(loc="upper right")
+        axis.set(xlabel="Pixel", ylabel="Signal (ADU)", xlim=(-0.5, width-0.5),
+                 title=f"{len(shown)} peaks")
         axis.relim()
         axis.autoscale_view(scalex=False)
-        status.set_text(f"{len(regions)} windows. {message}\n"
-                        "Review weak peaks/tails. Drag to add/replace overlaps; right-click removes a window.\n"
-                        "Slider re-detects all windows. Enter saves; Escape cancels and keeps the previous map.")
+        status.showMessage(message or "Drag to add · Right-click to remove")
         figure.canvas.draw_idle()
 
     def redetect(value):
         nonlocal regions, detection
         regions, detection = detect_harmonic_regions(image, threshold_sigma=float(value))
-        redraw("Automatic proposal; visual confirmation required.")
+        redraw()
 
     def select(a, b):
         nonlocal regions
@@ -90,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
         for index, region in enumerate(regions, 1):
             region["label"] = f"P{index}"
         detection["manually_edited"] = True
-        redraw("Manual refinement applied.")
+        redraw()
 
     def remove(event):
         nonlocal regions
@@ -99,7 +113,7 @@ def main(argv: list[str] | None = None) -> int:
             for index, region in enumerate(regions, 1):
                 region["label"] = f"P{index}"
             detection["manually_edited"] = True
-            redraw("Window removed.")
+            redraw()
 
     def save(event=None):
         nonlocal save_error, saved
@@ -107,7 +121,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             proposed = [dict(region) for region in regions]
             validate_harmonic_regions(proposed, width)
-            entered = orders.text.strip()
+            entered = orders.text().strip()
             if entered:
                 order_values = [float(value.strip()) for value in entered.split(",")]
                 if len(order_values) != len(regions) or len(set(order_values)) != len(order_values):
@@ -138,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
             redraw(f"Cannot save: {exc}")
 
     def key(event):
-        if event.inaxes == order_axis and event.key not in {"enter", "escape"}:
+        if isinstance(QApplication.focusWidget(), QLineEdit):
             return
         if event.key in {"enter", "s"}:
             save()
@@ -146,12 +160,12 @@ def main(argv: list[str] | None = None) -> int:
             plt.close(figure)
 
     selector = SpanSelector(axis, select, "horizontal", useblit=True, button=1)
-    sensitivity.on_changed(redetect)
-    save_button.on_clicked(save)
+    sensitivity.valueChanged.connect(redetect)
+    save_button.clicked.connect(save)
     figure.canvas.mpl_connect("button_press_event", remove)
     figure.canvas.mpl_connect("key_press_event", key)
-    redraw("Automatic proposal; visual confirmation required.")
-    plt.show()
+    redraw()
+    show_analysis_figures()
     if not saved:
         print("No replacement saved; previous harmonic map retained.", flush=True)
     return 1 if save_error else 0

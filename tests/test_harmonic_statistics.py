@@ -119,7 +119,7 @@ def test_si_cli_uses_default_map_without_map_picker_and_saves_diagnostics(tmp_pa
     monkeypatch.setenv("HHG_HARMONIC_MAP", str(harmonic_map))
     script = Path(__file__).resolve().parents[1]/"scripts"/"analyze_harmonic_g2.py"
     result = subprocess.run([sys.executable, str(script), str(paths[0]), "--bsv-off", str(paths[1]),
-                             "--background", str(paths[2])], capture_output=True, text=True, timeout=30)
+                             "--background", str(paths[2]), "--no-show"], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr + result.stdout
     report = json.loads(next((tmp_path/"analysis").glob("*.json")).read_text())
     assert "fit" in report["harmonics"][0]
@@ -143,12 +143,12 @@ def test_marker_detects_reviews_and_replaces_only_on_confirm(tmp_path, monkeypat
     spec = importlib.util.spec_from_file_location("test_harmonic_marker", script)
     marker = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(marker)
-    def cancel():
+    def cancel(**kwargs):
         plt.close(plt.gcf())
     monkeypatch.setattr(plt, "show", cancel)
     assert marker.main([str(source)]) == 0
     assert target.read_text() == "old reference"
-    def confirm():
+    def confirm(**kwargs):
         figure = plt.gcf()
         figure.canvas.callbacks.process("key_press_event", KeyEvent("key_press_event", figure.canvas, key="enter"))
     monkeypatch.setattr(plt, "show", confirm)
@@ -157,3 +157,45 @@ def test_marker_detects_reviews_and_replaces_only_on_confirm(tmp_path, monkeypat
     assert len(saved["harmonics"]) == 2
     assert saved["detection"]["visually_confirmed"]
     assert Path(saved["annotated_snapshot_png"]).stat().st_size > 0
+
+
+@pytest.mark.parametrize('kind', ['g2', 'covariance'])
+def test_analysis_opens_result_plot_by_default(tmp_path, monkeypatch, kind):
+    """GUI child scripts must show calculated figures without an extra file search."""
+    import importlib.util
+    import matplotlib.pyplot as plt
+    paths, harmonic_map = _matched_files(tmp_path)
+    monkeypatch.setenv('HHG_HARMONIC_MAP', str(harmonic_map))
+    name = 'analyze_harmonic_g2.py' if kind == 'g2' else 'analyze_spectral_covariance.py'
+    script = Path(__file__).resolve().parents[1]/'scripts'/name
+    spec = importlib.util.spec_from_file_location(f'popup_{kind}', script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    shown = []
+    def show():
+        shown.extend(plt.get_fignums())
+        plt.close('all')
+    monkeypatch.setattr(module, 'show_analysis_figures', show)
+    args = [str(paths[0])]
+    if kind == 'g2':
+        args += ['--bsv-off', str(paths[1]), '--background', str(paths[2])]
+    assert module.main(args) == 0
+    assert shown
+
+
+def test_result_window_is_visible_and_show_blocks_child_process(monkeypatch):
+    """Show actual native Qt windows before entering the child plotting loop."""
+    import matplotlib.pyplot as plt
+    from hhg_control.analysis.plot_windows import show_analysis_figures
+    figure, axis = plt.subplots()
+    axis.plot([1,2])
+    calls = []
+    def show(*, block):
+        calls.append(block)
+        assert figure.canvas.manager.window.isVisible()
+    monkeypatch.setattr(plt, 'show', show)
+    try:
+        show_analysis_figures()
+        assert calls == [True]
+    finally:
+        plt.close(figure)
