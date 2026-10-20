@@ -11,6 +11,7 @@ import pytest
 
 from hhg_control.analysis.spectral import (
     StreamingSpectralCovariance,
+    compute_harmonic_g2_from_scan,
     compute_spectral_covariance,
     compute_spectral_covariance_from_scan,
     load_mean_snapshot,
@@ -157,3 +158,69 @@ def test_harmonic_range_validation_rejects_overlaps_and_out_of_bounds():
         )
     with pytest.raises(ValueError, match="0 <= x_start"):
         validate_harmonic_regions([{"label": "H1", "x_start": 0, "x_stop": 9}], width=8)
+
+
+def test_per_harmonic_g2_integrates_each_marked_band_and_reports_uncertainty(tmp_path):
+    frames = np.array(
+        [
+            [[1, 2, 5], [1, 2, 5]],
+            [[2, 4, 5], [2, 4, 5]],
+            [[3, 6, 5], [3, 6, 5]],
+            [[4, 8, 5], [4, 8, 5]],
+        ], dtype=np.uint16,
+    )
+    source = tmp_path / "step.h5"
+    _write_step(source, frames)
+    map_path = save_harmonic_regions(
+        tmp_path / "reference_harmonics.json",
+        [{"label": "H1", "x_start": 0, "x_stop": 1}, {"label": "H2", "x_start": 1, "x_stop": 2}],
+        source,
+        frames.shape[1:],
+        roi_bounds=[100, 20, 103, 22],
+    )
+
+    result = compute_harmonic_g2_from_scan(source, map_path, batch_size=2)
+    assert result["total_frames"] == 4
+    assert result["y_range_local_half_open"] == [0, 2]
+    h1, h2 = result["harmonics"]
+    assert h1["mean_signal_adu"] == 5.0
+    assert h1["g2_zero_delay"] == pytest.approx(np.mean(np.array([2, 4, 6, 8]) ** 2) / 5.0**2)
+    assert h2["g2_zero_delay"] == pytest.approx(np.mean(np.array([4, 8, 12, 16]) ** 2) / 10.0**2)
+    assert h1["standard_error"] >= 0
+    assert h1["ci95"][0] <= h1["g2_zero_delay"] <= h1["ci95"][1]
+
+
+def test_per_harmonic_g2_rejects_roi_mismatch(tmp_path):
+    frames = np.ones((3, 2, 3), dtype=np.uint16)
+    source = tmp_path / "step.h5"
+    _write_step(source, frames)
+    map_path = save_harmonic_regions(
+        tmp_path / "map.json", [{"label": "H1", "x_start": 0, "x_stop": 1}],
+        source, frames.shape[1:], roi_bounds=[0, 0, 3, 2],
+    )
+    with pytest.raises(ValueError, match="ROI"):
+        compute_harmonic_g2_from_scan(source, map_path)
+
+
+def test_harmonic_g2_cli_writes_separate_report_table_and_plot(tmp_path):
+    frames = np.array([[[1, 4], [1, 4]], [[2, 6], [2, 6]], [[3, 8], [3, 8]]], dtype=np.uint16)
+    source = tmp_path / "step.h5"
+    _write_step(source, frames)
+    map_path = save_harmonic_regions(
+        tmp_path / "map_harmonics.json", [{"label": "H1", "x_start": 0, "x_stop": 1}],
+        source, frames.shape[1:], roi_bounds=[100, 20, 102, 22],
+    )
+    script = Path(__file__).resolve().parents[1] / "scripts" / "analyze_harmonic_g2.py"
+    result = subprocess.run(
+        [sys.executable, str(script), str(source), str(map_path)],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    output_dir = tmp_path / "analysis"
+    report = next(output_dir.glob("*.json"))
+    table = next(output_dir.glob("*.csv"))
+    plot = next(output_dir.glob("*.png"))
+    assert json.loads(report.read_text(encoding="utf-8"))["results"][0]["total_frames"] == 3
+    assert "g2_zero_delay" in table.read_text(encoding="utf-8")
+    assert plot.stat().st_size > 0
+    assert source.exists() and map_path.exists()

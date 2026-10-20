@@ -8,6 +8,7 @@ from .beam_profiling import fit_gaussian_beam_profile, compute_beam_centroid
 from .correlation import StreamingPixelG2, compute_g2_map, acquire_and_compute_g2, compute_g2_from_scan
 from .spectral import (
     StreamingSpectralCovariance,
+    compute_harmonic_g2_from_scan,
     compute_spectral_covariance,
     compute_spectral_covariance_from_scan,
     load_mean_snapshot,
@@ -28,6 +29,7 @@ __all__ = [
     "acquire_and_compute_g2",
     "compute_g2_from_scan",
     "StreamingSpectralCovariance",
+    "compute_harmonic_g2_from_scan",
     "compute_spectral_covariance",
     "compute_spectral_covariance_from_scan",
     "load_mean_snapshot",

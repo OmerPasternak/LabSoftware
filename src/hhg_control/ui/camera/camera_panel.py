@@ -698,6 +698,11 @@ class CameraMainWindow(QMainWindow):
             "Open a completed step's mean-frame snapshot; drag x ranges and save them for later analysis."
         )
         self.btn_mark_harmonics.clicked.connect(self._launch_harmonic_marker)
+        self.btn_harmonic_g2 = QPushButton("Harmonic g²")
+        self.btn_harmonic_g2.setToolTip(
+            "Apply a saved harmonic map to completed HDF5 scan steps and calculate temporal g²(0) per harmonic."
+        )
+        self.btn_harmonic_g2.clicked.connect(self._launch_harmonic_g2)
 
         folder_buttons = QHBoxLayout()
         folder_buttons.setSpacing(4)
@@ -706,6 +711,7 @@ class CameraMainWindow(QMainWindow):
         folder_buttons.addStretch(1)
         folder_buttons.addWidget(self.btn_spectral_covariance)
         folder_buttons.addWidget(self.btn_mark_harmonics)
+        folder_buttons.addWidget(self.btn_harmonic_g2)
         store_grid.addLayout(folder_buttons, 1, 0, 1, 2)
 
         store_grid.addWidget(QLabel("Header:"), 2, 0)
@@ -755,7 +761,29 @@ class CameraMainWindow(QMainWindow):
         if filepath:
             self._launch_analysis_script("mark_harmonic_limits.py", Path(filepath))
 
-    def _launch_analysis_script(self, script_name: str, input_path: Path) -> None:
+    def _launch_harmonic_g2(self) -> None:
+        """Apply a previously saved harmonic map to completed scan-step files."""
+        map_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choose the saved harmonic map",
+            self.txt_storage_dir.text().strip(),
+            "Harmonic maps (*_harmonics.json *.json)",
+        )
+        if not map_path:
+            return
+        scan_dir = QFileDialog.getExistingDirectory(
+            self,
+            "Choose a folder containing completed HDF5 scan steps",
+            self.txt_storage_dir.text().strip(),
+        )
+        if scan_dir:
+            self._launch_analysis_script(
+                "analyze_harmonic_g2.py", Path(scan_dir), extra_args=[map_path]
+            )
+
+    def _launch_analysis_script(
+        self, script_name: str, input_path: Path, extra_args: Optional[list[str]] = None
+    ) -> None:
         """Run a GUI analysis script asynchronously, leaving the acquisition UI responsive."""
         script_path = Path(__file__).resolve().parents[4] / "scripts" / script_name
         if not script_path.is_file():
@@ -764,7 +792,7 @@ class CameraMainWindow(QMainWindow):
 
         process = QProcess(self)
         process.setProgram(sys.executable)
-        process.setArguments([str(script_path), str(input_path)])
+        process.setArguments([str(script_path), str(input_path), *(extra_args or [])])
         process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         process.readyReadStandardOutput.connect(
             lambda proc=process: self._read_analysis_output(proc)

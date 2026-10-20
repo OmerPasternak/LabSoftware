@@ -41,3 +41,25 @@ The GUI's **Mark Harmonics** button opens a selected completed step in this
 tool. Downstream per-harmonic analysis should check the saved image dimensions
 and ROI against its input before applying the ranges. The sidecar stores no
 wavelength calibration; its limits remain detector x-pixel positions.
+
+## Per-harmonic temporal g²
+
+Mark the harmonic ranges once and keep the resulting `*_harmonics.json` file.
+In the GUI, **Harmonic g²** asks for that saved map and then a folder containing
+the completed HDF5 scan-step files. The same map is reused for every step, with
+image dimensions and ROI checked before analysis. The command-line equivalent
+is `python scripts/analyze_harmonic_g2.py <step-or-folder> <harmonics.json>`.
+
+For each frame and harmonic, the analysis sums raw ADU over the marked x range
+and every y row, then computes temporal `g²(0) = mean(S²) / mean(S)²`. It
+reports the frame count, mean signal, g², delta-method standard error, and a
+normal-approximation 95% interval. The CSV, JSON report, and plot are written
+under an `analysis` subfolder; source measurements are not modified. Input
+frames are streamed, not loaded as a full scan into memory.
+
+This is an integrated-intensity fluctuation statistic. It does not subtract a
+camera pedestal, convert ADU to photon counts, establish external-trigger
+accounting, or prove independent frames. The confidence interval assumes
+independent frames; temporal correlation can make it too narrow. Interpret g²
+physically only after confirming the desired background and detector-noise
+corrections for the experiment.

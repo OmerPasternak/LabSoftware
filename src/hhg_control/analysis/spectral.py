@@ -374,3 +374,86 @@ def load_harmonic_regions(
         )
     payload["harmonics"] = validate_harmonic_regions(payload.get("harmonics", []), saved_shape[1])
     return payload
+
+
+def compute_harmonic_g2_from_scan(
+    filepath: str | Path,
+    harmonic_map_path: str | Path,
+    batch_size: int = 16,
+) -> dict[str, Any]:
+    """Compute per-harmonic temporal ``g2(0)`` from one completed HDF5 step.
+
+    For each frame, signal is the sum of raw ADU values over all detector rows
+    and the harmonic's half-open x range. The reported estimator is
+    ``mean(signal**2) / mean(signal)**2``. Frames are streamed in batches; a
+    second pass estimates a normal-approximation 95% confidence interval using
+    the delta method. The interval assumes independent frames and does not
+    account for camera background, photon conversion, or trigger accounting.
+    The source HDF5 file is never modified.
+    """
+    path = Path(filepath)
+    metadata, shape = _read_source_metadata(path)
+    if shape[0] < 2:
+        raise ValueError(f"At least 2 frames are required for g2 analysis; found {shape[0]}.")
+    roi = metadata.get("roi_bounds")
+    harmonic_map = load_harmonic_regions(
+        harmonic_map_path,
+        image_shape_yx=(shape[1], shape[2]),
+        roi_bounds=roi,
+    )
+    regions = harmonic_map["harmonics"]
+    totals = {region["label"]: 0.0 for region in regions}
+    squares = {region["label"]: 0.0 for region in regions}
+    count = 0
+    for batch in iter_scan_step_frames(path, batch_size=batch_size):
+        values = batch.astype(np.float64, copy=False)
+        for region in regions:
+            signal = values[:, :, region["x_start"]:region["x_stop"]].sum(axis=(1, 2))
+            totals[region["label"]] += float(np.sum(signal, dtype=np.float64))
+            squares[region["label"]] += float(np.sum(signal * signal, dtype=np.float64))
+        count += batch.shape[0]
+
+    results = []
+    for region in regions:
+        label = region["label"]
+        mean_signal = totals[label] / count
+        mean_square = squares[label] / count
+        if mean_signal <= 0:
+            results.append({
+                **region, "mean_signal_adu": mean_signal, "g2_zero_delay": None,
+                "standard_error": None, "ci95": None,
+            })
+            continue
+        g2 = mean_square / (mean_signal * mean_signal)
+        influence_sum = 0.0
+        influence_square_sum = 0.0
+        for batch in iter_scan_step_frames(path, batch_size=batch_size):
+            values = batch.astype(np.float64, copy=False)
+            signal = values[:, :, region["x_start"]:region["x_stop"]].sum(axis=(1, 2))
+            influence = (signal * signal - mean_square) / (mean_signal * mean_signal)
+            influence -= 2.0 * mean_square * (signal - mean_signal) / (mean_signal ** 3)
+            influence_sum += float(np.sum(influence, dtype=np.float64))
+            influence_square_sum += float(np.sum(influence * influence, dtype=np.float64))
+        influence_mean = influence_sum / count
+        influence_variance = max(
+            0.0, (influence_square_sum - count * influence_mean * influence_mean) / (count - 1)
+        )
+        standard_error = float(np.sqrt(influence_variance / count))
+        results.append({
+            **region,
+            "mean_signal_adu": mean_signal,
+            "g2_zero_delay": g2,
+            "standard_error": standard_error,
+            "ci95": [g2 - 1.96 * standard_error, g2 + 1.96 * standard_error],
+        })
+    return {
+        "source_file": str(path.resolve()),
+        "harmonic_map_file": str(Path(harmonic_map_path).resolve()),
+        "total_frames": count,
+        "image_shape_yx": [shape[1], shape[2]],
+        "roi_bounds_xyxy": roi,
+        "y_range_local_half_open": [0, shape[1]],
+        "estimator": "mean(S^2) / mean(S)^2; S is summed raw ADU per frame in the harmonic x range and all y rows",
+        "uncertainty": "delta-method standard error and normal-approximation 95% CI; assumes independent frames",
+        "harmonics": results,
+    }
