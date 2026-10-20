@@ -46,6 +46,14 @@ Command Prompt window. It uses this checkout's `.venv` and `src` directory and
 shows a setup message if `.venv` is missing. Keep `run_camera_gui.bat` for
 troubleshooting: it leaves a console open when startup fails.
 
+## TC motor
+
+Launch `src/hhg_control/tc_motor/run_TC_motor.bat` or `python -m hhg_control.tc_motor.gui` for the independent
+Newport LTA-HS/SMC100 interface. It starts disconnected in mock mode. Physical
+inspection and reviewed motion profiles, STOP/close behavior, calibration, and
+measurement-loop examples are described in [the motor guide](src/hhg_control/tc_motor/docs/motor_smc100.md).
+No physical motor validation has been performed; the camera interface is separate.
+
 ## Validation
 
 Run offline tests before each lab deployment:

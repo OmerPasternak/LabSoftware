@@ -13,6 +13,13 @@ src/hhg_control/
     drivers/               abstract camera, physical PCO driver, mock, defaults
     sequencer/             camera acquisition, buffering, integrity and writing
     analysis/              read-only saved-camera analysis
+  tc_motor/                self-contained TC motor (LTA-HS/SMC100) feature
+    drivers/               abstract motor, project mock, physical adapter
+    sequencer.py           bounded moves and reusable measurement loops
+    gui/                   separate motor window and background worker
+    tests/                 offline motor and Qt regression tests
+    docs/                  motor guide, profile template, and agent handoff
+    run_TC_motor.bat       launcher resolving this checkout from its own path
   safe_io.py               shared filesystem/resource checks
   project_paths.py         checkout-resource discovery, independent of cwd
 ```

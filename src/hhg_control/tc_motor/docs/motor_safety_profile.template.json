@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "limits": {
+    "min_position_mm": null,
+    "max_position_mm": null,
+    "max_velocity_mm_s": null,
+    "max_acceleration_mm_s2": null,
+    "max_move_mm": null
+  },
+  "expected_controller_version": "",
+  "expected_stage_reference": "LTA-HS",
+  "expected_encoder_increment_mm": null,
+  "stop_clearance_mm": null,
+  "units_confirmed_mm": false,
+  "controller_confirmed_cc": false,
+  "mounting_clearance_checked": false
+}

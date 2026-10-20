@@ -19,6 +19,9 @@ dependencies = [
 hardware-pco = [
     "pco==2.2.1; sys_platform == 'win32' or sys_platform == 'linux'",
 ]
+hardware-smc100 = [
+    "pyvisa>=1.14,<2",
+]
 test = [
     "pytest>=7.0,<10",
     "pytest-qt>=4.4,<5",
@@ -26,9 +29,13 @@ test = [
 
 [project.scripts]
 hhg-camera = "hhg_control.gui.camera.camera_panel:main"
+hhg-tc-motor = "hhg_control.tc_motor.gui.motor_panel:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"hhg_control.tc_motor" = ["docs/*.md", "docs/*.json", "run_TC_motor.bat"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
