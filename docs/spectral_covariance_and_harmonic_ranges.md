@@ -1,29 +1,46 @@
-# Spectral covariance and harmonic ranges
+# Spectral Pearson correlation and harmonic ranges
+
+These are explicitly requested derived analyses. Source images are immutable:
+open measurements read-only and save results separately. No analysis correction
+may enter acquisition. See [the raw-data policy](raw_data_integrity_policy.md).
 
 The camera HDF5 schema stores images as `/images[frame, y, x]`. In this setup,
 the detector x axis is the frequency-dispersed axis (the calibration may be in
 wavelength; these tools use detector pixel coordinates only).
 
-## X-pixel covariance
+## X-pixel Pearson correlation
 
-Run `python scripts/analyze_spectral_covariance.py <step.h5>` for one completed
-step, or pass a directory containing repeat files from one scan step. Directory
-inputs are checked for matching image dimensions, step index, setpoint,
-exposure, ROI, readout mode, and camera serial. A mixed-step folder is rejected.
-The script streams the image files and calculates the unbiased sample
-covariance across frames between x pixels after summing the selected y rows.
-The optional `--y-range START STOP` is zero-based and half-open; omitting it
-uses all y rows.
+The GUI **X Pearson** button reads one completed HDF5 step and opens a Pearson
+correlation heatmap automatically. Its range is -1 to +1, with diagonal 1 for
+nonconstant x pixels. Constant pixels have undefined correlation (NaN, shown in
+gray), including their diagonal. This is not g2 or a covariance matrix in ADU².
 
-The covariance is in ADU² and is saved in an analysis HDF5 file under
-`/frequency_pixel_covariance_adu2`. The file also records the x pixel
-coordinates, mean spectrum, source files, selected y range, and scan metadata.
-A heatmap PNG is saved beside the HDF5 result and displayed. The matrix is
-`[x_pixel_i, x_pixel_j]`; it is covariance across frames, not Pearson
-correlation, time-lagged covariance, or a photon-count-normal-ordered g².
+For each frame, sum the selected y rows into an x spectrum, then calculate
+`r_ij = Cov(S_i,S_j) / sqrt(Var(S_i)*Var(S_j))` across frames. No smoothing,
+background removal or correction is applied to the source pixels or profiles.
+All computations produce separate derived arrays. Source HDF5 files are opened
+read-only, never rewritten.
 
-In the camera GUI, **X Covariance** selects one completed step file and launches
-the analysis without blocking acquisition controls.
+The compatible CLI filename is still
+`python scripts/analyze_spectral_covariance.py <step.h5>`. A folder argument
+accepts repeat files from the same step with matching dimensions, settings,
+step index and setpoint; mixed steps are rejected. `--y-range START STOP` selects
+a zero-based half-open y interval; the default uses all rows. `--no-plot` is
+available for automation; the GUI always opens the plot.
+
+New result files are named `*_spectral_pearson_*.h5` and contain
+`/frequency_pixel_pearson_r` (dimensionless `[x_i,x_j]`), x coordinates,
+`mean_spectrum_adu`, source metadata, constant-pixel count and computation timing.
+A PNG heatmap is also saved. Existing covariance files are not overwritten or
+relabeled. The old numerical covariance API remains available for compatibility.
+
+The optimized path sums into float64 directly instead of making a float64 copy
+of the entire raw batch. It combines reduced spectra in bounded matrix blocks
+(default 256 frames), reducing repeated full-matrix updates. At 2560 x pixels,
+a 256-frame reduced block is about 5 MiB, independent of scan length. Raw image
+reads remain separately bounded (`--batch-size`, default 4). The optional
+`--spectra-block-frames` controls the reduced-spectrum block. Stages are recorded
+in `timing_s_json`; output-file compression and plot rendering are additional.
 
 ## Automatic harmonic windows and persistent reference
 
@@ -151,11 +168,11 @@ The previous raw-ADU estimator is still available only through an explicit
 ## Plot windows and simulated spectrum
 
 The GUI analysis buttons open ordinary Python Matplotlib/Qt result windows
-automatically when calculation finishes. Covariance opens its heatmap; harmonic
+automatically when calculation finishes. X Pearson opens its heatmap; harmonic
 g2 opens a compact summary and the calibration plots. Results are also saved.
 Close plot windows to finish the analysis child process; the camera GUI stays
 responsive. CLI automation can pass `--no-show` to harmonic g2, or `--no-plot`
-to covariance. GUI buttons show plots by default.
+to Pearson. GUI buttons show plots by default.
 
 The harmonic marker has a native Save button; significance is hidden and one odd-reference calibration is requested on save. Dark and pale line segments mark the proposed windows; drag to edit and
 right-click to remove a window. The single odd reference fixes the remaining half-omega orders for SI reference selection.

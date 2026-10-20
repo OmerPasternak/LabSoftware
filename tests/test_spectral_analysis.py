@@ -14,6 +14,8 @@ from hhg_control.analysis.spectral import (
     compute_harmonic_g2_from_scan,
     compute_spectral_covariance,
     compute_spectral_covariance_from_scan,
+    compute_spectral_pearson_from_scan,
+    covariance_to_pearson,
     load_mean_snapshot,
     load_harmonic_regions,
     save_harmonic_regions,
@@ -85,7 +87,7 @@ def test_spectral_covariance_rejects_files_from_different_scan_steps(tmp_path):
         compute_spectral_covariance_from_scan(tmp_path)
 
 
-def test_covariance_cli_writes_hdf5_matrix_and_metadata(tmp_path):
+def test_pearson_cli_writes_hdf5_matrix_and_metadata(tmp_path):
     frames = np.array(
         [[[1, 5, 2], [3, 8, 4]], [[2, 6, 3], [5, 9, 7]]],
         dtype=np.uint16,
@@ -104,10 +106,12 @@ def test_covariance_cli_writes_hdf5_matrix_and_metadata(tmp_path):
     )
     assert result.returncode == 0, result.stdout + result.stderr
     with h5py.File(output, "r") as h5:
-        covariance = h5["frequency_pixel_covariance_adu2"][:]
-        assert covariance.shape == (3, 3)
+        correlation = h5["frequency_pixel_pearson_r"][:]
+        assert correlation.shape == (3, 3)
+        np.testing.assert_allclose(correlation, np.corrcoef(frames.sum(axis=1).T))
         assert h5.attrs["total_frames"] == 2
-        assert h5["frequency_pixel_covariance_adu2"].attrs["units"] == "ADU^2"
+        assert h5["frequency_pixel_pearson_r"].attrs["units"] == "dimensionless"
+        assert 'timing_s_json' in h5.attrs
 
 
 def test_mean_snapshot_and_saved_harmonic_ranges(tmp_path):
@@ -224,3 +228,31 @@ def test_harmonic_g2_cli_writes_separate_report_table_and_plot(tmp_path):
     assert "g2_zero_delay" in table.read_text(encoding="utf-8")
     assert plot.stat().st_size > 0
     assert source.exists() and map_path.exists()
+
+
+def test_pearson_handles_anticorrelation_and_keeps_constant_pixels_undefined():
+    spectra=np.array([[1,4,7],[2,3,7],[3,2,7],[4,1,7]],dtype=float)
+    original=np.cov(spectra,rowvar=False)
+    before=original.copy()
+    result=covariance_to_pearson(original)
+    np.testing.assert_allclose(result[:2,:2], [[1,-1],[-1,1]])
+    assert np.all(np.isnan(result[2,:])) and np.all(np.isnan(result[:,2]))
+    np.testing.assert_array_equal(original,before)
+
+
+def test_blocked_pearson_matches_numpy_across_files_without_modifying_sources(tmp_path):
+    rng=np.random.default_rng(21)
+    images=rng.integers(0,1000,(29,5,8),dtype=np.uint16)
+    images[:,:,7]=17
+    sources=[tmp_path/'a.h5',tmp_path/'b.h5']
+    _write_step(sources[0], images[:13])
+    _write_step(sources[1], images[13:])
+    before=[p.read_bytes() for p in sources]
+    expected=np.corrcoef(images[:,:,:7].sum(axis=1).T)
+    for block in (1,7,256):
+        result,mean,summary=compute_spectral_pearson_from_scan(tmp_path,batch_size=4,spectra_block_frames=block)
+        np.testing.assert_allclose(result[:7,:7],expected,atol=1e-13)
+        np.testing.assert_allclose(mean,images.sum(axis=1).mean(axis=0))
+        assert np.all(np.isnan(result[7,:]))
+        assert summary['undefined_constant_pixels'] == 1
+    assert [p.read_bytes() for p in sources] == before

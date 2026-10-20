@@ -693,9 +693,9 @@ class CameraMainWindow(QMainWindow):
         self.btn_open_folder = QPushButton("Open")
         self.btn_open_folder.clicked.connect(self._open_storage_folder)
 
-        self.btn_spectral_covariance = QPushButton("X Covariance")
+        self.btn_spectral_covariance = QPushButton("X Pearson")
         self.btn_spectral_covariance.setToolTip(
-            "Compute covariance between x-axis spectral pixels across frames in one completed HDF5 step."
+            "Show the Pearson correlation matrix (-1 to +1) between x pixels across saved frames."
         )
         self.btn_spectral_covariance.clicked.connect(self._launch_spectral_covariance)
         self.btn_mark_harmonics = QPushButton("Mark Harmonics")
@@ -745,7 +745,7 @@ class CameraMainWindow(QMainWindow):
         self._update_progress_display()
 
     def _launch_spectral_covariance(self) -> None:
-        """Launch offline covariance analysis for one completed scan step."""
+        """Launch offline Pearson correlation analysis for one completed scan step."""
         filepath, _ = QFileDialog.getOpenFileName(
             self,
             "Choose one completed scan-step HDF5 file",

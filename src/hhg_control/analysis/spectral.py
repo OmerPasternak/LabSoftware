@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import time
 from typing import Any, Iterable, Optional, Sequence
 
 import h5py
@@ -85,7 +86,7 @@ def _spectra_from_frames(
     if values.ndim != 3:
         raise ValueError(f"Expected [frame, y, x] frames, got shape {values.shape}.")
     start, stop = _validate_y_range(y_range, values.shape[1])
-    return values[:, start:stop, :].astype(np.float64).sum(axis=1)
+    return np.sum(values[:, start:stop, :], axis=1, dtype=np.float64)
 
 
 def compute_spectral_covariance(
@@ -201,6 +202,7 @@ def compute_spectral_covariance_from_scan(
     input_path: str | Path,
     y_range: Optional[tuple[int, int]] = None,
     batch_size: int = 4,
+    *, spectra_block_frames: int = 256,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     """Stream one completed scan step or matching step files into x-x covariance.
 
@@ -212,6 +214,12 @@ def compute_spectral_covariance_from_scan(
     files = _source_files(path)
     if batch_size < 1:
         raise ValueError("batch_size must be >= 1.")
+    if spectra_block_frames < 1:
+        raise ValueError("spectra_block_frames must be >= 1.")
+    started = time.perf_counter()
+    reduction_s = matrix_s = 0.0
+    pending = []
+    pending_count = 0
 
     first_metadata: Optional[dict[str, Any]] = None
     first_shape: Optional[tuple[int, int, int]] = None
@@ -232,10 +240,25 @@ def compute_spectral_covariance_from_scan(
         assert accumulator is not None and selected_y_range is not None
         y_start, y_stop = selected_y_range
         for batch in iter_scan_step_frames(source, batch_size=batch_size):
-            accumulator.update(batch[:, y_start:y_stop, :].astype(np.float64).sum(axis=1))
+            began = time.perf_counter()
+            spectra = np.sum(batch[:, y_start:y_stop, :], axis=1, dtype=np.float64)
+            reduction_s += time.perf_counter() - began
+            for offset in range(0, len(spectra), spectra_block_frames):
+                part = spectra[offset:offset+spectra_block_frames]
+                pending.append(part)
+                pending_count += len(part)
+                if pending_count >= spectra_block_frames:
+                    began = time.perf_counter()
+                    accumulator.update(np.concatenate(pending, axis=0))
+                    matrix_s += time.perf_counter() - began
+                    pending, pending_count = [], 0
         source_metadata.append(metadata)
 
     assert accumulator is not None and first_metadata is not None and first_shape is not None
+    if pending:
+        began = time.perf_counter()
+        accumulator.update(np.concatenate(pending, axis=0))
+        matrix_s += time.perf_counter() - began
     covariance = accumulator.finalize()
     roi = first_metadata.get("roi_bounds")
     if roi is not None and len(roi) == 4:
@@ -249,8 +272,48 @@ def compute_spectral_covariance_from_scan(
         "image_shape_yx": [first_shape[1], first_shape[2]],
         "y_range_local": list(selected_y_range or (0, first_shape[1])),
         "x_pixel_indices": np.arange(x_start, x_start + first_shape[2], dtype=np.int64),
+        "spectra_block_frames": int(spectra_block_frames),
+        "timing_s": {"y_sum": reduction_s, "matrix_updates": matrix_s,
+                     "read_and_compute_total": time.perf_counter()-started},
     }
     return covariance, accumulator.mean.copy(), summary
+
+
+def covariance_to_pearson(covariance: np.ndarray) -> np.ndarray:
+    """Normalize derived covariance to Pearson r; constant pixels remain NaN.
+
+    This only transforms a newly computed analysis matrix, never acquired pixels.
+    Roundoff is bounded to [-1,1]; valid diagonal entries are exactly one.
+    """
+    matrix = np.asarray(covariance, dtype=np.float64)
+    if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
+        raise ValueError("Covariance must be a square matrix.")
+    variance = np.diag(matrix)
+    valid = np.isfinite(variance) & (variance > 0)
+    inverse_std = np.zeros_like(variance)
+    inverse_std[valid] = 1 / np.sqrt(variance[valid])
+    result = matrix * inverse_std[:, None] * inverse_std[None, :]
+    np.clip(result, -1, 1, out=result)
+    result[~valid, :] = np.nan
+    result[:, ~valid] = np.nan
+    indices = np.flatnonzero(valid)
+    result[indices, indices] = 1.0
+    return result
+
+
+def compute_spectral_pearson_from_scan(
+    input_path: str | Path, y_range: Optional[tuple[int, int]] = None,
+    batch_size: int = 4, *, spectra_block_frames: int = 256,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """Read immutable scan frames and return derived x-pixel Pearson correlations."""
+    covariance, mean, summary = compute_spectral_covariance_from_scan(
+        input_path, y_range, batch_size, spectra_block_frames=spectra_block_frames,
+    )
+    began = time.perf_counter()
+    correlation = covariance_to_pearson(covariance)
+    summary['timing_s']['pearson_normalization'] = time.perf_counter()-began
+    summary['undefined_constant_pixels'] = int(np.sum(~np.isfinite(np.diag(correlation))))
+    return correlation, mean, summary
 
 
 def load_mean_snapshot(filepath: str | Path, batch_size: int = 16) -> tuple[np.ndarray, dict[str, Any]]:
