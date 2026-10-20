@@ -63,6 +63,7 @@ def _si_outputs(args) -> int:
     summary, axis = plt.subplots(figsize=(9, 5), constrained_layout=True)
     summary.canvas.manager.set_window_title("Harmonic g²")
     available = [h for h in result["harmonics"] if h["fit"]["g2_light"] is not None]
+    available.sort(key=lambda h: h['order'])
     axis.plot([h["order"] for h in available], [h["fit"]["g2_light"] for h in available], "o")
     axis.set(xlabel="Harmonic order", ylabel="Estimated light g²", title="Harmonic g²")
     axis.grid(True, alpha=.2)

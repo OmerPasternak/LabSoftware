@@ -143,18 +143,30 @@ def test_marker_detects_reviews_and_replaces_only_on_confirm(tmp_path, monkeypat
     spec = importlib.util.spec_from_file_location("test_harmonic_marker", script)
     marker = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(marker)
+    monkeypatch.setattr(marker.QInputDialog, 'getItem', lambda *args: ('P1', True))
+    monkeypatch.setattr(marker.QInputDialog, 'getInt', lambda *args: (11, True))
     def cancel(**kwargs):
         plt.close(plt.gcf())
     monkeypatch.setattr(plt, "show", cancel)
     assert marker.main([str(source)]) == 0
     assert target.read_text() == "old reference"
     def confirm(**kwargs):
+        from PyQt6.QtWidgets import QLineEdit, QDoubleSpinBox
         figure = plt.gcf()
+        window = figure.canvas.manager.window
+        assert not window.findChildren(QLineEdit)
+        assert not window.findChildren(QDoubleSpinBox)
+        assert not any(p.get_visible() for p in figure.axes[0].patches)
+        light, dark = figure.axes[0].lines[:2]
+        assert not np.any(np.isfinite(light.get_ydata()) & np.isfinite(dark.get_ydata()))
         figure.canvas.callbacks.process("key_press_event", KeyEvent("key_press_event", figure.canvas, key="enter"))
     monkeypatch.setattr(plt, "show", confirm)
     assert marker.main([str(source)]) == 0
     saved = load_harmonic_regions(target)
     assert len(saved["harmonics"]) == 2
+    assert [r['peak_index'] for r in saved['harmonics']] == [1, 2]
+    assert [r['order'] for r in saved['harmonics']] == [11., 11.5]
+    assert saved['harmonics'][0]['x_start'] > saved['harmonics'][1]['x_start']
     assert saved["detection"]["visually_confirmed"]
     assert Path(saved["annotated_snapshot_png"]).stat().st_size > 0
 
@@ -199,3 +211,35 @@ def test_result_window_is_visible_and_show_blocks_child_process(monkeypatch):
         assert calls == [True]
     finally:
         plt.close(figure)
+
+
+@pytest.mark.parametrize('height,amplitude,shots', [(2160,3500,1), (2160,5800,8), (128,3500,8)])
+def test_detector_rejects_spatially_uniform_background_ripples(height, amplitude, shots):
+    """Full-height y sums previously returned 24-27 peaks for eleven lines."""
+    from hhg_control.drivers.mock_camera import MockPcoCamera
+    camera = MockPcoCamera()
+    camera.connect()
+    try:
+        start=(camera.HEIGHT-height)//2
+        signal=camera._gaussian_profile[start:start+height]*amplitude
+        rng=np.random.default_rng(12)
+        image=(camera._dark_bank[:min(4,shots),start:start+height].mean(axis=0)
+               +signal+rng.normal(size=signal.shape)*np.sqrt(signal+36)/np.sqrt(shots))
+        regions, details=detect_harmonic_regions(image)
+        assert len(regions) == len(camera.SPECTRAL_PEAKS)
+        for center, _, _ in camera.SPECTRAL_PEAKS:
+            assert any(r['x_start'] <= center < r['x_stop'] for r in regions)
+        assert 'projection' in details['detection_spectrum']
+    finally:
+        camera.close()
+
+
+def test_half_omega_orders_follow_one_odd_reference_right_to_left():
+    from hhg_control.analysis.spectral import calibrate_harmonic_orders
+    regions=[dict(label='a',x_start=0,x_stop=5), dict(label='b',x_start=15,x_stop=20),
+             dict(label='c',x_start=50,x_stop=60)]
+    mapped=calibrate_harmonic_orders(regions, reference_peak_index=2, odd_order=13)
+    assert [r['x_start'] for r in mapped] == [50,15,0]
+    assert [r['order'] for r in mapped] == [12.5,13,13.5]
+    with pytest.raises(ValueError, match='odd'):
+        calibrate_harmonic_orders(regions, 2, 12)

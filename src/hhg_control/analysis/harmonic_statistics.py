@@ -112,7 +112,7 @@ def compute_si_harmonic_g2(
     harmonic_map = load_harmonic_regions(harmonic_map_path)
     regions = harmonic_map["harmonics"]
     if any("order" not in r for r in regions):
-        raise ValueError("Enter the actual harmonic orders in Mark Harmonics and save before SI analysis.")
+        raise ValueError("Physical harmonic-family calibration is missing. Run Mark Harmonics and identify one known odd reference peak when saving the map.")
     warnings = []
     headers = [_read_source_metadata(path) for path in paths]
     for path, (metadata, shape) in zip(paths, headers):

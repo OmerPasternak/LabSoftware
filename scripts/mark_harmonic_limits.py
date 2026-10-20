@@ -10,12 +10,13 @@ matplotlib.use("QtAgg")
 import matplotlib.pyplot as plt
 from matplotlib.widgets import SpanSelector
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QApplication, QToolBar, QLabel, QDoubleSpinBox, QLineEdit, QPushButton
+from PyQt6.QtWidgets import QToolBar, QPushButton, QInputDialog
 import numpy as np
 
 from hhg_control.analysis.spectral import (
     default_harmonic_map_path, detect_harmonic_regions, load_mean_snapshot,
     save_harmonic_regions, validate_harmonic_regions,
+    calibrate_harmonic_orders,
 )
 from hhg_control.safe_io import unique_output
 from hhg_control.analysis.plot_windows import show_analysis_figures
@@ -44,19 +45,6 @@ def main(argv: list[str] | None = None) -> int:
     controls = QToolBar("Harmonic windows", window)
     controls.setMovable(False)
     window.addToolBar(Qt.ToolBarArea.BottomToolBarArea, controls)
-    controls.addWidget(QLabel("  Threshold "))
-    sensitivity = QDoubleSpinBox()
-    sensitivity.setRange(2.0, 12.0)
-    sensitivity.setSingleStep(0.5)
-    sensitivity.setValue(5.0)
-    sensitivity.setToolTip("Lower to detect weaker peaks. Replaces manual edits.")
-    controls.addWidget(sensitivity)
-    controls.addSeparator()
-    controls.addWidget(QLabel(" Orders "))
-    orders = QLineEdit()
-    orders.setPlaceholderText("Left to right: 11, 11.5, 12, ...")
-    orders.setMinimumWidth(260)
-    controls.addWidget(orders)
     save_button = QPushButton("Save")
     controls.addWidget(save_button)
     status = window.statusBar()
@@ -71,28 +59,24 @@ def main(argv: list[str] | None = None) -> int:
         for annotation in annotations:
             annotation.remove()
         annotations.clear()
-        shown = regions if preview is None else preview
+        shown = sorted(regions if preview is None else preview, key=lambda r: r['x_start'])
         selected = np.zeros(width, dtype=bool)
         for region in shown:
             selected[region["x_start"]:region["x_stop"]] = True
         x = np.arange(width)
-        light_line.set_data(x, spectrum)
+        light_line.set_data(x, np.where(~selected, spectrum, np.nan))
         dark_line.set_data(x, np.where(selected, spectrum, np.nan))
         for region in shown:
             a, b = region["x_start"], region["x_stop"]
-            annotations.append(axis.axvspan(a - 0.5, b - 0.5, color="#102d50", alpha=0.10))
-            annotations.append(axis.text((a+b-1)/2, spectrum[a:b].max(), region["label"], ha="center", fontsize=9))
+            # Peak index increases from right to left; never invent physical orders.
+            label = f"P{len(shown)-shown.index(region)}"
+            annotations.append(axis.text((a+b-1)/2, spectrum[a:b].max(), label, ha="center", fontsize=9))
         axis.set(xlabel="Pixel", ylabel="Signal (ADU)", xlim=(-0.5, width-0.5),
                  title=f"{len(shown)} peaks")
         axis.relim()
         axis.autoscale_view(scalex=False)
         status.showMessage(message or "Drag to add · Right-click to remove")
         figure.canvas.draw_idle()
-
-    def redetect(value):
-        nonlocal regions, detection
-        regions, detection = detect_harmonic_regions(image, threshold_sigma=float(value))
-        redraw()
 
     def select(a, b):
         nonlocal regions
@@ -121,18 +105,19 @@ def main(argv: list[str] | None = None) -> int:
         try:
             proposed = [dict(region) for region in regions]
             validate_harmonic_regions(proposed, width)
-            entered = orders.text().strip()
-            if entered:
-                order_values = [float(value.strip()) for value in entered.split(",")]
-                if len(order_values) != len(regions) or len(set(order_values)) != len(order_values):
-                    raise ValueError("Enter one unique harmonic order per window, separated by commas.")
-                for region, order in zip(proposed, order_values):
-                    region["order"] = order
-                    region["label"] = f"H{order:g}"
-                validate_harmonic_regions(proposed, width)
-            else:
-                for region in proposed:
-                    region.pop("order", None)
+            reference_label, accepted = QInputDialog.getItem(
+                window, "Odd harmonic reference", "Choose one known odd harmonic peak:",
+                [f"P{i}" for i in range(1, len(proposed)+1)], 0, False,
+            )
+            if not accepted:
+                return
+            odd_order, accepted = QInputDialog.getInt(
+                window, "Odd harmonic reference", "Its odd harmonic order:", 11, 1, 999, 2,
+            )
+            if not accepted:
+                return
+            reference_index = int(reference_label[1:])
+            proposed = calibrate_harmonic_orders(proposed, reference_index, odd_order)
             redraw("Confirmed reference windows.", proposed)
             output.parent.mkdir(parents=True, exist_ok=True)
             snapshot = unique_output(output.with_name("harmonics_review.png"))
@@ -140,7 +125,11 @@ def main(argv: list[str] | None = None) -> int:
             save_harmonic_regions(output, proposed, args.input, image.shape,
                                   roi_bounds=metadata.get("roi_bounds"),
                                   annotated_snapshot_path=snapshot, overwrite=True,
-                                  detection={**detection, "visually_confirmed": True})
+                                  detection={**detection, "visually_confirmed": True,
+                                             "order_reference_peak_index": reference_index,
+                                             "order_reference_odd_order": odd_order,
+                                             "assumed_order_spacing_omega": .5,
+                                             "assumes_complete_peak_sequence": True})
             saved = True
             save_error = False
             print(f"Saved {len(regions)} windows as the persistent default: {output}", flush=True)
@@ -152,15 +141,12 @@ def main(argv: list[str] | None = None) -> int:
             redraw(f"Cannot save: {exc}")
 
     def key(event):
-        if isinstance(QApplication.focusWidget(), QLineEdit):
-            return
         if event.key in {"enter", "s"}:
             save()
         elif event.key in {"escape", "q"}:
             plt.close(figure)
 
     selector = SpanSelector(axis, select, "horizontal", useblit=True, button=1)
-    sensitivity.valueChanged.connect(redetect)
     save_button.clicked.connect(save)
     figure.canvas.mpl_connect("button_press_event", remove)
     figure.canvas.mpl_connect("key_press_event", key)

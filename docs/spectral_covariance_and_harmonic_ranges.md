@@ -33,28 +33,29 @@ connects to the camera or changes acquisition settings. One saved integrated
 frame is also a valid marking input. The reference should include all harmonics
 of interest (normally BSV ON); a coherent-only image cannot reveal absent peaks.
 
-The review graph shows selected signal in dark blue and the gaps in light gray.
-The detector uses a rolling lower-quantile baseline, robust noise estimation,
+The review graph colors the line itself: dark blue inside selected windows, light gray outside. There are no background strips.
+When the image has a clear vertical spectral trace, detection uses a zero-sum spatial projection to reject column-dependent background common to all rows. Cropped/flat traces fall back to a y sum. This affects detection only: the graph still displays the raw y-integrated spectrum, and saved pixels are unchanged. The detector then uses a rolling lower-quantile baseline, robust noise estimation,
 local prominence and noise-limited tails. It deliberately does not threshold
 relative to the strongest peak, which could remove weak even/half-integer peaks.
 Noise and overlapping tails prevent a guarantee of complete, noise-free windows.
-There is no equal-spacing assumption or automatic harmonic-order assignment.
+No uniform detector-pixel spacing is assumed. Physical harmonic orders are assigned from one user-confirmed odd reference, assuming consecutive half-omega steps as specified for this experiment.
 
-- Adjust **Threshold** to re-detect (lower values retain weaker features but
-  increase false positives). Changing it replaces all current manual edits.
+- Significance is the hidden `HARMONIC_SIGNIFICANCE_SIGMA = 5.0` constant.
 - Drag across x to add a missing window or replace overlapping windows.
 - Right-click a window to remove it. Check weak peaks, tails and hot-pixel artifacts.
-- Enter the actual harmonic orders **from left to right**, comma-separated,
-  for example `11,11.5,12,12.5,13` (reverse if dispersion runs the other way).
-  Pixel locations alone cannot establish order. This field is required for the
-  corrected g2 analysis, which must distinguish odd orders from the other families.
-- Click **Confirm and save** or Enter. Escape cancels and preserves the old map.
+- Click **Save** (or Enter on the plot), identify one labelled peak known to be
+  an odd harmonic, and enter its odd order. All other orders are inferred at
+  0.5-omega intervals, increasing from right to left. No per-peak number entry.
+  Ensure no intermediate window is missing or spurious: that would shift the
+  inferred family and therefore the SI reference selection.
+- Escape cancels and preserves the old map. Cancelling reference entry also
+  leaves the previous map unchanged.
 
 The single default reference is `%LOCALAPPDATA%/HHGControl/harmonics.json` on
 Windows. The confirmed map survives restarts and is reused automatically until
 Mark Harmonics saves a replacement. An atomic replacement preserves the previous
 map if saving fails. It records the source, shape, ROI when available, detection
-parameters, optional orders, review flag and review image path. Runtime reference
+parameters, right-to-left peak indices, inferred orders, odd-reference calibration, review flag and review image path. Runtime reference
 files are machine/user-specific calibration, outside Git, not shared defaults.
 `HHG_HARMONIC_MAP` overrides its path; the marker CLI also accepts `--output`.
 
@@ -119,7 +120,7 @@ it includes cross-pixel covariance and is not the MCP-calibrated light estimate.
 
 This is the SI's model-based estimate, not an unconditional measurement of the
 light's exact photon statistics. It assumes linear unsaturated detection, a
-nearly constant detector-response coefficient and common light g2 across the
+complete half-omega peak sequence, a nearly constant detector-response coefficient and common light g2 across the
 fitted pixels, and uncorrelated additive signal/background. Detector pixels
 share shot fluctuations; ordinary regression error bars would overstate
 precision. No confidence interval is assigned until an appropriate shot/block
@@ -156,13 +157,21 @@ Close plot windows to finish the analysis child process; the camera GUI stays
 responsive. CLI automation can pass `--no-show` to harmonic g2, or `--no-plot`
 to covariance. GUI buttons show plots by default.
 
-The harmonic marker uses native Threshold, Orders and Save controls outside
-the plot. Dark signal and pale gaps mark the proposed windows; drag to edit and
-right-click to remove a window. Actual harmonic orders must still be entered
-once for SI reference selection.
+The harmonic marker has a native Save button; significance is hidden and one odd-reference calibration is requested on save. Dark and pale line segments mark the proposed windows; drag to edit and
+right-click to remove a window. The single odd reference fixes the remaining half-omega orders for SI reference selection.
 
 Simulated acquisition now produces eleven separated spectral lines with unequal
 widths and spacings, a strength ratio exceeding 160:1, shot/read noise and a
 structured sloping background. This stresses weak-peak detection and covariance
 viewing. It is synthetic test data, not a calibrated BSV/MCP statistics model.
 The bounded simulation buffer and all physical-camera settings are unchanged.
+
+The former full-height detector could mistake coherent background ripples for
+additional peaks: they grow with the number of summed rows while independent
+noise grows more slowly. Spatial background rejection addresses that source,
+without imposing a peak count of eleven. Test fixtures recover all eleven lines
+for full-height simulated references and averaged narrow ROIs. Very weak single
+shots can still miss a line. Spatial projection assumes a shared nonuniform
+vertical trace and uniform-in-y additive background; review tilted or changing
+trace shapes. The hidden sigma threshold is a robust detection heuristic, not
+an exact false-discovery probability.

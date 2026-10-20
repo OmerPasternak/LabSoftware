@@ -292,6 +292,11 @@ def validate_harmonic_regions(
             )
         labels.add(label)
         region = {"label": label, "x_start": start, "x_stop": stop}
+        if item.get("peak_index") is not None:
+            index = int(item["peak_index"])
+            if index < 1 or index != item["peak_index"]:
+                raise ValueError("Peak index must be a positive integer.")
+            region["peak_index"] = index
         if item.get("order") is not None:
             order = float(item["order"])
             if not np.isfinite(order) or order <= 0 or not np.isclose(
@@ -312,6 +317,11 @@ def validate_harmonic_regions(
             raise ValueError(
                 f"Harmonic ranges {previous['label']!r} and {current['label']!r} overlap."
             )
+    if all("peak_index" in item for item in validated):
+        indices = [item["peak_index"] for item in validated]
+        if sorted(indices) != list(range(1, len(validated)+1)):
+            raise ValueError("Peak indices must form the sequence 1, 2, ... without duplicates.")
+        validated.sort(key=lambda item: item["peak_index"])
     return validated
 
 
@@ -351,6 +361,7 @@ def save_harmonic_regions(
         "x_axis": "detector x pixel (frequency/wavelength dispersion; no calibration applied)",
         "range_convention": "zero-based, half-open [x_start, x_stop), relative to /images",
         "harmonics": selected,
+        "peak_sequence": "right to left" if all("peak_index" in item for item in selected) else None,
         "detection": detection,
     }
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -397,8 +408,34 @@ def default_harmonic_map_path() -> Path:
     return root / "HHGControl" / "harmonics.json"
 
 
+HARMONIC_SIGNIFICANCE_SIGMA = 5.0  # Agent-editable; intentionally not a GUI control.
+
+
+def calibrate_harmonic_orders(
+    regions: Sequence[dict[str, Any]], reference_peak_index: int, odd_order: int,
+) -> list[dict[str, Any]]:
+    """Assign increasing half-omega orders right-to-left from one known odd line.
+
+    The user confirms that no intermediate harmonic is missing or spurious.
+    Pixel spacing is not assumed uniform. Peak 1 is the rightmost window.
+    """
+    if not regions:
+        raise ValueError("Mark at least one peak before calibration.")
+    if int(odd_order) != odd_order or odd_order < 1 or odd_order % 2 != 1:
+        raise ValueError("The reference harmonic order must be a positive odd integer.")
+    if not 1 <= reference_peak_index <= len(regions) or int(reference_peak_index) != reference_peak_index:
+        raise ValueError("Choose a reference peak in the displayed sequence.")
+    selected = sorted((dict(region) for region in regions), key=lambda r: r['x_start'], reverse=True)
+    for index, region in enumerate(selected, 1):
+        order = float(odd_order + .5*(index-reference_peak_index))
+        if order <= 0:
+            raise ValueError("Reference would assign a nonpositive harmonic order.")
+        region.update(label=f"P{index}", peak_index=index, order=order)
+    return selected
+
+
 def detect_harmonic_regions(
-    image: np.ndarray, *, threshold_sigma: float = 5.0, smooth_pixels: int = 5,
+    image: np.ndarray, *, threshold_sigma: float = HARMONIC_SIGNIFICANCE_SIGMA, smooth_pixels: int = 5,
     baseline_pixels: Optional[int] = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Propose disjoint spectral windows from a y-integrated reference image.
@@ -423,6 +460,22 @@ def detect_harmonic_regions(
     if span < 3:
         raise ValueError("baseline_pixels must be >= 3.")
     spectrum = values.sum(axis=0)
+    extraction = "y sum"
+    # A column-dependent background can be coherent over thousands of rows:
+    # summing it does not average it away. Separate its spatially uniform term
+    # from a visibly nonuniform spectral trace using zero-sum matched weights.
+    # This changes detection only; the displayed spectrum and saved pixels stay raw.
+    if values.shape[0] >= 32:
+        trace = np.quantile(values, .98, axis=1) - np.quantile(values, .2, axis=1)
+        trace = np.convolve(np.pad(trace, 4, mode="edge"), np.ones(9)/9, mode="valid")
+        peak_trace = float(np.max(trace))
+        if peak_trace > 0:
+            profile = trace / peak_trace
+            centered = profile - profile.mean()
+            if np.std(centered) >= .03:
+                weights = centered / np.dot(centered, centered)
+                spectrum = weights @ values
+                extraction = "zero-sum spatial trace projection (uniform background rejected)"
     # Median suppresses isolated hot pixels without setting a global intensity cutoff.
     median = np.median(np.lib.stride_tricks.sliding_window_view(
         np.pad(spectrum, 1, mode="edge"), 3), axis=-1)
@@ -434,6 +487,8 @@ def detect_harmonic_regions(
     residual = np.maximum(0.0, filtered - baseline)
     differences = np.diff(spectrum)
     noise = float(np.median(np.abs(differences - np.median(differences))) / (0.67448975 * np.sqrt(2)))
+    if extraction != "y sum":
+        noise /= np.sqrt(smooth)  # Moving-average noise scale for projected samples.
     noise = max(noise, float(np.max(np.abs(spectrum))) * 1e-10, 1e-12)
     candidates = np.flatnonzero((residual[1:-1] > residual[:-2]) &
                                (residual[1:-1] >= residual[2:])) + 1
@@ -470,10 +525,11 @@ def detect_harmonic_regions(
     details = {
         "method": "rolling 20th-percentile baseline; robust noise/prominence; noise-limited tails",
         "threshold_sigma": float(threshold_sigma), "smooth_pixels": smooth,
-        "baseline_pixels": span, "noise_sigma_summed_adu": noise,
+        "baseline_pixels": span, "noise_sigma_detection_adu": noise,
         "tail_cutoff": "max(2 * noise_sigma, 0.005 * local_peak_height)",
         "labels": "P1, P2,... identify detected peaks, not physical harmonic orders",
         "requires_visual_review": True,
+        "detection_spectrum": extraction,
     }
     return regions, details
 
