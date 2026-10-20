@@ -434,9 +434,21 @@ def calibrate_harmonic_orders(
     return selected
 
 
+def is_simulated_spectral_source(metadata: dict[str, Any]) -> bool:
+    """Identify saved mock-camera data positively; unknown/legacy data stay physical.
+
+    Use the recorded file identity, never the current GUI mode or filename.
+    This keeps simulation-specific segmentation out of real/unknown data.
+    """
+    serial = str(metadata.get("camera_serial", metadata.get("camera_hardware_serial_number", "")))
+    model = str(metadata.get("camera_model", metadata.get("camera_manufacturer_and_model", "")))
+    return serial == "MOCK-EDGE-5501" and "EMULATOR" in model.upper()
+
+
 def detect_harmonic_regions(
     image: np.ndarray, *, threshold_sigma: float = HARMONIC_SIGNIFICANCE_SIGMA, smooth_pixels: int = 5,
     baseline_pixels: Optional[int] = None,
+    reject_uniform_background: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Propose disjoint spectral windows from a y-integrated reference image.
 
@@ -445,6 +457,8 @@ def detect_harmonic_regions(
     than a fraction of the strongest peak (which would hide weak harmonics).
     This is a reviewable segmentation, not harmonic-order identification or
     evidence that sub-noise features are absent. All inputs are saved with the map.
+    Physical/unknown data keep the default y sum. The marker enables optional
+    spatial background rejection only for positively identified simulated files.
     """
     values = np.asarray(image, dtype=np.float64)
     if values.ndim != 2 or values.shape[1] < 9 or not np.all(np.isfinite(values)):
@@ -465,7 +479,7 @@ def detect_harmonic_regions(
     # summing it does not average it away. Separate its spatially uniform term
     # from a visibly nonuniform spectral trace using zero-sum matched weights.
     # This changes detection only; the displayed spectrum and saved pixels stay raw.
-    if values.shape[0] >= 32:
+    if reject_uniform_background and values.shape[0] >= 32:
         trace = np.quantile(values, .98, axis=1) - np.quantile(values, .2, axis=1)
         trace = np.convolve(np.pad(trace, 4, mode="edge"), np.ones(9)/9, mode="valid")
         peak_trace = float(np.max(trace))
@@ -530,6 +544,7 @@ def detect_harmonic_regions(
         "labels": "P1, P2,... identify detected peaks, not physical harmonic orders",
         "requires_visual_review": True,
         "detection_spectrum": extraction,
+        "uniform_background_rejection_enabled": bool(reject_uniform_background),
     }
     return regions, details
 

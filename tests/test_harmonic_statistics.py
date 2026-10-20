@@ -225,7 +225,7 @@ def test_detector_rejects_spatially_uniform_background_ripples(height, amplitude
         rng=np.random.default_rng(12)
         image=(camera._dark_bank[:min(4,shots),start:start+height].mean(axis=0)
                +signal+rng.normal(size=signal.shape)*np.sqrt(signal+36)/np.sqrt(shots))
-        regions, details=detect_harmonic_regions(image)
+        regions, details=detect_harmonic_regions(image, reject_uniform_background=True)
         assert len(regions) == len(camera.SPECTRAL_PEAKS)
         for center, _, _ in camera.SPECTRAL_PEAKS:
             assert any(r['x_start'] <= center < r['x_stop'] for r in regions)
@@ -243,3 +243,21 @@ def test_half_omega_orders_follow_one_odd_reference_right_to_left():
     assert [r['order'] for r in mapped] == [12.5,13,13.5]
     with pytest.raises(ValueError, match='odd'):
         calibrate_harmonic_orders(regions, 2, 12)
+
+
+def test_background_rejection_is_simulation_only_and_unknown_data_are_physical():
+    from hhg_control.analysis.spectral import is_simulated_spectral_source
+    assert is_simulated_spectral_source(dict(camera_serial='MOCK-EDGE-5501', camera_model='pco.edge 5.5 USB (EMULATOR)'))
+    assert not is_simulated_spectral_source({})
+    assert not is_simulated_spectral_source(dict(camera_serial='61008541', camera_model='pco.edge 5.5'))
+    assert not is_simulated_spectral_source(dict(camera_serial='61008541', camera_model='EMULATOR'))
+    assert not is_simulated_spectral_source(dict(camera_serial='MOCK-EDGE-5501'))
+    y,x=np.ogrid[:128,:200]
+    image=100+1000*np.exp(-.5*((y-64)/15)**2)*np.exp(-.5*((x-90)/8)**2)
+    default, info=detect_harmonic_regions(image)
+    physical, physical_info=detect_harmonic_regions(image, reject_uniform_background=False)
+    assert default == physical
+    assert info == physical_info
+    assert info['detection_spectrum'] == 'y sum'
+    _, simulated_info=detect_harmonic_regions(image, reject_uniform_background=True)
+    assert 'projection' in simulated_info['detection_spectrum']

@@ -17,6 +17,7 @@ from hhg_control.analysis.spectral import (
     default_harmonic_map_path, detect_harmonic_regions, load_mean_snapshot,
     save_harmonic_regions, validate_harmonic_regions,
     calibrate_harmonic_orders,
+    is_simulated_spectral_source,
 )
 from hhg_control.safe_io import unique_output
 from hhg_control.analysis.plot_windows import show_analysis_figures
@@ -31,7 +32,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         print("Loading saved frames and detecting peaks...", flush=True)
         image, metadata = load_mean_snapshot(args.input)
-        regions, detection = detect_harmonic_regions(image)
+        regions, detection = detect_harmonic_regions(
+            image, reject_uniform_background=is_simulated_spectral_source(metadata),
+        )
     except Exception as exc:
         print(f"[ERROR] Could not detect harmonics: {exc}", file=sys.stderr)
         return 1

@@ -34,7 +34,7 @@ frame is also a valid marking input. The reference should include all harmonics
 of interest (normally BSV ON); a coherent-only image cannot reveal absent peaks.
 
 The review graph colors the line itself: dark blue inside selected windows, light gray outside. There are no background strips.
-When the image has a clear vertical spectral trace, detection uses a zero-sum spatial projection to reject column-dependent background common to all rows. Cropped/flat traces fall back to a y sum. This affects detection only: the graph still displays the raw y-integrated spectrum, and saved pixels are unchanged. The detector then uses a rolling lower-quantile baseline, robust noise estimation,
+Only for positively identified saved mock-camera data, when the image has a clear vertical spectral trace, detection uses a zero-sum spatial projection to reject column-dependent background common to all rows. Cropped/flat traces fall back to a y sum. This affects detection only: the graph still displays the raw y-integrated spectrum, and saved pixels are unchanged. The detector then uses a rolling lower-quantile baseline, robust noise estimation,
 local prominence and noise-limited tails. It deliberately does not threshold
 relative to the strongest peak, which could remove weak even/half-integer peaks.
 Noise and overlapping tails prevent a guarantee of complete, noise-free windows.
@@ -175,3 +175,14 @@ shots can still miss a line. Spatial projection assumes a shared nonuniform
 vertical trace and uniform-in-y additive background; review tilted or changing
 trace shapes. The hidden sigma threshold is a robust detection heuristic, not
 an exact false-discovery probability.
+
+## Physical-data isolation
+
+Physical and unknown/legacy data always use the original y-summed detection
+path, with no spatial background rejection. The newer background projection is
+restricted to files recording both the known mock serial `MOCK-EDGE-5501` and an
+`EMULATOR` model. The current GUI source selection and filename are never used
+to decide this: a real saved file analyzed while the GUI is in simulation still
+uses physical-data processing. Display, hidden significance and single-odd-line
+half-omega calibration apply to both sources. Acquisition and g2 pixel statistics
+are unchanged.

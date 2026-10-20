@@ -136,7 +136,7 @@ def test_mock_spectrum_has_separated_bright_weak_peaks_and_noise():
         camera.set_exposure_time(.001)
         frames, metadata = camera.acquire_frames(8)
         mean_image = frames.mean(axis=0)
-        regions, _ = detect_harmonic_regions(mean_image)
+        regions, _ = detect_harmonic_regions(mean_image, reject_uniform_background=True)
         for center in (240, 655, 830, 1040, 1595, 2005, 2240):
             assert any(r['x_start'] <= center < r['x_stop'] for r in regions)
         spectrum = mean_image.sum(axis=0)
