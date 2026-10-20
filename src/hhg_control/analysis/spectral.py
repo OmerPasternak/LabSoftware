@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
+import tempfile
 from typing import Any, Iterable, Optional, Sequence
 
 import h5py
@@ -276,6 +278,7 @@ def validate_harmonic_regions(
     """Validate and sort named `[x_start, x_stop)` ranges against image width."""
     validated: list[dict[str, Any]] = []
     labels: set[str] = set()
+    orders: set[float] = set()
     for item in regions:
         label = str(item.get("label", "")).strip()
         start, stop = int(item["x_start"]), int(item["x_stop"])
@@ -288,7 +291,19 @@ def validate_harmonic_regions(
                 f"Harmonic {label!r} must satisfy 0 <= x_start < x_stop <= {width}."
             )
         labels.add(label)
-        validated.append({"label": label, "x_start": start, "x_stop": stop})
+        region = {"label": label, "x_start": start, "x_stop": stop}
+        if item.get("order") is not None:
+            order = float(item["order"])
+            if not np.isfinite(order) or order <= 0 or not np.isclose(
+                order * 2, round(order * 2), rtol=0, atol=1e-9
+            ):
+                raise ValueError("Harmonic order must be a positive integer or half-integer.")
+            order = round(order * 2) / 2
+            if order in orders:
+                raise ValueError(f"Harmonic order {order:g} is duplicated.")
+            orders.add(order)
+            region["order"] = order
+        validated.append(region)
     if not validated:
         raise ValueError("Mark at least one harmonic range before saving.")
     validated.sort(key=lambda item: item["x_start"])
@@ -307,15 +322,19 @@ def save_harmonic_regions(
     image_shape_yx: tuple[int, int],
     roi_bounds: Optional[Sequence[int]] = None,
     annotated_snapshot_path: Optional[str | Path] = None,
+    *,
+    overwrite: bool = False,
+    detection: Optional[dict[str, Any]] = None,
 ) -> Path:
     """Save harmonic boundaries as a JSON sidecar for later per-harmonic analysis.
 
     Pixel ranges are zero-based and half-open, relative to the `/images` x axis.
     The stored dimensions and ROI allow downstream tools to detect mismatches.
-    Existing sidecars are never overwritten.
+    Existing sidecars are preserved unless overwrite=True explicitly requests
+    an atomic replacement of the persistent reference map.
     """
     output = Path(output_path)
-    if output.exists():
+    if output.exists() and not overwrite:
         raise FileExistsError(f"Refusing to overwrite existing harmonic map: {output}")
     height, width = map(int, image_shape_yx)
     selected = validate_harmonic_regions(regions, width)
@@ -332,8 +351,25 @@ def save_harmonic_regions(
         "x_axis": "detector x pixel (frequency/wavelength dispersion; no calibration applied)",
         "range_convention": "zero-based, half-open [x_start, x_stop), relative to /images",
         "harmonics": selected,
+        "detection": detection,
     }
     output.parent.mkdir(parents=True, exist_ok=True)
+    if overwrite:
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=output.parent, suffix=".tmp", delete=False
+            ) as handle:
+                temporary = Path(handle.name)
+                json.dump(payload, handle, indent=2, ensure_ascii=False)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, output)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        return output
     created = False
     try:
         with output.open("x", encoding="utf-8", newline="\n") as handle:
@@ -346,6 +382,100 @@ def save_harmonic_regions(
             output.unlink()
         raise
     return output
+
+
+def default_harmonic_map_path() -> Path:
+    """Return the per-user persistent reference, independent of acquisition folders.
+
+    Runtime calibration is deliberately outside Git and survives GUI restarts.
+    The environment override supports isolated offline tests and portable setups.
+    """
+    override = os.environ.get("HHG_HARMONIC_MAP")
+    if override:
+        return Path(override).expanduser()
+    root = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / ".config")))
+    return root / "HHGControl" / "harmonics.json"
+
+
+def detect_harmonic_regions(
+    image: np.ndarray, *, threshold_sigma: float = 5.0, smooth_pixels: int = 5,
+    baseline_pixels: Optional[int] = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Propose disjoint spectral windows from a y-integrated reference image.
+
+    A rolling lower quantile estimates a slowly varying background. Robust
+    first-difference noise controls peak significance and tail cutoffs, rather
+    than a fraction of the strongest peak (which would hide weak harmonics).
+    This is a reviewable segmentation, not harmonic-order identification or
+    evidence that sub-noise features are absent. All inputs are saved with the map.
+    """
+    values = np.asarray(image, dtype=np.float64)
+    if values.ndim != 2 or values.shape[1] < 9 or not np.all(np.isfinite(values)):
+        raise ValueError("Detection requires a finite [y,x] image at least 9 pixels wide.")
+    if not np.isfinite(threshold_sigma) or threshold_sigma < 2:
+        raise ValueError("threshold_sigma must be finite and >= 2.")
+    width = values.shape[1]
+    smooth = int(smooth_pixels)
+    if smooth < 1 or smooth > width or smooth % 2 == 0:
+        raise ValueError("smooth_pixels must be odd and between 1 and image width.")
+    span = int(baseline_pixels or max(31, width // 12))
+    span = min(span | 1, width if width % 2 else width - 1)
+    if span < 3:
+        raise ValueError("baseline_pixels must be >= 3.")
+    spectrum = values.sum(axis=0)
+    # Median suppresses isolated hot pixels without setting a global intensity cutoff.
+    median = np.median(np.lib.stride_tricks.sliding_window_view(
+        np.pad(spectrum, 1, mode="edge"), 3), axis=-1)
+    filtered = np.convolve(np.pad(median, smooth // 2, mode="edge"),
+                           np.ones(smooth) / smooth, mode="valid")
+    windows = np.lib.stride_tricks.sliding_window_view(
+        np.pad(filtered, span // 2, mode="reflect"), span)
+    baseline = np.quantile(windows, 0.2, axis=-1)
+    residual = np.maximum(0.0, filtered - baseline)
+    differences = np.diff(spectrum)
+    noise = float(np.median(np.abs(differences - np.median(differences))) / (0.67448975 * np.sqrt(2)))
+    noise = max(noise, float(np.max(np.abs(spectrum))) * 1e-10, 1e-12)
+    candidates = np.flatnonzero((residual[1:-1] > residual[:-2]) &
+                               (residual[1:-1] >= residual[2:])) + 1
+    peaks = []
+    for peak in candidates:
+        left = max(0, peak - span // 2)
+        right = min(width, peak + span // 2 + 1)
+        # A shoulder ripple must fall to its adjacent valley before rising to
+        # a higher summit; distant baseline valleys must not promote it.
+        higher_left = np.flatnonzero(residual[left:peak] > residual[peak])
+        higher_right = np.flatnonzero(residual[peak + 1:right] > residual[peak])
+        if higher_left.size:
+            left += int(higher_left[-1])
+        if higher_right.size:
+            right = peak + 2 + int(higher_right[0])
+        prominence = residual[peak] - max(np.min(residual[left:peak + 1]),
+                                        np.min(residual[peak:right]))
+        if prominence >= threshold_sigma * noise:
+            peaks.append(int(peak))
+    regions = []
+    for index, peak in enumerate(peaks):
+        left_limit = 0 if index == 0 else (peaks[index - 1] + int(np.argmin(
+            residual[peaks[index - 1]:peak + 1]))) + 1
+        right_limit = width if index == len(peaks) - 1 else peak + int(np.argmin(
+            residual[peak:peaks[index + 1] + 1])) + 1
+        cutoff = max(2 * noise, residual[peak] * 0.005)
+        start, stop = peak, peak + 1
+        while start > left_limit and residual[start - 1] > cutoff:
+            start -= 1
+        while stop < right_limit and residual[stop] > cutoff:
+            stop += 1
+        if stop - start >= 3:
+            regions.append({"label": f"P{len(regions) + 1}", "x_start": start, "x_stop": stop})
+    details = {
+        "method": "rolling 20th-percentile baseline; robust noise/prominence; noise-limited tails",
+        "threshold_sigma": float(threshold_sigma), "smooth_pixels": smooth,
+        "baseline_pixels": span, "noise_sigma_summed_adu": noise,
+        "tail_cutoff": "max(2 * noise_sigma, 0.005 * local_peak_height)",
+        "labels": "P1, P2,... identify detected peaks, not physical harmonic orders",
+        "requires_visual_review": True,
+    }
+    return regions, details
 
 
 def load_harmonic_regions(

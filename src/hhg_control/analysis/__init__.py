@@ -16,6 +16,7 @@ from .spectral import (
     save_harmonic_regions,
     validate_harmonic_regions,
 )
+from .harmonic_statistics import compute_si_harmonic_g2
 
 __all__ = [
     "load_scan_step",
@@ -30,6 +31,7 @@ __all__ = [
     "compute_g2_from_scan",
     "StreamingSpectralCovariance",
     "compute_harmonic_g2_from_scan",
+    "compute_si_harmonic_g2",
     "compute_spectral_covariance",
     "compute_spectral_covariance_from_scan",
     "load_mean_snapshot",

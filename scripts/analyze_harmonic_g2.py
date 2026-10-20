@@ -1,4 +1,4 @@
-"""Compute temporal per-harmonic g2(0) for completed HDF5 camera steps."""
+"""Estimate SI MCP-corrected harmonic g2 from saved ON/OFF/background stacks."""
 
 from __future__ import annotations
 
@@ -17,6 +17,51 @@ import numpy as np
 
 from hhg_control.analysis import compute_harmonic_g2_from_scan
 from hhg_control.safe_io import unique_output
+from hhg_control.analysis.spectral import default_harmonic_map_path
+from hhg_control.analysis.harmonic_statistics import compute_si_harmonic_g2
+
+
+def _si_outputs(args) -> int:
+    """Save SI fit diagnostics and estimates without modifying acquisition data."""
+    if not args.input.is_file():
+        raise ValueError("SI mode needs one matched ON/OFF/BACKGROUND file set per delay, not a mixed folder.")
+    print("Analyzing saved ON/OFF/BACKGROUND frames (no camera connection)...", flush=True)
+    result = compute_si_harmonic_g2(args.input, args.bsv_off, args.background,
+                                  args.harmonic_map, batch_size=args.batch_size)
+    output = _output_directory(args.input)
+    base = output / f"{args.input.stem}_si_g2_{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}"
+    report = unique_output(base.with_suffix(".json"))
+    table = unique_output(base.with_suffix(".csv"))
+    plot = unique_output(base.with_suffix(".png"))
+    fig, axes = plt.subplots(len(result["harmonics"]), 1, figsize=(8, 3*len(result["harmonics"])),
+                             squeeze=False, constrained_layout=True)
+    rows = []
+    for axis, harmonic in zip(axes[:, 0], result["harmonics"]):
+        fit = harmonic["fit"]
+        x = np.array(fit.get("inverse_mean_adu", []))
+        y = np.array(fit.get("detected_g2", []))
+        axis.scatter(x, y, s=5, alpha=0.4)
+        if "unconstrained_intercept" in fit:
+            xx = np.linspace(0, x.max(), 100)
+            axis.plot(xx, fit["unconstrained_intercept"] + fit["mcp_coefficient_adu"]*xx)
+        axis.set(xlabel="Inverse net mean intensity (1/ADU)", ylabel="Background-corrected pixel g²",
+                 title=f"{harmonic['label']}: {fit['status']}; inferred light g² = {fit['g2_light']}")
+        rows.append(dict(harmonic=harmonic["label"], order=harmonic["order"],
+                         reference=harmonic["reference"], status=fit["status"], g2_light=fit["g2_light"],
+                         pixels_used=fit["pixels_used"], integrated_net_mean_adu=harmonic["integrated_net_mean_adu"],
+                         integrated_background_corrected_g2=harmonic["background_corrected_integrated_g2"]))
+    fig.savefig(plot, dpi=160)
+    plt.close(fig)
+    with report.open("x", encoding="utf-8") as handle:
+        json.dump(result, handle, indent=2, allow_nan=False)
+    with table.open("x", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"Saved SI estimates and fit diagnostics: {report}\n{table}\n{plot}", flush=True)
+    if any(h["fit"]["g2_light"] is None for h in result["harmonics"]):
+        print("[WARNING] Some harmonics could not be calibrated; see fit status. No raw fallback was substituted.")
+    return 0
 
 
 def _input_files(path: Path) -> list[Path]:
@@ -68,13 +113,25 @@ def _plot(results: list[dict], path: Path) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Analyze each marked harmonic's frame-to-frame integrated intensity g2(0)."
+        description="Estimate light g2 with the SI background/MCP calibration from saved frames."
     )
     parser.add_argument("input", type=Path, help="One completed HDF5 step or folder of step files.")
-    parser.add_argument("harmonic_map", type=Path, help="Reusable *_harmonics.json saved by Mark Harmonics.")
+    parser.add_argument("harmonic_map", type=Path, nargs="?", default=None,
+                        help="Optional map override; otherwise the persistent confirmed map is used.")
+    parser.add_argument("--bsv-off", type=Path, help="Matched coherent-only reference HDF5 file.")
+    parser.add_argument("--background", type=Path, help="Matched no-XUV reference HDF5 file.")
+    parser.add_argument("--raw-intensity", action="store_true",
+                        help="Explicit legacy raw ADU statistic; does not estimate corrected light g2.")
     parser.add_argument("--batch-size", type=int, default=16)
     args = parser.parse_args(argv)
+    args.harmonic_map = args.harmonic_map or default_harmonic_map_path()
     try:
+        if not args.raw_intensity:
+            if args.bsv_off is None or args.background is None:
+                raise ValueError("SI analysis requires --bsv-off and --background (or explicitly choose --raw-intensity).")
+            return _si_outputs(args)
+        if args.bsv_off is not None or args.background is not None:
+            raise ValueError("Do not combine --raw-intensity with SI reference inputs.")
         files = _input_files(args.input)
         results = [
             compute_harmonic_g2_from_scan(path, args.harmonic_map, batch_size=args.batch_size)

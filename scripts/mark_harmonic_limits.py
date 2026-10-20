@@ -1,5 +1,4 @@
-"""Show a mean-frame snapshot and save draggable harmonic x-pixel ranges."""
-
+"""Detect and review harmonic windows in saved data; never connects to hardware."""
 from __future__ import annotations
 
 import argparse
@@ -9,127 +8,153 @@ import sys
 import matplotlib
 matplotlib.use("QtAgg")
 import matplotlib.pyplot as plt
-from matplotlib.widgets import SpanSelector
+from matplotlib.widgets import SpanSelector, Slider, Button, TextBox
 import numpy as np
 
-from hhg_control.analysis import load_mean_snapshot, save_harmonic_regions
+from hhg_control.analysis.spectral import (
+    default_harmonic_map_path, detect_harmonic_regions, load_mean_snapshot,
+    save_harmonic_regions, validate_harmonic_regions,
+)
 from hhg_control.safe_io import unique_output
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Open a completed camera step's mean-frame snapshot and mark harmonic x ranges."
-    )
-    parser.add_argument("input", type=Path, help="Completed HDF5 scan-step file containing /images.")
-    parser.add_argument(
-        "--output", type=Path,
-        help="JSON sidecar path. Defaults to <input>_harmonics.json; existing paths are preserved.",
-    )
+    """Review automatic windows, refine if necessary, then replace the default map."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("input", type=Path, help="Saved HDF5 /images[frame,y,x] file.")
+    parser.add_argument("--output", type=Path, help="Override persistent map path (replaced only on Save).")
     args = parser.parse_args(argv)
-
     try:
+        print("Loading saved frames and detecting peaks...", flush=True)
         image, metadata = load_mean_snapshot(args.input)
+        regions, detection = detect_harmonic_regions(image)
     except Exception as exc:
-        print(f"[ERROR] Could not load snapshot: {exc}", file=sys.stderr)
+        print(f"[ERROR] Could not detect harmonics: {exc}", file=sys.stderr)
         return 1
+    spectrum = image.sum(axis=0)
+    width = image.shape[1]
+    output = args.output or default_harmonic_map_path()
+    figure, axis = plt.subplots(figsize=(12, 6))
+    figure.subplots_adjust(bottom=0.27, top=0.84)
+    status = figure.text(0.08, 0.91, "", fontsize=10)
+    sensitivity_axis = figure.add_axes((0.18, 0.12, 0.45, 0.035))
+    sensitivity = Slider(sensitivity_axis, "Peak sigma", 2.0, 12.0, valinit=5.0, valstep=0.5)
+    save_axis = figure.add_axes((0.73, 0.07, 0.19, 0.065))
+    save_button = Button(save_axis, "Confirm and save")
+    order_axis = figure.add_axes((0.18, 0.045, 0.45, 0.04))
+    orders = TextBox(order_axis, "Orders left to right ", initial="")
+    save_error = False
+    saved = False
+    light_line, = axis.plot([], [], color="0.8", linewidth=1, label="Outside windows")
+    dark_line, = axis.plot([], [], color="#102d50", linewidth=1.3, label="Selected harmonic signal")
+    annotations = []
 
-    height, width = image.shape
-    roi = metadata.get("roi_bounds")
-    regions: list[dict[str, int | str]] = []
-    patches = []
-    texts = []
-    status = None
-    figure, axis = plt.subplots(figsize=(11, 6), constrained_layout=True)
-    displayed = axis.imshow(image, origin="upper", aspect="auto", cmap="gray")
-    axis.set_xlim(-0.5, width - 0.5)
-    axis.set_xlabel("x pixel (frequency / wavelength dispersion; no calibration applied)")
-    axis.set_ylabel("y pixel")
-    axis.set_title(
-        f"{args.input.name}: mean of {metadata['snapshot_frame_count']} frames\n"
-        "Drag horizontally to mark a harmonic range. U = undo, S = save, Q = close."
-    )
-    figure.colorbar(displayed, ax=axis, label="Mean intensity (ADU)")
-    status = axis.text(
-        0.01, 0.99, "Selected ranges: 0", transform=axis.transAxes,
-        color="yellow", va="top", ha="left",
-        bbox={"facecolor": "black", "alpha": 0.55, "edgecolor": "none"},
-    )
-
-    def onselect(xmin: float, xmax: float) -> None:
-        start = max(0, min(width - 1, int(np.floor(min(xmin, xmax) + 0.5))))
-        inclusive_stop = max(0, min(width - 1, int(np.floor(max(xmin, xmax) + 0.5))))
-        stop = inclusive_stop + 1
-        if stop <= start:
-            return
-        label = f"H{len(regions) + 1}"
-        regions.append({"label": label, "x_start": start, "x_stop": stop})
-        patch = axis.axvspan(start - 0.5, stop - 0.5, color="cyan", alpha=0.18, linewidth=1.5)
-        text = axis.text(
-            (start + stop - 1) / 2, 0.03 * height, label,
-            color="yellow", ha="center", va="bottom", weight="bold",
-            bbox={"facecolor": "black", "alpha": 0.55, "edgecolor": "none"},
-        )
-        patches.append(patch)
-        texts.append(text)
-        status.set_text(f"Selected ranges: {len(regions)} — last {label} [{start}, {stop})")
+    def redraw(message="", preview=None):
+        """Display raw y-integrated spectrum, with dark windows and pale gaps."""
+        for annotation in annotations:
+            annotation.remove()
+        annotations.clear()
+        shown = regions if preview is None else preview
+        selected = np.zeros(width, dtype=bool)
+        for region in shown:
+            selected[region["x_start"]:region["x_stop"]] = True
+        x = np.arange(width)
+        light_line.set_data(x, spectrum)
+        dark_line.set_data(x, np.where(selected, spectrum, np.nan))
+        for region in shown:
+            a, b = region["x_start"], region["x_stop"]
+            annotations.append(axis.axvspan(a - 0.5, b - 0.5, color="#102d50", alpha=0.10))
+            annotations.append(axis.text((a+b-1)/2, spectrum[a:b].max(), region["label"], ha="center", fontsize=9))
+        axis.set(xlabel="Detector x pixel (P labels are peaks, not harmonic orders)",
+                 ylabel="Mean image summed along y (ADU)", xlim=(-0.5, width-0.5))
+        axis.legend(loc="upper right")
+        axis.relim()
+        axis.autoscale_view(scalex=False)
+        status.set_text(f"{len(regions)} windows. {message}\n"
+                        "Review weak peaks/tails. Drag to add/replace overlaps; right-click removes a window.\n"
+                        "Slider re-detects all windows. Enter saves; Escape cancels and keeps the previous map.")
         figure.canvas.draw_idle()
 
-    selector = SpanSelector(
-        axis,
-        onselect,
-        "horizontal",
-        useblit=True,
-    )
+    def redetect(value):
+        nonlocal regions, detection
+        regions, detection = detect_harmonic_regions(image, threshold_sigma=float(value))
+        redraw("Automatic proposal; visual confirmation required.")
 
-    def on_key(event) -> None:
-        if event.key in {"u", "backspace"}:
-            if regions:
-                regions.pop()
-                patches.pop().remove()
-                texts.pop().remove()
-                status.set_text(f"Selected ranges: {len(regions)} — last range removed")
-                figure.canvas.draw_idle()
-            return
-        if event.key in {"q", "escape"}:
-            plt.close(figure)
-            return
-        if event.key not in {"s", "enter"}:
-            return
+    def select(a, b):
+        nonlocal regions
+        start = max(0, min(width-1, int(np.floor(min(a,b)+0.5))))
+        stop = max(start+1, min(width, int(np.floor(max(a,b)+0.5))+1))
+        regions = [r for r in regions if r["x_stop"] <= start or r["x_start"] >= stop]
+        regions.append({"label": "new", "x_start": start, "x_stop": stop})
+        regions.sort(key=lambda r: r["x_start"])
+        for index, region in enumerate(regions, 1):
+            region["label"] = f"P{index}"
+        detection["manually_edited"] = True
+        redraw("Manual refinement applied.")
+
+    def remove(event):
+        nonlocal regions
+        if event.inaxes == axis and event.button == 3 and event.xdata is not None:
+            regions = [r for r in regions if not r["x_start"]-0.5 <= event.xdata < r["x_stop"]-0.5]
+            for index, region in enumerate(regions, 1):
+                region["label"] = f"P{index}"
+            detection["manually_edited"] = True
+            redraw("Window removed.")
+
+    def save(event=None):
+        nonlocal save_error, saved
+        snapshot = None
         try:
-            default_output = args.input.with_name(f"{args.input.stem}_harmonics.json")
-            output_path = args.output if args.output is not None else unique_output(default_output)
-            if output_path.exists():
-                raise FileExistsError(f"Refusing to overwrite existing harmonic map: {output_path}")
-            snapshot_png = unique_output(output_path.with_suffix(".png"))
-            created_snapshot = False
-            try:
-                with snapshot_png.open("xb") as handle:
-                    created_snapshot = True
-                    figure.savefig(handle, format="png", dpi=180)
-                saved = save_harmonic_regions(
-                    output_path,
-                    regions,
-                    args.input,
-                    (height, width),
-                    roi_bounds=roi,
-                    annotated_snapshot_path=snapshot_png,
-                )
-            except Exception:
-                if created_snapshot:
-                    snapshot_png.unlink(missing_ok=True)
-                raise
-            print(f"Saved {len(regions)} harmonic ranges: {saved.resolve()}")
-            print(f"Saved annotated snapshot: {snapshot_png.resolve()}")
+            proposed = [dict(region) for region in regions]
+            validate_harmonic_regions(proposed, width)
+            entered = orders.text.strip()
+            if entered:
+                order_values = [float(value.strip()) for value in entered.split(",")]
+                if len(order_values) != len(regions) or len(set(order_values)) != len(order_values):
+                    raise ValueError("Enter one unique harmonic order per window, separated by commas.")
+                for region, order in zip(proposed, order_values):
+                    region["order"] = order
+                    region["label"] = f"H{order:g}"
+                validate_harmonic_regions(proposed, width)
+            else:
+                for region in proposed:
+                    region.pop("order", None)
+            redraw("Confirmed reference windows.", proposed)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            snapshot = unique_output(output.with_name("harmonics_review.png"))
+            figure.savefig(snapshot, dpi=160)
+            save_harmonic_regions(output, proposed, args.input, image.shape,
+                                  roi_bounds=metadata.get("roi_bounds"),
+                                  annotated_snapshot_path=snapshot, overwrite=True,
+                                  detection={**detection, "visually_confirmed": True})
+            saved = True
+            save_error = False
+            print(f"Saved {len(regions)} windows as the persistent default: {output}", flush=True)
             plt.close(figure)
         except Exception as exc:
-            status.set_text(f"Cannot save: {exc}")
-            figure.canvas.draw_idle()
+            save_error = True
+            if snapshot is not None:
+                snapshot.unlink(missing_ok=True)
+            redraw(f"Cannot save: {exc}")
 
-    figure.canvas.mpl_connect("key_press_event", on_key)
-    # Keep the selector referenced for the lifetime of the interactive figure.
-    figure._harmonic_span_selector = selector
+    def key(event):
+        if event.inaxes == order_axis and event.key not in {"enter", "escape"}:
+            return
+        if event.key in {"enter", "s"}:
+            save()
+        elif event.key in {"escape", "q"}:
+            plt.close(figure)
+
+    selector = SpanSelector(axis, select, "horizontal", useblit=True, button=1)
+    sensitivity.on_changed(redetect)
+    save_button.on_clicked(save)
+    figure.canvas.mpl_connect("button_press_event", remove)
+    figure.canvas.mpl_connect("key_press_event", key)
+    redraw("Automatic proposal; visual confirmation required.")
     plt.show()
-    return 0
+    if not saved:
+        print("No replacement saved; previous harmonic map retained.", flush=True)
+    return 1 if save_error else 0
 
 
 if __name__ == "__main__":

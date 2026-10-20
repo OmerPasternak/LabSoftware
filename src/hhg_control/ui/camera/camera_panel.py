@@ -34,6 +34,7 @@ import matplotlib.patches as mpatches
 
 from hhg_control.drivers.base_camera import BaseCamera, ReadoutMode, TriggerMode
 from hhg_control.drivers.camera_defaults import DEFAULT_CAMERA_SERIAL
+from hhg_control.analysis.spectral import default_harmonic_map_path
 from hhg_control.drivers.mock_camera import MockPcoCamera
 from hhg_control.sequencer.scan_manager import CameraScanManager
 from .workers import (
@@ -695,12 +696,12 @@ class CameraMainWindow(QMainWindow):
         self.btn_spectral_covariance.clicked.connect(self._launch_spectral_covariance)
         self.btn_mark_harmonics = QPushButton("Mark Harmonics")
         self.btn_mark_harmonics.setToolTip(
-            "Open a completed step's mean-frame snapshot; drag x ranges and save them for later analysis."
+            "Detect harmonic windows in saved data, review them, and replace the remembered map."
         )
         self.btn_mark_harmonics.clicked.connect(self._launch_harmonic_marker)
         self.btn_harmonic_g2 = QPushButton("Harmonic g²")
         self.btn_harmonic_g2.setToolTip(
-            "Apply a saved harmonic map to completed HDF5 scan steps and calculate temporal g²(0) per harmonic."
+            "Use remembered windows and saved ON/OFF/BACKGROUND files for SI MCP-corrected g²."
         )
         self.btn_harmonic_g2.clicked.connect(self._launch_harmonic_g2)
 
@@ -762,24 +763,24 @@ class CameraMainWindow(QMainWindow):
             self._launch_analysis_script("mark_harmonic_limits.py", Path(filepath))
 
     def _launch_harmonic_g2(self) -> None:
-        """Apply a previously saved harmonic map to completed scan-step files."""
-        map_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Choose the saved harmonic map",
-            self.txt_storage_dir.text().strip(),
-            "Harmonic maps (*_harmonics.json *.json)",
-        )
-        if not map_path:
+        """Analyze saved ON/OFF/background files using the persistent reference map."""
+        map_path = default_harmonic_map_path()
+        if not map_path.is_file():
+            QMessageBox.warning(self, "Harmonic Map Missing", "Run Mark Harmonics and confirm the windows first.")
             return
-        scan_dir = QFileDialog.getExistingDirectory(
-            self,
-            "Choose a folder containing completed HDF5 scan steps",
-            self.txt_storage_dir.text().strip(),
-        )
-        if scan_dir:
-            self._launch_analysis_script(
-                "analyze_harmonic_g2.py", Path(scan_dir), extra_args=[map_path]
+        selected = []
+        for name in ("BSV ON", "BSV OFF (coherent only)", "BACKGROUND (no XUV)"):
+            path, _ = QFileDialog.getOpenFileName(
+                self, f"Choose {name} saved HDF5 file", self.txt_storage_dir.text().strip(),
+                "HDF5 camera scans (*.h5 *.hdf5)",
             )
+            if not path:
+                return
+            selected.append(path)
+        self._launch_analysis_script(
+            "analyze_harmonic_g2.py", Path(selected[0]),
+            extra_args=["--bsv-off", selected[1], "--background", selected[2]],
+        )
 
     def _launch_analysis_script(
         self, script_name: str, input_path: Path, extra_args: Optional[list[str]] = None

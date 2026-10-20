@@ -25,41 +25,124 @@ correlation, time-lagged covariance, or a photon-count-normal-ordered g².
 In the camera GUI, **X Covariance** selects one completed step file and launches
 the analysis without blocking acquisition controls.
 
-## Mark harmonic ranges
+## Automatic harmonic windows and persistent reference
 
-Run `python scripts/mark_harmonic_limits.py <step.h5>`. The script displays the
-mean of all frames in that completed step as the snapshot. Drag across x to add
-each harmonic range in order; ranges are named H1, H2, and so on. Press `U` to
-undo the most recent range, `S` or Enter to save, and `Q` or Escape to close
-without saving. The saved `<step>_harmonics.json` sidecar uses zero-based,
-half-open x ranges relative to the `/images` array, and stores the source file,
-array dimensions, ROI, the annotated snapshot PNG path, and creation time. The
-image and sidecar are saved beside the source file. If that sidecar already
-exists, a numbered filename is selected rather than overwriting it.
+**Mark Harmonics** selects a saved HDF5 reference step. It averages the saved
+frames, integrates that image along y, and proposes harmonic x windows. It never
+connects to the camera or changes acquisition settings. One saved integrated
+frame is also a valid marking input. The reference should include all harmonics
+of interest (normally BSV ON); a coherent-only image cannot reveal absent peaks.
 
-The GUI's **Mark Harmonics** button opens a selected completed step in this
-tool. Downstream per-harmonic analysis should check the saved image dimensions
-and ROI against its input before applying the ranges. The sidecar stores no
-wavelength calibration; its limits remain detector x-pixel positions.
+The review graph shows selected signal in dark blue and the gaps in light gray.
+The detector uses a rolling lower-quantile baseline, robust noise estimation,
+local prominence and noise-limited tails. It deliberately does not threshold
+relative to the strongest peak, which could remove weak even/half-integer peaks.
+Noise and overlapping tails prevent a guarantee of complete, noise-free windows.
+There is no equal-spacing assumption or automatic harmonic-order assignment.
 
-## Per-harmonic temporal g²
+- Adjust **Peak sigma** to re-detect (lower values retain weaker features but
+  increase false positives). Changing it replaces all current manual edits.
+- Drag across x to add a missing window or replace overlapping windows.
+- Right-click a window to remove it. Check weak peaks, tails and hot-pixel artifacts.
+- Enter the actual harmonic orders **from left to right**, comma-separated,
+  for example `11,11.5,12,12.5,13` (reverse if dispersion runs the other way).
+  Pixel locations alone cannot establish order. This field is required for the
+  corrected g2 analysis, which must distinguish odd orders from the other families.
+- Click **Confirm and save** or Enter. Escape cancels and preserves the old map.
 
-Mark the harmonic ranges once and keep the resulting `*_harmonics.json` file.
-In the GUI, **Harmonic g²** asks for that saved map and then a folder containing
-the completed HDF5 scan-step files. The same map is reused for every step, with
-image dimensions and ROI checked before analysis. The command-line equivalent
-is `python scripts/analyze_harmonic_g2.py <step-or-folder> <harmonics.json>`.
+The single default reference is `%LOCALAPPDATA%/HHGControl/harmonics.json` on
+Windows. The confirmed map survives restarts and is reused automatically until
+Mark Harmonics saves a replacement. An atomic replacement preserves the previous
+map if saving fails. It records the source, shape, ROI when available, detection
+parameters, optional orders, review flag and review image path. Runtime reference
+files are machine/user-specific calibration, outside Git, not shared defaults.
+`HHG_HARMONIC_MAP` overrides its path; the marker CLI also accepts `--output`.
 
-For each frame and harmonic, the analysis sums raw ADU over the marked x range
-and every y row, then computes temporal `g²(0) = mean(S²) / mean(S)²`. It
-reports the frame count, mean signal, g², delta-method standard error, and a
-normal-approximation 95% interval. The CSV, JSON report, and plot are written
-under an `analysis` subfolder; source measurements are not modified. Input
-frames are streamed, not loaded as a full scan into memory.
+Do not reuse a map after changing spectral alignment or detector geometry without
+reviewing it again. Shape/ROI validation cannot detect optical drift.
 
-This is an integrated-intensity fluctuation statistic. It does not subtract a
-camera pedestal, convert ADU to photon counts, establish external-trigger
-accounting, or prove independent frames. The confidence interval assumes
-independent frames; temporal correlation can make it too narrow. Interpret g²
-physically only after confirming the desired background and detector-noise
-corrections for the experiment.
+## SI-corrected per-harmonic light statistics
+
+The GUI **Harmonic g²** uses the persistent map without a map picker. Select three
+saved files in order: **BSV ON**, **BSV OFF** (coherent-only), **BACKGROUND**
+(no XUV). These must be matched in settings, alignment, gain, timing and delay
+where relevant. Reference and signal frame counts may differ. A mean image is
+sufficient for marking but not for statistical analysis: each statistics input
+needs a stack of individual shots (at least three; realistically many more).
+Each ON file/scan delay is analyzed separately; do not concatenate different delays.
+
+Command line:
+
+```powershell
+python scripts/analyze_harmonic_g2.py ON.h5 --bsv-off OFF.h5 --background BG.h5
+```
+
+A positional map path remains available as an explicit CLI override. The analysis
+runs offline in a child process and streams all three datasets in bounded batches.
+New and legacy files with `/images[frame,y,x]` are supported. Incomplete files are
+rejected; absent legacy metadata produces warnings. Different dataset names,
+MATLAB `[x,y,frame]` arrays, TIFF and other formats require an explicit converter;
+no shape guessing or silent transposition is performed. Original data are read only.
+
+### Estimator and source
+
+Reference: Even Tzur et al., *Attosecond-resolved quantum fluctuations of light
+and matter*, arXiv:2511.18362v1, SI **MCP response and g2 calibration** and
+**Background subtraction**, PDF pp. 27–30 (SI S4–S7), Eqs. S8–S11.
+
+1. Accumulate per-pixel means and unbiased sample variances across shots.
+2. For odd integer orders use BACKGROUND; for even/half-integer orders use BSV
+   OFF, following the SI's treatment of leakage from bright odd harmonics.
+3. Form `mu = mean(ON)-mean(reference)` and
+   `v = var(ON)-var(reference)`. References are independent runs; they are not
+   subtracted shot by shot. A separate background variance is NOT subtracted a
+   second time from BSV OFF. Never clip negative frame signals to zero.
+4. For usable pixels form `g_detected = 1 + v/mu^2`, then fit
+   `g_detected = g_light + k/mu` (S8). `g_light` is the intercept at inverse
+   intensity zero; `k` absorbs the intensity-dependent detector response.
+   The implementation uses pixels within each harmonic's x window and all y rows.
+5. Require positive net means, mean SNR >= 3, nonnegative net variances, no
+   dtype-ceiling samples, at least eight usable pixels, and a twofold 90th/10th
+   percentile mean-intensity range. Negative moments and excluded-pixel counts
+   remain reported. Fits use all usable pixels; at most 256 points are retained
+   for diagnostic plots/report size. Failed or unphysical fits give no light-g2
+   value, rather than substituting an uncorrected statistic.
+
+The CSV summarizes per-harmonic inferred g2, fit status and reference family.
+The JSON contains provenance, assumptions, exclusions, fit residuals, R-squared
+and sampled fit points. The PNG shows inverse-intensity calibration curves and
+intercepts. All outputs go into `analysis` beside ON; source files are untouched.
+The integrated background-corrected ADU g2 is retained as a separate diagnostic;
+it includes cross-pixel covariance and is not the MCP-calibrated light estimate.
+
+### Scientific limits that must be checked
+
+This is the SI's model-based estimate, not an unconditional measurement of the
+light's exact photon statistics. It assumes linear unsaturated detection, a
+nearly constant detector-response coefficient and common light g2 across the
+fitted pixels, and uncorrelated additive signal/background. Detector pixels
+share shot fluctuations; ordinary regression error bars would overstate
+precision. No confidence interval is assigned until an appropriate shot/block
+resampling or independent-repeat uncertainty analysis is available. Inspect the
+fit curves and excluded-pixel counts, especially for weak harmonics. Excluding
+negative net variance and low-SNR samples can itself bias a weak-signal fit.
+
+Compare matched pressure/flux levels with invariant normalized spectra to
+validate the pixel-intensity extrapolation, as the SI does. A poor/curved fit,
+strong sensitivity to selected pixels, MCP gain changes, saturation or optical
+drift invalidate its interpretation. Dtype-ceiling exclusion only detects the
+stored integer ceiling; it does not detect MCP saturation, nonlinear response,
+or a camera ADC ceiling below the dtype maximum. Set the acquisition safely
+within its separately measured linear range.
+
+The SI uses a high-photon-number approximation. No absolute photon gain,
+quantum efficiency, exact factorial-moment conversion or automatic nonclassicality
+claim is supplied. The paper's P43 persistence produced about 1.05 pulses per
+measurement at its timing. That number is NOT copied to this setup; temporal
+mixing depends on the actual phosphor and trigger/exposure timings, and must be
+measured separately. Spatial detector response and optical modes can also vary.
+Separate reference runs cannot reveal the ON signal/background covariance.
+
+The previous raw-ADU estimator is still available only through an explicit
+`--raw-intensity` CLI flag, and retains its original meaning
+`mean(S^2)/mean(S)^2`. It is not used by the GUI's corrected analysis.

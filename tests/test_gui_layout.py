@@ -215,3 +215,27 @@ def test_gui_applies_mode_explicitly_selected_before_connection(monkeypatch):
     finally:
         camera.close()
         window.close()
+
+
+def test_gui_g2_uses_persistent_map_and_never_asks_for_map_file(qtbot, tmp_path, monkeypatch):
+    """Saved-data analysis has no camera dependency or manual map picker."""
+    from hhg_control.ui.camera import camera_panel
+    target = tmp_path / "harmonics.json"
+    target.write_text("{}")
+    monkeypatch.setenv("HHG_HARMONIC_MAP", str(target))
+    window = CameraMainWindow()
+    qtbot.addWidget(window)
+    choices = iter(["on.h5", "off.h5", "background.h5"])
+    titles = []
+    def choose(parent, title, *args):
+        titles.append(title)
+        return next(choices), ""
+    monkeypatch.setattr(camera_panel.QFileDialog, "getOpenFileName", choose)
+    calls = []
+    monkeypatch.setattr(window, "_launch_analysis_script", lambda *a, **k: calls.append((a, k)))
+    window._launch_harmonic_g2()
+    assert len(titles) == 3
+    assert all("saved harmonic map" not in title.lower() for title in titles)
+    assert calls[0][1]["extra_args"] == ["--bsv-off", "off.h5", "--background", "background.h5"]
+    assert isinstance(window.camera, MockPcoCamera)
+    window.close()
