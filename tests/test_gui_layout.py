@@ -239,3 +239,39 @@ def test_gui_g2_uses_persistent_map_and_never_asks_for_map_file(qtbot, tmp_path,
     assert calls[0][1]["extra_args"] == ["--bsv-off", "off.h5", "--background", "background.h5"]
     assert isinstance(window.camera, MockPcoCamera)
     window.close()
+
+
+def test_simulated_writer_memory_fits_8gb_and_physical_budget_is_preserved(qtbot, monkeypatch):
+    """Switching sources must restore the physical 16-GiB queue/reserve unchanged."""
+    from hhg_control.ui.camera.camera_panel import (
+        APPLICATION_WRITER_QUEUE_GIB, APPLICATION_WRITER_MEMORY_RESERVE_GIB,
+    )
+    from hhg_control.sequencer import capture_pipeline
+    monkeypatch.setattr(capture_pipeline, "available_physical_memory_bytes", lambda: 8 * 2**30)
+    window = CameraMainWindow()
+    qtbot.addWidget(window)
+    manager = window.scan_manager
+    assert manager.writer_queue_byte_budget == 512 * 2**20
+    assert manager.writer_memory_reserve_bytes == 2 * 2**30
+    # Test the source identity used by connection and measurement setup. Driver
+    # type remains a mock, as it does in offline tests of the physical UI path.
+    for source in ("physical", "simulated", "physical"):
+        window._connected_source = source
+        window._configure_writer_memory()
+        if source == "simulated":
+            assert manager.writer_queue_byte_budget == 512 * 2**20
+            assert manager.writer_memory_reserve_bytes == 2 * 2**30
+            # Exercise the real full-sensor, long-scan preflight with only
+            # 8 GiB available; this constructs a lazy queue, no image stack.
+            source = capture_pipeline.BufferedCamera(
+                window.camera, 10000, 4, manager.writer_queue_byte_budget,
+                manager.writer_memory_reserve_bytes, lambda: None,
+            )
+            assert not source.expanded
+            assert source.capacity_bytes + source.working_bytes < 2 * 2**30
+        else:
+            assert manager.writer_queue_byte_budget == int(APPLICATION_WRITER_QUEUE_GIB * 2**30)
+            assert manager.writer_memory_reserve_bytes == int(APPLICATION_WRITER_MEMORY_RESERVE_GIB * 2**30)
+            assert APPLICATION_WRITER_QUEUE_GIB == 16.0
+            assert APPLICATION_WRITER_MEMORY_RESERVE_GIB == 16.0
+    window.close()

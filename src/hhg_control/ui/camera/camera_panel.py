@@ -54,6 +54,10 @@ COLOR_AXIS_RECT = (0.95, 0.08, 0.05, 0.86)
 # Agent-editable acquisition backlog limit; intentionally absent from the GUI.
 APPLICATION_WRITER_QUEUE_GIB = 16.0
 APPLICATION_WRITER_MEMORY_RESERVE_GIB = 16.0
+# Simulation can wait for storage; keep it usable on an 8-GB development PC.
+# Reserve is free headroom, not an allocation. Physical budgets above are unchanged.
+SIMULATED_WRITER_QUEUE_GIB = 0.5
+SIMULATED_WRITER_MEMORY_RESERVE_GIB = 2.0
 
 
 class CameraFigureCanvas(FigureCanvasQTAgg):
@@ -157,8 +161,8 @@ class CameraMainWindow(QMainWindow):
         self.scan_manager = CameraScanManager(
             camera=self.camera,
             storage_dir=default_storage,
-            writer_queue_byte_budget=int(APPLICATION_WRITER_QUEUE_GIB * 2**30),
-            writer_memory_reserve_bytes=int(APPLICATION_WRITER_MEMORY_RESERVE_GIB * 2**30),
+            writer_queue_byte_budget=int(SIMULATED_WRITER_QUEUE_GIB * 2**30),
+            writer_memory_reserve_bytes=int(SIMULATED_WRITER_MEMORY_RESERVE_GIB * 2**30),
         )
 
         self._physical_serial = DEFAULT_CAMERA_SERIAL
@@ -1020,6 +1024,7 @@ class CameraMainWindow(QMainWindow):
         self.camera = camera
         self.scan_manager.camera = self.camera
         self._connected_source = "simulated" if is_sim else "physical"
+        self._configure_writer_memory()
         self._append_log(f"[CAMERA SETTINGS] Serial {camera.get_sensor_info().get('serial_number')}; exposure {camera._exposure_time_s} s; mode {camera._readout_mode.name}; trigger {camera._trigger_mode.value}.")
         self._sync_trigger_checkbox()
         self.chk_external_trigger.setEnabled(True)
@@ -2117,6 +2122,23 @@ class CameraMainWindow(QMainWindow):
     # =========================================================================
     # Automated Scan Execution & Pause / Resume Coordination
     # =========================================================================
+    def _configure_writer_memory(self) -> None:
+        """Apply source-specific queue/headroom bytes before measurements.
+
+        The bounded mock queue is sized for an 8-GB PC. It waits rather than
+        dropping frames on a slow drive. Physical acquisition retains the
+        application queue and reserve exactly; use the selected connection's
+        source, not the driver's Python type (offline physical fakes may inherit
+        MockPcoCamera).
+        """
+        simulated = self._connected_source == "simulated"
+        queue_gib = SIMULATED_WRITER_QUEUE_GIB if simulated else APPLICATION_WRITER_QUEUE_GIB
+        reserve_gib = (SIMULATED_WRITER_MEMORY_RESERVE_GIB if simulated
+                       else APPLICATION_WRITER_MEMORY_RESERVE_GIB)
+        self.scan_manager.set_writer_queue_memory(
+            int(queue_gib * 2**30), reserve_bytes=int(reserve_gib * 2**30),
+        )
+
     def _scan_source_label(self) -> str:
         """Label scan logs by the selected physical or simulated camera source."""
         if isinstance(self.camera, MockPcoCamera):
@@ -2229,10 +2251,7 @@ class CameraMainWindow(QMainWindow):
             self._resume_live_if_scan_not_started()
             return
         self.scan_manager.set_storage_dir(target_dir)
-        self.scan_manager.set_writer_queue_memory(
-            int(APPLICATION_WRITER_QUEUE_GIB * 2**30),
-            reserve_bytes=int(APPLICATION_WRITER_MEMORY_RESERVE_GIB * 2**30),
-        )
+        self._configure_writer_memory()
 
         self._scan_completed_successfully = False
         self._set_ui_scanning_state(is_scanning=True)
