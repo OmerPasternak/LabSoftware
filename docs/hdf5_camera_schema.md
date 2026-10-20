@@ -1,5 +1,9 @@
 # Camera scan HDF5 format (schema 2.0)
 
+**Raw `/images` values must never be manipulated.** Preserve every SDK-returned
+pixel and frame identity. Derived analysis belongs in separate outputs; follow
+the [raw-data integrity policy](raw_data_integrity_policy.md).
+
 Each completed scan step is one `.h5` file. Acquisition writes to a matching
 `.h5.partial` file first and renames it after the camera, metadata, and file
 close complete. A partial file is evidence of an interrupted or failed step;

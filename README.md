@@ -6,6 +6,10 @@ Every hardware-facing implementation has a mock counterpart for offline work.
 
 ## Supported environment
 
+**Acquired pixels are immutable.** Acquisition saves SDK-returned values unchanged.
+Requested plots/statistics are separate derived outputs, never replacements for
+raw measurements. See [the raw-data policy](docs/raw_data_integrity_policy.md).
+
 Use 64-bit Python 3.12 for the laboratory installation. The Excelitas `pco`
 package currently declares support through Python 3.12; Python 3.13+ must not be
 used for physical-camera operation until Excelitas supports it and the lab has

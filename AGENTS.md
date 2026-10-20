@@ -7,6 +7,15 @@ Your job is to act as a careful, senior collaborator: propose designs, write cod
 
 ## PROJECT GOALS (PRIORITY ORDER)
 
+### NON-NEGOTIABLE: NEVER MANIPULATE ACQUIRED DATA
+
+Acquisition must save every SDK-returned pixel unchanged and preserve frame
+order/identity. No subtraction, filtering, smoothing, normalization, rescaling,
+clipping, binning, lossy storage or frame rejection in the acquisition payload.
+Explicitly requested analysis/preview operates separately and must never overwrite
+or feed corrections into raw acquisition. No silent preprocessing, including for
+performance. Read and follow [the raw-data policy](docs/raw_data_integrity_policy.md).
+
 1. Reliability over cleverness. This software will run unattended data-taking sessions. Prefer boring, explicit, well-tested code over abstractions that are elegant but fragile.
 
 2. Modularity. New instruments and new experiment types must be addable without modifying unrelated code. Enforce a strict separation between:

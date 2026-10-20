@@ -1,5 +1,9 @@
 # Camera acquisition: lab validation plan
 
+**Never manipulate acquired data.** Tests and optimizations must preserve every
+raw SDK-returned pixel and frame identity. See the
+[raw-data integrity policy](raw_data_integrity_policy.md).
+
 The section-by-section main-computer checklist and executable tests are in
 [`application tests/lab_computer_acceptance.ipynb`](../application%20tests/lab_computer_acceptance.ipynb).
 Select the project's `.venv` as the notebook kernel and run one section at a

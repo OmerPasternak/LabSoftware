@@ -1,5 +1,9 @@
 # Storage diagnostics and pixel verification integration plan
 
+Storage optimizations must preserve all acquired pixels and frame identities
+exactly. Never trade integrity for speed or alter data to pass checks. Follow
+the [raw-data integrity policy](raw_data_integrity_policy.md).
+
 Section 4E now implements an explicit diagnostic for production HDF5 acquisitions:
 it hashes original camera batches before writing, closes and syncs the file, then
 rereads every pixel against the saved reference manifest. It works with the
