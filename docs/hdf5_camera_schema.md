@@ -62,7 +62,7 @@ files, including the final FIFO/error check and stop. It retrieves continuously 
 hashing, HDF5 writes and closed-file work do not run in that reader. The GUI's
 16 GiB RAM budget is shared between this queue and a one-batch HDF5 queue.
 The GUI has no RAM-buffer control; agents can change `APPLICATION_WRITER_QUEUE_GIB`
-in `ui/camera/camera_panel.py`. The separate 16 GiB memory reserve remains enforced.
+in `src/hhg_control/gui/camera/camera_panel.py`. The separate 16 GiB memory reserve remains enforced for physical acquisition.
 A long run planning the full buffer therefore needs roughly 32 GiB free plus working
 arrays; a smaller acquisition plans only the memory needed for its frame count.
 Buffers allocate only as data arrives, and expanded buffers enforce the

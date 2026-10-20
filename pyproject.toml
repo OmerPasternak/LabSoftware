@@ -25,7 +25,7 @@ test = [
 ]
 
 [project.scripts]
-hhg-camera = "hhg_control.ui.camera.camera_panel:main"
+hhg-camera = "hhg_control.gui.camera.camera_panel:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

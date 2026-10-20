@@ -15,5 +15,5 @@ End If
 shell.CurrentDirectory = root
 shell.Environment("PROCESS")("PYTHONPATH") = files.BuildPath(root, "src")
 shell.Environment("PROCESS")("PYTHONIOENCODING") = "utf-8"
-command = Chr(34) & pythonw & Chr(34) & " -m hhg_control.ui.camera_gui"
+command = Chr(34) & pythonw & Chr(34) & " -m hhg_control.gui.camera"
 shell.Run command, 0, False

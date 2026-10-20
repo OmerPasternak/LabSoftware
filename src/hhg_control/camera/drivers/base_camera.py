@@ -1,0 +1,270 @@
+"""
+Abstract Base Class defining the universal interface for camera instruments in the lab.
+All camera drivers (real hardware or mocks) must conform strictly to this contract.
+"""
+
+from abc import ABC, abstractmethod
+from enum import Enum, IntEnum
+from collections.abc import Iterator
+from typing import Tuple, List, Dict, Any, Callable
+import numpy as np
+
+
+class CameraSafetyError(ValueError):
+    """Raised when an acquisition parameter violates safe operating limits."""
+    pass
+
+
+class ReadoutMode(IntEnum):
+    """Sensor readout modes for the pco.edge 5.5 sCMOS camera.
+
+    Values match the PCO SDK ``set_camera_setup`` shutter-mode parameter
+    (C constant SCCMOS_FORMAT_*).
+
+    Attributes:
+        ROLLING_SHUTTER: Standard sCMOS rolling readout.  Each row is exposed
+            sequentially; different rows capture the scene at slightly
+            different times.  Gives the highest frame rate but produces a
+            **light-sheet artefact** with pulsed laser sources (HHG) where
+            only the rows open during the laser pulse receive signal.
+        GLOBAL_SHUTTER: All pixels start and stop exposure together. Available
+            on the pco.edge 5.5 USB, at a lower maximum rate than rolling mode.
+        GLOBAL_RESET:    All rows reset (start of exposure) simultaneously so
+            every pixel integrates the same laser pulse.  Readout is still
+            sequential (rolling), but there is no light-sheet artefact.
+            This mode remains available for existing scripts, but differs from
+            true global shutter because exposure ends row by row.
+    """
+    ROLLING_SHUTTER = 1
+    GLOBAL_SHUTTER  = 2
+    GLOBAL_RESET    = 4
+
+
+class TriggerMode(str, Enum):
+    """Supported camera acquisition triggers from the PCO SDK.
+
+    External Exposure Start takes one fixed-duration exposure per accepted
+    input pulse; the exposure duration remains in seconds on the camera.
+    """
+
+    AUTO_SEQUENCE = "auto sequence"
+    EXTERNAL_EXPOSURE_START = "external exposure start & software trigger"
+
+
+class BaseCamera(ABC):
+    """Universal Camera Interface."""
+
+    MIN_EXPOSURE_S: float = 0.0005  # 500 microseconds
+    MAX_EXPOSURE_S: float = 2.0     # pco.edge 5.5 USB rolling/global-reset limit
+
+    def __init__(self) -> None:
+        self._is_connected: bool = False
+        self._exposure_time_s: float = 0.010  # default 10 ms
+        self._readout_mode: ReadoutMode = ReadoutMode.ROLLING_SHUTTER
+        self._trigger_mode: TriggerMode = TriggerMode.AUTO_SEQUENCE
+
+    @property
+    def is_connected(self) -> bool:
+        return self._is_connected
+
+    @property
+    def can_pause_acquisition(self) -> bool:
+        """Whether waiting for storage can safely pause frame production."""
+        return False
+
+    @property
+    def yields_owned_batches(self) -> bool:
+        """Whether later reads cannot mutate a previously yielded image batch.
+
+        The scan writer copies reusable driver buffers. A driver may return
+        true only when each yielded NumPy array owns independent storage.
+        """
+        return False
+
+    @abstractmethod
+    def connect(self) -> None:
+        """Establish communication and configure initial camera state."""
+        pass
+
+    @abstractmethod
+    def close(self) -> None:
+        """Safely release the camera handle after applying disconnect defaults.
+
+        Camera drivers should leave the sensor in Rolling Shutter with a
+        100 ms exposure before releasing the connection.
+        """
+        pass
+
+    def validate_exposure_time(self, exposure_s: float) -> None:
+        """Check whether exposure time is within safe physical limits."""
+        minimum, maximum = self.get_exposure_limits()
+        if not (minimum <= exposure_s <= maximum):
+            raise CameraSafetyError(
+                f"Requested exposure time {exposure_s * 1e3:.2f} ms is outside "
+                f"safe limits [{minimum * 1e3:.2f} ms, "
+                f"{maximum * 1e3:.2f} ms]."
+            )
+
+    def get_exposure_limits(self) -> tuple[float, float]:
+        """Return allowed exposure seconds for the current shutter mode."""
+        maximum = 0.1 if self._readout_mode == ReadoutMode.GLOBAL_SHUTTER else self.MAX_EXPOSURE_S
+        return self.MIN_EXPOSURE_S, maximum
+
+    @abstractmethod
+    def set_exposure_time(self, exposure_s: float) -> None:
+        """Set exposure time in seconds."""
+        pass
+
+    @abstractmethod
+    def get_exposure_time(self) -> float:
+        """Get exposure time in seconds."""
+        pass
+
+    @abstractmethod
+    def set_trigger_mode(self, mode: TriggerMode) -> None:
+        """Select free-running or one fixed exposure per external trigger."""
+        pass
+
+    @abstractmethod
+    def get_trigger_mode(self) -> TriggerMode:
+        """Read the active hardware trigger mode, not only a cached request."""
+        pass
+
+    @abstractmethod
+    def acquire_frames(self, num_frames: int) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
+        """
+        Acquire a sequence of frames.
+        Returns:
+            images: 3D numpy array of shape (num_frames, height, width), uint16.
+            metadata: List of dicts containing timestamps and hardware flags.
+        """
+        pass
+
+    def iter_frames(
+        self,
+        num_frames: int,
+        batch_size: int = 4,
+        stop_check: Callable[[], bool] | None = None,
+    ) -> Iterator[Tuple[np.ndarray, List[Dict[str, Any]]]]:
+        """Yield bounded frame batches for memory-safe storage.
+
+        Args:
+            num_frames: Total number of frames to acquire.
+            batch_size: Maximum frames returned per batch. Units are frames.
+            stop_check: Return true to stop before starting another batch.
+        """
+        if num_frames < 1:
+            raise ValueError("num_frames must be >= 1.")
+        if batch_size < 1:
+            raise ValueError("batch_size must be >= 1.")
+        remaining = num_frames
+        while remaining:
+            if stop_check is not None and stop_check():
+                return
+            count = min(batch_size, remaining)
+            yield self.acquire_frames(count)
+            remaining -= count
+
+    def start_live(self, buffer_size: int = 4) -> None:
+        """Start continuous preview acquisition with a bounded frame buffer."""
+        if not self.is_connected:
+            raise RuntimeError("Camera is not connected.")
+        self._live_active = True
+
+    def acquire_live_frame(self, timeout_s: float | None = None) -> Tuple[np.ndarray, Dict[str, Any]]:
+        """Return the newest preview frame and metadata."""
+        if not getattr(self, "_live_active", False):
+            raise RuntimeError("Live acquisition is not active.")
+        frames, metadata = self.acquire_frames(1)
+        return frames[0], metadata[0] if metadata else {}
+
+    def stop_live(self) -> None:
+        """Stop continuous preview acquisition and release its buffers."""
+        self._live_active = False
+
+    @abstractmethod
+    def get_sensor_info(self) -> Dict[str, Any]:
+        """Return sensor resolution, pixel size, model, and serial number."""
+        pass
+
+    def get_roi(self) -> tuple[int, int, int, int]:
+        """Return zero-based (x0, y0, x1, y1) pixel bounds (upper bounds excluded)."""
+        info = self.get_sensor_info()
+        return getattr(self, "_roi", (0, 0, info.get("width", 2560), info.get("height", 2160)))
+
+    def get_roi_limits(self) -> Dict[str, Any]:
+        """Return hardware pixel steps, minimum size, and symmetry requirements."""
+        return {
+            "steps": (1, 1),
+            "minimum": (1, 1),
+            "symmetric": (False, False)
+        }
+
+    def validate_roi(self, roi: tuple[int, int, int, int]) -> None:
+        """Validate ROI parameters against sensor geometry and hardware constraints."""
+        if len(roi) != 4 or any(not isinstance(v, (int, np.integer)) for v in roi):
+            raise ValueError("ROI requires four integer pixel bounds (x0, y0, x1, y1).")
+        x0, y0, x1, y1 = [int(v) for v in roi]
+        info = self.get_sensor_info()
+        w, h = info.get("width", 2560), info.get("height", 2160)
+        limits = self.get_roi_limits()
+        step_x, step_y = limits["steps"]
+        min_w, min_h = limits["minimum"]
+        sym_x, sym_y = limits["symmetric"]
+
+        if not (0 <= x0 < x1 <= w) or not (0 <= y0 < y1 <= h):
+            raise ValueError(f"ROI ({x0}, {y0}, {x1}, {y1}) is outside sensor bounds [0, 0, {w}, {h}].")
+
+        if (x1 - x0) < min_w or (y1 - y0) < min_h:
+            raise ValueError(f"ROI span ({x1 - x0} x {y1 - y0}) is smaller than minimum ({min_w} x {min_h}).")
+
+        if (x0 % step_x != 0) or (x1 % step_x != 0):
+            raise ValueError(f"Horizontal ROI bounds must be multiples of {step_x} pixels.")
+        if (y0 % step_y != 0) or (y1 % step_y != 0):
+            raise ValueError(f"Vertical ROI bounds must be multiples of {step_y} pixels.")
+
+        if sym_x and (x0 + x1 != w):
+            raise ValueError(f"Horizontal ROI must be symmetric about sensor center (x0 + x1 = {w}).")
+        if sym_y and (y0 + y1 != h):
+            raise ValueError(f"Vertical ROI must be symmetric about sensor center (y0 + y1 = {h}).")
+
+    def set_roi(self, roi: tuple[int, int, int, int]) -> None:
+        """Configure hardware readout bounds."""
+        raise NotImplementedError("Hardware ROI is not supported by this camera driver.")
+
+    def get_readout_mode(self) -> ReadoutMode:
+        """Return the current sensor readout mode.
+
+        Returns:
+            ReadoutMode enum value reflecting the mode currently programmed
+            into the camera hardware (or the most recently requested mode
+            for drivers that cache the setting).
+        """
+        return self._readout_mode
+
+    def set_readout_mode(self, mode: ReadoutMode) -> None:
+        """Configure the sensor readout mode.
+
+        Switching modes on a physical pco.edge requires a full camera
+        reboot (~3–5 s).  Drivers that implement this must:
+          1. Stop any active recording.
+          2. Call the SDK shutter-mode setter (PCO ``set_camera_setup``).
+          3. Reboot/restart the camera and reconnect.
+          4. Update ``self._readout_mode``.
+
+        Raises:
+            NotImplementedError: If this driver does not support readout
+                mode selection (default behaviour).
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support readout mode selection."
+        )
+
+    def __enter__(self):
+        self.connect()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+

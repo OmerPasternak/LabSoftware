@@ -1,4 +1,6 @@
-"""Project defaults for the lab's fixed pco.edge camera."""
+"""Compatibility alias; implementation: hhg_control.camera.drivers.camera_defaults."""
 
-DEFAULT_CAMERA_SERIAL = "61008541"
-DISCONNECT_EXPOSURE_S = 0.1
+from importlib import import_module
+import sys
+
+sys.modules[__name__] = import_module("hhg_control.camera.drivers.camera_defaults")

@@ -55,6 +55,11 @@ Whenever planning or adding a new instrument:
 
 ## TECHNICAL DEFAULTS (deviate only with explicit reasoning, and flag it)
 
+- Canonical code lives in `src/hhg_control/gui/` and `src/hhg_control/camera/`.
+  Old driver/analysis/sequencer/UI paths are compatibility aliases, not copies
+  to edit. Shared guidance stays at root and in `docs/`; see
+  [the project layout guide](docs/project_layout.md).
+
 - Language: Python (3.10+). Do not suggest MATLAB, C#, or LabVIEW-adjacent tools for instrument control unless the student explicitly asks you to evaluate an alternative.
 - Instrument communication: prefer PyVISA for GPIB/USB/serial/Ethernet instruments; use vendor SDKs only when PyVISA/GenICam-style generic access isn't available.
 - Before writing a new driver from scratch, check whether PyMoDAQ (or a PyMoDAQ plugin) already covers the instrument, and say so explicitly rather than defaulting to a bespoke implementation.

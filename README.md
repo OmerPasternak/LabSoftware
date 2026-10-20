@@ -4,6 +4,10 @@ Python instrument-control software for the laboratory pco.edge 5.5 camera. The
 project separates camera drivers, scan sequencing and storage, and the PyQt GUI.
 Every hardware-facing implementation has a mock counterpart for offline work.
 
+Code is grouped into [`gui`](src/hhg_control/gui/) and
+[`camera`](src/hhg_control/camera/) packages. Shared guidance stays here and in
+[`docs/`](docs/); see [the layout and compatibility guide](docs/project_layout.md).
+
 ## Supported environment
 
 **Acquired pixels are immutable.** Acquisition saves SDK-returned values unchanged.

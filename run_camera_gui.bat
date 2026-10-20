@@ -11,7 +11,7 @@ if not exist ".venv\Scripts\python.exe" (
 )
 
 set "PYTHONPATH=%~dp0src"
-".venv\Scripts\python.exe" -m hhg_control.ui.camera_gui
+".venv\Scripts\python.exe" -m hhg_control.gui.camera
 if errorlevel 1 (
     echo.
     echo Application exited with an error.
