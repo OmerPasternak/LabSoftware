@@ -9,6 +9,12 @@ The section-by-section main-computer checklist and executable tests are in
 Select the project's `.venv` as the notebook kernel and run one section at a
 time. Its Python helper is `scripts/lab_computer_acceptance.py`.
 
+For current external-trigger diagnostics, use notebook **4H**, which reuses the
+GUI's production continuous acquisition and independent durability/pixel checks.
+See [external-trigger rate and scope timing](external_trigger_validation.md).
+4F/4G Auto Sequence benchmarks and the legacy section 8 count check alone do not
+measure electrical trigger-to-exposure delay.
+
 Use this at the first physical-camera session. Recheck the code and rerun the
 offline tests after further edits. The evidence below is from 2026-09-24 and
 is not a hardware acceptance result. The notebook now defaults to a centered

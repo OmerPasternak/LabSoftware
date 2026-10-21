@@ -262,10 +262,11 @@ def test_camera_exposure_readback_accepts_one_microsecond_quantization(config, m
 def test_notebook_setup_and_cells_are_executable():
     notebook = json.loads((lab.ROOT / "application tests/lab_computer_acceptance.ipynb").read_text(encoding="utf-8"))
     code_cells = ["".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "code"]
-    assert len(code_cells) == 15  # Setup, sections 1-8 and diagnostics 4B-4G.
+    assert len(code_cells) == 17  # Setup, sections 1-8, 4B-4H and optional 4H scope analysis.
     assert any("run_hdf5_pixel_verification_trial(" in source for source in code_cells)
     assert any("run_complete_pipeline_trial(" in source for source in code_cells)
     assert any("run_rolling_pipeline_trial(" in source for source in code_cells)
+    assert any("run_external_trigger_trial(" in source for source in code_cells)
     for source in code_cells:
         compile(source, "lab_computer_acceptance.ipynb", "exec")
     namespace = {}
@@ -304,6 +305,13 @@ def test_notebook_setup_and_cells_are_executable():
         namespace,
     )
     assert "HARD_DRIVE_DECISION" not in namespace
+    external_cell = next(source for source in code_cells if "RUN_EXTERNAL_TRIGGER_TEST" in source)
+    exec(external_cell, namespace)
+    assert namespace["RUN_EXTERNAL_TRIGGER_TEST"] is False
+    assert "REPORT_4H" not in namespace
+    scope_cell = next(source for source in code_cells if "SCOPE_EDGE_CSV = None" in source)
+    exec(scope_cell, namespace)
+    assert "SCOPE_4H" not in namespace
     assert 'lab.run_notebook_cell("Section 8", lambda: lab.execute(8, CONFIG))' in code_cells[-1]
 
 
