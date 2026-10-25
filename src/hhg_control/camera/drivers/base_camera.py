@@ -120,6 +120,27 @@ class BaseCamera(ABC):
         """Get exposure time in seconds."""
         pass
 
+    def get_delay_limits(self) -> tuple[float, float, float]:
+        """Return minimum, maximum and increment of exposure-start delay, in seconds."""
+        raise NotImplementedError("Camera exposure-start delay is unsupported.")
+
+    def validate_delay_time(self, delay_s: float) -> None:
+        """Require finite delay seconds within device limits and on its timing grid."""
+        minimum, maximum, increment = self.get_delay_limits()
+        if not np.isfinite(delay_s) or not minimum <= delay_s <= maximum:
+            raise CameraSafetyError(f"Delay {delay_s} s is outside [{minimum}, {maximum}] s.")
+        ticks = (delay_s - minimum) / increment
+        if not np.isclose(ticks, round(ticks), rtol=0, atol=1e-6):
+            raise CameraSafetyError(f"Delay must follow the {increment:g} s device increment.")
+
+    def set_delay_time(self, delay_s: float) -> None:
+        """Set exposure-start delay in seconds while idle, preserving exposure duration."""
+        raise NotImplementedError("Camera exposure-start delay is unsupported.")
+
+    def get_delay_time(self) -> float:
+        """Read actual exposure-start delay in seconds."""
+        raise NotImplementedError("Camera exposure-start delay is unsupported.")
+
     @abstractmethod
     def set_trigger_mode(self, mode: TriggerMode) -> None:
         """Select free-running or one fixed exposure per external trigger."""

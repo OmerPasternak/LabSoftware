@@ -49,6 +49,7 @@ from .workers import (
     PreviewTask,
     ScanSequenceTask,
 )
+from .diagnostics import build_diagnostics_window
 
 IMAGE_AXIS_RECT = (0.12, 0.08, 0.83, 0.86)
 COLOR_AXIS_RECT = (0.95, 0.08, 0.05, 0.86)
@@ -233,6 +234,7 @@ class CameraMainWindow(QMainWindow):
         self._preview_edit_until = 0.0
         self._numeric_editors = set()
         self._analysis_processes: list[QProcess] = []
+        self.delay_diagnostic = None
 
         self._build_ui()
         # Block competing edits without greying out the entire settings area.
@@ -715,9 +717,10 @@ class CameraMainWindow(QMainWindow):
         folder_buttons.addWidget(self.btn_browse)
         folder_buttons.addWidget(self.btn_open_folder)
         folder_buttons.addStretch(1)
-        folder_buttons.addWidget(self.btn_spectral_covariance)
-        folder_buttons.addWidget(self.btn_mark_harmonics)
-        folder_buttons.addWidget(self.btn_harmonic_g2)
+        self.diagnostics_window = build_diagnostics_window(self)
+        self.btn_diagnostics = QPushButton("Diagnostics…")
+        self.btn_diagnostics.clicked.connect(self._show_diagnostics)
+        folder_buttons.addWidget(self.btn_diagnostics)
         store_grid.addLayout(folder_buttons, 1, 0, 1, 2)
 
         store_grid.addWidget(QLabel("Header:"), 2, 0)
@@ -744,6 +747,12 @@ class CameraMainWindow(QMainWindow):
         root_layout.addWidget(self.control_panel)
 
         self._update_progress_display()
+
+    def _show_diagnostics(self) -> None:
+        """Show and raise the reusable diagnostics window without blocking live acquisition."""
+        self.diagnostics_window.show()
+        self.diagnostics_window.raise_()
+        self.diagnostics_window.activateWindow()
 
     def _launch_spectral_covariance(self) -> None:
         """Launch offline Pearson correlation analysis for one completed scan step."""
@@ -868,7 +877,8 @@ class CameraMainWindow(QMainWindow):
 
     def _configuration_busy(self) -> bool:
         """Check worker ownership without waiting for a hardware lock."""
-        return bool(self.active_mode_task or self.active_trigger_task or self.active_roi_task
+        return bool((self.delay_diagnostic and self.delay_diagnostic.active)
+                    or self.active_mode_task or self.active_trigger_task or self.active_roi_task
                     or self.active_exposure_task or self.active_connect_task or self.active_disconnect_task
                     or self._roi_change_pending or self._trigger_change_pending or self._exposure_change_pending
                     or self._mode_change_pending)
@@ -958,6 +968,9 @@ class CameraMainWindow(QMainWindow):
             task.deleteLater()
         callback = self._after_live_stopped
         self._after_live_stopped = None
+        if self.delay_diagnostic.active and self._hardware_state_unknown:
+            self.delay_diagnostic.stop()
+            return
         if self._closing:
             self.close()
         elif callback is not None:
@@ -969,6 +982,9 @@ class CameraMainWindow(QMainWindow):
     def _on_stop_clicked(self) -> None:
         """Global Stop: halts live view or gracefully aborts in-progress scan."""
         self._append_log("[STOP] Stop button pressed.")
+        if self.delay_diagnostic.active:
+            self.delay_diagnostic.stop()
+            return
         if self._configuration_display_preserved:
             self._configuration_display_preserved = False
             self._set_go_button_style(active=False)
@@ -2506,6 +2522,11 @@ class CameraMainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         """Cooperatively stop workers before disconnecting the camera."""
+        if self.delay_diagnostic.active:
+            self._closing = True
+            event.ignore()
+            self.delay_diagnostic.stop()
+            return
         self._is_live_active = False
         self._resume_live_after_scan = False
         self._after_live_stopped = None

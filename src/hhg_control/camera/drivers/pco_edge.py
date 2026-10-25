@@ -209,6 +209,42 @@ class PcoEdgeCamera(BaseCamera):
         self._trigger_mode = mode
         return mode
 
+    def get_delay_limits(self) -> tuple[float, float, float]:
+        """Read SDK minimum, maximum and increment in seconds; require valid descriptors."""
+        if self._cam is None or not self.is_connected:
+            raise RuntimeError("Camera is not connected.")
+        desc = self._cam.description
+        limits = tuple(float(desc[key]) for key in
+                       ("min delay time", "max delay time", "min delay step"))
+        if not all(math.isfinite(v) for v in limits) or not (0 <= limits[0] <= limits[1] and limits[2] > 0):
+            raise RuntimeError(f"Invalid SDK delay limits: {limits}")
+        return limits
+
+    def get_delay_time(self) -> float:
+        """Read actual exposure-start delay seconds from the PCO SDK."""
+        if self._cam is None or not self.is_connected:
+            raise RuntimeError("Camera is not connected.")
+        return float(self._cam.delay_time)
+
+    def set_delay_time(self, delay_s: float) -> None:
+        """Set delay seconds on the device timing grid, verifying delay and unchanged exposure."""
+        self.validate_delay_time(delay_s)
+        if getattr(self._cam, "is_recording", False) or getattr(self, "_live_active", False):
+            raise RuntimeError("Stop recording before changing camera delay.")
+        try:
+            exposure = self.get_exposure_time()
+            # pco 2.2.1 converts seconds to ns with int(), so nudge away from
+            # binary floating-point values just below an integer nanosecond.
+            maximum = self.get_delay_limits()[1]
+            self._cam.delay_time = min(maximum, math.nextafter(float(delay_s), math.inf))
+            if not math.isclose(self.get_delay_time(), delay_s, rel_tol=0, abs_tol=1e-12):
+                raise RuntimeError("Camera delay readback differs from request.")
+            if not math.isclose(self.get_exposure_time(), exposure, rel_tol=0, abs_tol=1e-9):
+                raise RuntimeError("Exposure changed while setting camera delay.")
+        except Exception:
+            self.state_unknown = True
+            raise
+
     def set_trigger_mode(self, mode: TriggerMode) -> None:
         """Select Auto Sequence or fixed-duration external exposure starts.
 

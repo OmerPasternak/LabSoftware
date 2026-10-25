@@ -43,6 +43,7 @@ class MockPcoCamera(BaseCamera):
         self._dark_bank: np.ndarray | None = None
         self._dark_idx = 0
         self._frame_count = 0
+        self._delay_time_s = 0.0
 
     def _prepare_simulation_data(self) -> None:
         """Build separated bright/weak lines and a noisy sloping background.
@@ -121,6 +122,23 @@ class MockPcoCamera(BaseCamera):
 
     def get_exposure_time(self) -> float:
         return self._exposure_time_s
+
+    def get_delay_limits(self) -> tuple[float, float, float]:
+        """Simulate a 0–1 s exposure-start delay with 1 ns increments."""
+        return 0.0, 1.0, 1e-9
+
+    def set_delay_time(self, delay_s: float) -> None:
+        """Store simulated delay seconds; no physical trigger/timing is modeled."""
+        if not self.is_connected or getattr(self, "_live_active", False):
+            raise RuntimeError("Delay changes require a connected, idle camera.")
+        self.validate_delay_time(delay_s)
+        self._delay_time_s = float(delay_s)
+
+    def get_delay_time(self) -> float:
+        """Return simulated exposure-start delay seconds."""
+        if not self.is_connected:
+            raise RuntimeError("Camera is not connected.")
+        return self._delay_time_s
 
     def set_trigger_mode(self, mode: TriggerMode) -> None:
         """Select simulated auto or external triggering without controlling hardware.

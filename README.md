@@ -41,6 +41,11 @@ legacy API mode and is not the GUI's Global Shutter selection.
 The bright color bar touches the image, and its adjacent endpoint numbers are editable: click the top
 number for maximum ADU or the bottom number for minimum ADU, then press Enter.
 
+Open **Diagnostics…** for X Pearson, Mark Harmonics, Harmonic g², and automatic
+[camera-delay characterization](docs/camera_delay_characterization.md). Choose one
+harmonic rectangle; the tool acquires two delay ranges and opens a Python graph
+of average intensity with sample-STDEV error bars.
+
 On Windows, double-click `run_camera_gui.vbs` to open this checkout without a
 Command Prompt window. It uses this checkout's `.venv` and `src` directory and
 shows a setup message if `.venv` is missing. Keep `run_camera_gui.bat` for
