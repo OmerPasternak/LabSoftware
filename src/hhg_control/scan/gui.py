@@ -1,6 +1,7 @@
 """Separate Qt scan window; every instrument operation belongs to its worker."""
 
 import sys
+import json
 from threading import Event
 
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -48,7 +49,13 @@ class ScanWorker(QThread):
             self.session.connect(self.cancel.is_set)
             directory = self.session.scan.run(self.plan, resume_directory=self.resume_directory,
                                               on_event=self.event.emit)
-            self.message.emit(f"COMPLETE: {directory}")
+            with open(directory / "run.json", encoding="utf-8") as handle:
+                performance = json.load(handle)["performance"]
+            self.message.emit(
+                f"COMPLETE: {directory}\nWhole-scan effective rate: {performance['effective_fps']:.3f} fps "
+                f"({performance['verified_frames']} verified frames / "
+                f"{performance['active_execution_s']:.2f} s, including motor actions)"
+            )
         except Exception as error:
             self.failed.emit()
             self.message.emit(f"STOPPED / FAILED: {error}")

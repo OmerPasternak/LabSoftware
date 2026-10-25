@@ -96,9 +96,15 @@ and their metadata remain compatible.
 The run manifest records plan hash, point/repeat/visit/attempt/recording IDs,
 labels, motor identity/inspection, actual camera settings, pre/post readbacks,
 UTC and process-local monotonic boundaries, verification, cancellation and
-cleanup outcomes. Monotonic values from different process runs are not a shared
-absolute clock. Host receipt timestamps are not exposure timestamps or proof
-of one frame per external pulse.
+cleanup outcomes. It also records the whole-scan effective rate: total verified
+frames divided by active scan execution time. That timer includes preflight,
+every motor move and settling interval, acquisition, storage, and verification;
+when recovering a run, it accumulates active execution segments and excludes
+time while the scan was not running. The scan window displays this result at
+completion. It is the end-to-end rate, so motor actions and per-position
+recording barriers reduce it as they do in a real scan. Monotonic values from
+different process runs are not a shared absolute clock. Host receipt timestamps
+are not exposure timestamps or proof of one frame per external pulse.
 
 To recover, explicitly select the earlier run folder and the identical plan
 and camera settings. Recovery holds an OS file lock, rechecks completed source

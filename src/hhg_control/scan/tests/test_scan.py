@@ -119,6 +119,12 @@ def test_reverse_repeats_frame_ids_and_raw_pixels_are_bound_to_recording(rig):
     run = scan.run(plan((.1, .2, .1), repeats=2, zero_mm=.1, fs_per_mm=-1000))
     report = manifest(run)
     assert report["status"] == "COMPLETE"
+    assert report["performance"]["verified_frames"] == 30
+    assert report["performance"]["active_execution_s"] > 0
+    assert report["performance"]["effective_fps"] == pytest.approx(
+        report["performance"]["verified_frames"] / report["performance"]["active_execution_s"]
+    )
+    assert "motor actions" in report["performance"]["definition"]
     assert motor.moves == camera.recordings == [.1, .2, .1, .1, .2, .1]
     identities = set()
     for index, point in enumerate(report["points"]):
@@ -336,6 +342,12 @@ def test_recovery_after_partial_uses_new_recording_without_overwriting(rig):
     assert len(attempts) == 2
     assert attempts[0]["recording_id"] != attempts[1]["recording_id"]
     assert attempts[1]["status"] == "VERIFIED"
+    completed = manifest(run)
+    assert len(completed["execution_segments"]) == 2
+    assert completed["performance"]["verified_frames"] == 5
+    assert completed["performance"]["active_execution_s"] == pytest.approx(
+        sum(segment["elapsed_s"] for segment in completed["execution_segments"])
+    )
 
 
 def test_same_run_cannot_be_reserved_for_two_recoveries(tmp_path):

@@ -128,8 +128,11 @@ class MotorCameraScan:
             raise TypeError("A validated ScanPlan is required.")
         if not self._running.acquire(blocking=False):
             raise RuntimeError("Another scan is active.")
+        execution_started_ns = time.monotonic_ns()
+        execution_started = stamp()
         original_dir = self.camera.storage_dir
         record, run_dir, active = None, None, None
+        metrics_enabled = False
         try:
             with self.motor.reserve(), self.camera.reserve(), ExitStack() as leases:
                 try:
@@ -156,6 +159,7 @@ class MotorCameraScan:
                                   "motor_limits": asdict(self.motor.limits),
                                   "simulation": identity["simulation"], "created": stamp(), "status": "PREFLIGHT",
                                   "points": [{"status": "PENDING", "attempts": []} for _ in points]}
+                        metrics_enabled = True
                     else:
                         run_dir = Path(resume_directory).resolve()
                         leases.enter_context(reserve_run(run_dir))
@@ -185,6 +189,7 @@ class MotorCameraScan:
                                     or context["recording_id"] != point["attempts"][-1]["recording_id"]
                                     or context["target_position_mm"] != points[index][3].position_mm):
                                 raise ValueError("Verified recovery recording identity or target does not match its visit.")
+                    metrics_enabled = True
                     current = initial.position_mm
                     for _, _, _, visit in points[next_index:]:
                         self.motor.limits.validate_move(current, visit.position_mm)
@@ -285,4 +290,27 @@ class MotorCameraScan:
                 finally:
                     self.camera.set_storage_dir(original_dir)
         finally:
+            if metrics_enabled and record is not None and run_dir is not None:
+                ended = stamp()
+                elapsed_s = max(0.0, (time.monotonic_ns() - execution_started_ns) / 1e9)
+                record.setdefault("execution_segments", []).append({
+                    "started": execution_started, "ended": ended, "elapsed_s": elapsed_s,
+                })
+                verified_frames = sum(
+                    int(attempt.get("verification", {}).get("frames_verified", 0))
+                    for point in record.get("points", [])
+                    for attempt in point.get("attempts", [])
+                    if attempt.get("status") == "VERIFIED"
+                )
+                active_s = sum(segment["elapsed_s"] for segment in record["execution_segments"])
+                record["performance"] = {
+                    "verified_frames": verified_frames,
+                    "active_execution_s": active_s,
+                    "effective_fps": verified_frames / active_s if active_s > 0 else 0.0,
+                    "definition": "verified frames divided by active scan execution time, including preflight, motor actions, settling, acquisition, storage, and verification; recovery downtime excluded",
+                }
+                try:
+                    save_json(run_dir / "run.json", record)
+                except Exception:
+                    pass  # Preserve the original failure/result if performance metadata cannot be updated.
             self._running.release()
