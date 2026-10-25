@@ -277,19 +277,25 @@ class CameraScanManager:
         batch_size: int = 4,
         queue_batches: int | None = None,
         abort_check: Optional[Callable[[], bool]] = None,
+        preview_callback: Optional[Callable[[np.ndarray], None]] = None,
+        preview_interval_s: float = 0.2,
     ) -> tuple[Path, np.ndarray]:
         """Acquire and atomically save one scan step in bounded frame batches.
 
         Units are raw 16-bit ADU, seconds for exposure, and sensor pixels for ROI.
         The byte-bounded queue overlaps camera capture with HDF5 writing and
         absorbs finite filesystem stalls. A mock waits for storage; a physical
-        camera fails the step if sustained backpressure fills the queue.
+        camera fails the step if sustained backpressure fills the queue. When
+        requested, preview_callback receives an owned copy of the latest batch
+        frame no more often than preview_interval_s; preview work never changes
+        the raw batch written to disk.
         """
         with self._operation("SCANNING"):
             return self._acquire_and_save_step(
                 experiment_name, step_index, param_name, param_value, num_frames,
                 run_id=run_id, batch_size=batch_size, queue_batches=queue_batches,
-                abort_check=abort_check,
+                abort_check=abort_check, preview_callback=preview_callback,
+                preview_interval_s=preview_interval_s,
             )
 
     def _acquire_and_save_step(
@@ -304,6 +310,9 @@ class CameraScanManager:
         batch_size: int,
         queue_batches: int | None,
         abort_check: Optional[Callable[[], bool]],
+        preview_callback: Optional[Callable[[np.ndarray], None]] = None,
+        preview_interval_s: float = 0.2,
+        preview_schedule: list[float] | None = None,
         source=None,
     ) -> tuple[Path, np.ndarray]:
         step_started = time.perf_counter()
@@ -314,6 +323,8 @@ class CameraScanManager:
             raise ValueError("num_frames must be >= 1.")
         if batch_size < 1 or (queue_batches is not None and queue_batches < 1):
             raise ValueError("batch_size must be >= 1 and queue_batches must be None or >= 1.")
+        if preview_interval_s <= 0:
+            raise ValueError("preview_interval_s must be positive.")
 
         # HDF5 is only needed for a saved scan, not for opening the GUI or live view.
         import h5py
@@ -404,6 +415,7 @@ class CameraScanManager:
         producer_finished = 0.0
         producer_copy_s = 0.0
         producer_latest_frame_copy_s = 0.0
+        next_preview_at = preview_schedule[0] if preview_schedule is not None else 0.0
         producer_copied_image_bytes = 0
         queue_put_durations = _Timings()
         queue_full_wait_events = 0
@@ -588,11 +600,21 @@ class CameraScanManager:
                     if diagnostics is not None:
                         diagnostics.queue_sample(captured, written, pending.qsize(),
                                                  queue_capacity_frames, queue_capacity_bytes)
-                    # The GUI emits one preview only after the step completes.
-                    # Copy its final image once, outside the ordinary batch path.
+                    # Preview uses an owned copy, separate from the exact raw
+                    # batch passed to the writer. Rate limiting and the caller's
+                    # latest-frame mailbox keep this path from back-pressuring capture.
+                    now = time.perf_counter()
+                    preview_frame = None
+                    if preview_callback is not None and now >= next_preview_at:
+                        preview_frame = images[-1].copy()
+                        preview_callback(preview_frame)
+                        next_preview_at = now + preview_interval_s
+                        if preview_schedule is not None:
+                            preview_schedule[0] = next_preview_at
+                    # Retain the step's final frame for the existing completion update.
                     if captured == num_frames:
                         latest_copy_started = time.perf_counter()
-                        latest_frame = images[-1].copy()
+                        latest_frame = preview_frame if preview_frame is not None else images[-1].copy()
                         producer_latest_frame_copy_s += time.perf_counter() - latest_copy_started
                 if abort_check is not None and abort_check() and captured != num_frames:
                     raise AcquisitionAborted(
@@ -677,6 +699,8 @@ class CameraScanManager:
         abort_check: Optional[Callable[[], bool]] = None,
         run_id: str | None = None,
         continuous: bool = False,
+        preview_callback: Optional[Callable[[np.ndarray], None]] = None,
+        preview_interval_s: float = 0.2,
     ) -> Iterator[tuple[int, float, Path, np.ndarray]]:
         """Run steps with dedicated retrieval and overlapped durable pixel checks.
 
@@ -688,7 +712,9 @@ class CameraScanManager:
         a later setpoint before its on_step_start callback. ``continuous=True``
         is only for metadata-only scans (the current GUI): one SDK recording
         spans all file slices and may read ahead of their metadata callbacks.
-        Never enable it around physical actuator changes.
+        Never enable it around physical actuator changes. An optional preview
+        callback receives a copied frame at most once per preview_interval_s;
+        the cadence carries across scan-step file boundaries.
         """
         if not self.camera.is_connected:
             raise RuntimeError("Cannot execute scan: Camera is disconnected.")
@@ -696,6 +722,8 @@ class CameraScanManager:
             raise ValueError(f"Number of steps must be at least 1, got {num_steps}.")
         if num_frames < 1:
             raise ValueError("num_frames must be >= 1.")
+        if preview_interval_s <= 0:
+            raise ValueError("preview_interval_s must be positive.")
         if start_step < 0 or start_step >= num_steps:
             raise ValueError(f"start_step must be between 0 and {num_steps - 1}, got {start_step}.")
         run_id = run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
@@ -708,6 +736,7 @@ class CameraScanManager:
         with self._operation("SCANNING"), self._camera_lock:
             storage = ClosedFilePipeline()
             continuous_source = None
+            preview_schedule = [0.0]
             try:
                 try:
                     storage.start(abort_check)
@@ -740,6 +769,9 @@ class CameraScanManager:
                             experiment_name, step, param_name, value, num_frames,
                             run_id=run_id, batch_size=4, queue_batches=1,
                             abort_check=abort_check, source=source,
+                            preview_callback=preview_callback,
+                            preview_interval_s=preview_interval_s,
+                            preview_schedule=preview_schedule,
                         )
                         manifest = source.finish_manifest()
                         storage.submit(filepath, manifest, acquisition={"started_at": started_at,

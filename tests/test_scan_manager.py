@@ -13,12 +13,14 @@ def test_scan_step_hdf5_output(tmp_path):
     cam.set_trigger_mode(TriggerMode.EXTERNAL_EXPOSURE_START)
 
     scan_mgr = CameraScanManager(camera=cam, storage_dir=tmp_path)
+    previews = []
     h5_path, latest_frame = scan_mgr.acquire_and_save_step(
         experiment_name="hhg_test",
         step_index=0,
         param_name="delay_ps",
         param_value=1.525,
-        num_frames=4
+        num_frames=4,
+        preview_callback=previews.append,
     )
 
     assert h5_path.exists()
@@ -33,6 +35,8 @@ def test_scan_step_hdf5_output(tmp_path):
         assert dset.dtype == np.uint16
         assert dset.attrs["physical_units"] == "16-bit digital counts (ADU)"
         assert dset.attrs["data_dimension_ordering"] == "[frame_index, sensor_height_y, sensor_width_x]"
+        assert len(previews) == 1
+        np.testing.assert_array_equal(previews[0], dset[-1])
 
         # Verify backward compatibility
         assert h5f.attrs["experiment_name"] == "hhg_test"

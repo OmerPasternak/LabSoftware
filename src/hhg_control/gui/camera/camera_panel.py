@@ -17,7 +17,7 @@ from datetime import datetime
 import numpy as np
 
 from PyQt6 import sip
-from PyQt6.QtCore import Qt, QPointF, QEvent, QProcess
+from PyQt6.QtCore import Qt, QPointF, QEvent, QProcess, QTimer
 from PyQt6.QtGui import QColor, QPainter
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -48,6 +48,7 @@ from .workers import (
     LiveStreamTask,
     PreviewTask,
     ScanSequenceTask,
+    LatestFrameMailbox,
 )
 from .diagnostics import build_diagnostics_window
 
@@ -55,6 +56,8 @@ IMAGE_AXIS_RECT = (0.12, 0.08, 0.83, 0.86)
 COLOR_AXIS_RECT = (0.95, 0.08, 0.05, 0.86)
 # Agent-editable acquisition backlog limit; intentionally absent from the GUI.
 APPLICATION_WRITER_QUEUE_GIB = 16.0
+# Adjust this value to change scan-preview cadence without changing acquisition.
+SCAN_PREVIEW_FPS = 5.0
 APPLICATION_WRITER_MEMORY_RESERVE_GIB = 16.0
 # Simulation can wait for storage; keep it usable on an 8-GB development PC.
 # Reserve is free headroom, not an allocation. Physical budgets above are unchanged.
@@ -212,6 +215,10 @@ class CameraMainWindow(QMainWindow):
         self._trigger_change_pending: bool = False
         self._resume_live_after_scan: bool = False
         self._scan_completed_successfully: bool = False
+        self._scan_preview_mailbox = LatestFrameMailbox()
+        self._scan_preview_timer = QTimer(self)
+        self._scan_preview_timer.setInterval(max(1, round(1000 / SCAN_PREVIEW_FPS)))
+        self._scan_preview_timer.timeout.connect(self._show_latest_scan_preview)
 
         # Matplotlib display caches
         self._image_artist = None
@@ -2312,6 +2319,8 @@ class CameraMainWindow(QMainWindow):
             start_step=start_step,
             run_id=self._current_run_id,
             expected_roi=active_roi, expected_trigger=requested_trigger,
+            preview_mailbox=self._scan_preview_mailbox,
+            preview_interval_s=1.0 / SCAN_PREVIEW_FPS,
         )
         self.active_scan_task.step_started.connect(self._on_scan_step_started)
         self.active_scan_task.step_completed.connect(self._on_scan_step_completed)
@@ -2320,7 +2329,15 @@ class CameraMainWindow(QMainWindow):
         self.active_scan_task.error_occurred.connect(self._on_scan_error)
         self.active_scan_task.finished.connect(self._on_scan_task_finished)
         self._scan_segment_started_at = perf_counter()
+        self._scan_preview_mailbox.take_latest()
+        self._scan_preview_timer.start()
         self.active_scan_task.start()
+
+    def _show_latest_scan_preview(self) -> None:
+        """Render the newest scan preview without queueing stale GUI updates."""
+        frame = self._scan_preview_mailbox.take_latest()
+        if frame is not None:
+            self._update_display(frame)
 
     def _resume_live_if_scan_not_started(self) -> None:
         """Restore an interrupted live view when scan preflight blocks acquisition."""
@@ -2484,6 +2501,8 @@ class CameraMainWindow(QMainWindow):
         QMessageBox.warning(self, "Scan Execution Error", f"Scan error occurred:\n\n{err_msg}")
 
     def _on_scan_task_finished(self) -> None:
+        self._scan_preview_timer.stop()
+        self._scan_preview_mailbox.take_latest()
         if self.active_scan_task is not None:
             self.active_scan_task.deleteLater()
             self.active_scan_task = None

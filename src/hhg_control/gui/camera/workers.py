@@ -1,7 +1,7 @@
 """Background Qt workers for serialized camera operations."""
 
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock
 import time
 
 import numpy as np
@@ -11,6 +11,25 @@ from hhg_control.camera.sequencer.scan_manager import CameraScanManager
 from hhg_control.camera.drivers.base_camera import BaseCamera, ReadoutMode, TriggerMode
 from hhg_control.camera.drivers.camera_defaults import DEFAULT_CAMERA_SERIAL
 from hhg_control.camera.drivers.mock_camera import MockPcoCamera
+
+
+class LatestFrameMailbox:
+    """Hold only the newest display-only frame without queuing GUI events."""
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._frame: np.ndarray | None = None
+
+    def publish(self, frame: np.ndarray) -> None:
+        """Publish an owned preview frame; callers must not mutate it afterward."""
+        with self._lock:
+            self._frame = frame
+
+    def take_latest(self) -> np.ndarray | None:
+        """Return and clear the newest preview frame, dropping older previews."""
+        with self._lock:
+            frame, self._frame = self._frame, None
+            return frame
 
 
 class CameraConnectTask(QThread):
@@ -263,6 +282,8 @@ class ScanSequenceTask(QThread):
         run_id: str | None = None,
         expected_roi=None,
         expected_trigger=None,
+        preview_mailbox: LatestFrameMailbox | None = None,
+        preview_interval_s: float = 0.2,
     ) -> None:
         super().__init__()
         self.scan_mgr = scan_mgr
@@ -275,6 +296,8 @@ class ScanSequenceTask(QThread):
         self.start_step = start_step
         self.run_id = run_id
         self.expected_roi, self.expected_trigger = expected_roi, expected_trigger
+        self.preview_mailbox = preview_mailbox
+        self.preview_interval_s = preview_interval_s
         self._abort_requested = False
         self._current_step = start_step
 
@@ -307,6 +330,8 @@ class ScanSequenceTask(QThread):
                 on_step_start=on_start,
                 abort_check=lambda: self._abort_requested,
                 run_id=self.run_id,
+                preview_callback=(self.preview_mailbox.publish if self.preview_mailbox else None),
+                preview_interval_s=self.preview_interval_s,
                 # GUI setpoints are metadata only; keep one recorder session
                 # across files. Actuator scans must use the gated default.
                 continuous=True,
