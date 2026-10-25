@@ -2,7 +2,7 @@
 
 import json
 import os
-from threading import Event
+from threading import Event, Thread
 from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -81,6 +81,10 @@ def test_scan_raw_frames_statistics_settings_and_plot(manager, monkeypatch):
             np.testing.assert_array_equal(images, expected_frames)
             metas = [json.loads(value) for value in source["frame_metadata/json"][:]]
             assert [m["frame_id"] for m in metas] == [m[1]["frame_id"] for m in captured[index*3:index*3+3]]
+            context = json.loads(source.attrs["frame_acquisition_context_json"])
+            assert context["actual_delay_ns"] == pytest.approx(point["actual_delay_ns"])
+            assert context["delay_point_index"] == index + 1
+            assert all(meta["acquisition_context"] == context for meta in metas)
         sums = images[:, 2:6, 1:8].sum(axis=(1, 2), dtype=np.float64)
         assert point["average_adu"] == pytest.approx(sums.mean())
         assert point["stdev_adu"] == pytest.approx(sums.std(ddof=1))
@@ -192,6 +196,171 @@ def test_reference_rejects_unverified_external_trigger(manager, monkeypatch, fau
     assert manager.state == "IDLE"
     assert camera.get_trigger_mode() == TriggerMode.AUTO_SEQUENCE
     assert not camera.get_external_trigger_input_enabled()
+
+
+def test_late_last_frame_finishes_before_next_delay(manager, monkeypatch):
+    """Hold a final frame in flight; no new delay is applied until it is saved and stopped."""
+    window = select(manager)
+    camera = manager.camera
+    original_iter, original_set = camera.iter_frames, camera.set_delay_time
+    waiting, release = Event(), Event()
+    active = Event()
+    settings, errors = [], []
+
+    def set_delay(value):
+        assert not active.is_set(), "Delay changed while a frame was still in flight"
+        settings.append(value)
+        original_set(value)
+
+    def delayed_frames(count, **kwargs):
+        active.set()
+        frozen_delay = camera.get_delay_time()
+        try:
+            for index, (images, metadata) in enumerate(original_iter(count, **kwargs)):
+                if len(settings) == 1 and index == count - 1:
+                    waiting.set()
+                    assert release.wait(5), "Test did not release the late frame"
+                assert camera.get_delay_time() == frozen_delay
+                yield images, metadata
+        finally:
+            active.clear()
+
+    monkeypatch.setattr(camera, "set_delay_time", set_delay)
+    monkeypatch.setattr(camera, "iter_frames", delayed_frames)
+    def run():
+        try:
+            characterize_delay(manager, "test", 3, window, lambda: False, lambda _: None)
+        except BaseException as exc:
+            errors.append(exc)
+    thread = Thread(target=run)
+    thread.start()
+    try:
+        assert waiting.wait(5)
+        assert settings == [0.0]
+    finally:
+        release.set()
+        thread.join(15)
+    assert not thread.is_alive() and not errors
+    report = json.loads(filesystem_path(manager.storage_dir / "camera_delay_test.json").read_text())
+    for index, point in enumerate(report["points"], 1):
+        with h5py.File(filesystem_path(point["source_files"][0]), "r") as source:
+            for value in source["frame_metadata/json"][:]:
+                context = json.loads(value)["acquisition_context"]
+                assert context["delay_point_index"] == index
+                assert context["actual_delay_ns"] == pytest.approx(point["actual_delay_ns"])
+
+
+@pytest.mark.parametrize("recorder_running,sensor_state", [(True, "off"), (False, "on"), (False, None)])
+def test_physical_boundary_rejects_active_or_unknown_sensor(monkeypatch, recorder_running, sensor_state):
+    """A recorder stop alone does not prove the physical camera is idle."""
+    from hhg_control.camera.drivers import pco_edge
+    monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
+    camera = pco_edge.PcoEdgeCamera()
+    camera._is_connected = True
+    camera._cam = SimpleNamespace(
+        is_recording=recorder_running,
+        sdk=SimpleNamespace(get_recording_state=lambda: {"recording state": sensor_state}),
+    )
+    with pytest.raises(RuntimeError, match="Cannot verify acquisition stopped"):
+        camera.verify_acquisition_stopped()
+    assert camera.state_unknown
+
+
+def test_unfinished_recorder_blocks_next_delay_and_cleanup_changes(manager, monkeypatch):
+    """Retain acquired data and refuse all setting changes if the stop cannot be verified."""
+    window = select(manager)
+    calls = []
+    original_set = manager.camera.set_delay_time
+    original_iter = manager.camera.iter_frames
+    stopped = [True]
+    def set_delay(value):
+        calls.append(value)
+        original_set(value)
+    def frames(count, **kwargs):
+        yield from original_iter(count, **kwargs)
+        stopped[0] = False
+    def verify():
+        if not stopped[0]:
+            manager.camera.state_unknown = True
+            raise RuntimeError("Cannot verify acquisition stopped; camera state unknown.")
+    monkeypatch.setattr(manager.camera, "verify_acquisition_stopped", verify)
+    monkeypatch.setattr(manager.camera, "iter_frames", frames)
+    monkeypatch.setattr(manager.camera, "set_delay_time", set_delay)
+    with pytest.raises(RuntimeError, match="Cannot verify acquisition stopped"):
+        characterize_delay(manager, "test", 3, window, lambda: False, lambda _: None)
+    assert calls == [0.0]
+    assert len(list(manager.storage_dir.glob("*.h5"))) == 2
+    report = json.loads(filesystem_path(manager.storage_dir / "camera_delay_test.json").read_text())
+    assert not report["complete"] and not report["points"]
+
+
+def test_physical_fifo_path_assigns_recording_delay_not_arrival_time(tmp_path, monkeypatch):
+    """Use the real physical driver with a fake SDK and repeated IDs across fresh recorders."""
+    from hhg_control.camera.drivers import pco_edge
+    monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
+
+    class RecorderCamera:
+        description = {"min delay time": 0, "max delay time": 1, "min delay step": 10e-9}
+        configuration = {"roi": (1, 1, 8, 4)}
+        exposure_time, delay_time = 0.001, 3000e-9
+        is_recording = False
+        mode = TriggerMode.AUTO_SEQUENCE.value
+        enabled = "off"
+
+        def __init__(self):
+            self.recordings = []
+            self.sdk = SimpleNamespace(
+                get_recording_state=lambda: {"recording state": "on" if self.is_recording else "off"},
+                get_trigger_mode=lambda: {"trigger mode": self.mode},
+                set_trigger_mode=lambda mode: setattr(self, "mode", mode),
+                arm_camera=lambda: None,
+                get_hwio_signal=lambda index: {"enabled": self.enabled, "polarity": "rising edge"},
+                get_camera_setup=lambda: {"setup": (1, 0, 0, 0)},
+            )
+            self.rec = SimpleNamespace(get_status=lambda: {"bFIFOOverflow": False, "dwLastError": 0})
+
+        def configureHWIO_1_exposureTrigger(self, enabled, polarity):
+            self.enabled = "on" if enabled else "off"
+
+        def record(self, number_of_images, mode):
+            assert not self.is_recording and mode == "fifo"
+            self.recorded_delay = self.delay_time
+            self.recordings.append(self.recorded_delay)
+            self.frame_index = 0
+            self.is_recording = True
+
+        def wait_for_new_image(self, **kwargs):
+            assert self.is_recording
+
+        def image(self, image_index):
+            assert self.delay_time == self.recorded_delay
+            self.frame_index += 1
+            # A frame's pixel value encodes the setting when its recorder started.
+            return (np.full((4, 8), round(self.recorded_delay * 1e9), dtype=np.uint16),
+                    {"recorder image number": self.frame_index})
+
+        def stop(self):
+            self.is_recording = False
+
+    camera = pco_edge.PcoEdgeCamera()
+    sdk_camera = RecorderCamera()
+    camera._cam, camera._is_connected = sdk_camera, True
+    camera._info = {"model": "FAKE SDK", "width": 8, "height": 4}
+    manager = CameraScanManager(camera, tmp_path)
+    reference = acquire_delay_reference(manager, "physical_path", 3, lambda: False, lambda _: None)
+    window = make_intensity_window((1, 1, 7, 3), reference)
+    report_path = characterize_delay(manager, "physical_path", 3, window, lambda: False, lambda _: None)
+    report = json.loads(filesystem_path(report_path).read_text())
+    assert report["complete"] and len(sdk_camera.recordings) == 16
+    for point in report["points"]:
+        with h5py.File(filesystem_path(point["source_files"][0]), "r") as source:
+            assert np.all(source["images"][:] == round(point["actual_delay_ns"]))
+            metadata = [json.loads(value) for value in source["frame_metadata/json"][:]]
+            assert [value["frame_id"] for value in metadata] == [1, 2, 3]
+            assert all(value["acquisition_context"]["actual_delay_ns"] == pytest.approx(point["actual_delay_ns"])
+                       for value in metadata)
+    assert camera.get_delay_time() == pytest.approx(3000e-9)
+    assert not sdk_camera.is_recording
 
 
 def test_physical_delay_adapter_uses_seconds_and_verifies_readback(monkeypatch):

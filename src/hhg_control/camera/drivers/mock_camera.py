@@ -156,6 +156,11 @@ class MockPcoCamera(BaseCamera):
         """Return the simulated acquisition trigger selection."""
         return self._trigger_mode
 
+    def verify_acquisition_stopped(self) -> None:
+        """Check the synchronous mock is connected and no live recorder is active."""
+        if not self.is_connected or getattr(self, "_live_active", False):
+            raise RuntimeError("Mock acquisition is not stopped and connected.")
+
     def get_external_trigger_input_settings(self) -> dict[str, object]:
         """Return simulated input settings; polarity does not model electrical pulses."""
         return {"enabled": self._external_trigger_input_enabled,

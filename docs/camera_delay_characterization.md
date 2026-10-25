@@ -35,7 +35,24 @@ The scan takes five points across **0–100 ns**, then ten across **1900–2100 
 Targets round to the SDK's supported timing grid; insufficient range/resolution
 causes an explicit failure. The report and graph use verified actual delay values.
 Each point gets a separate recorder session and schema-2.0 raw HDF5 file. The
-existing intensity tool sums every raw pixel inside the rectangle for each frame,
+delay remains fixed until every requested frame has arrived, its iterator has
+closed, and the writer has finished. Before any next delay or restoration,
+the physical driver checks both recorder inactivity and SDK sensor recording
+state `off`. A failed/unknown stop blocks setting changes and marks the camera
+state unknown. PCO 2.2.1 `record()` stops/deletes the previous recorder and creates
+a fresh one, so an old recorder's queue cannot be consumed under the next delay.
+External pulses between recordings are outside the acquisition; this is not
+a gapless measurement across the delay transitions.
+
+Each saved frame's JSON includes `acquisition_context`: run ID, delay-point
+index, verified `actual_delay_ns`, trigger mode, and the assignment method.
+The same snapshot is stored in the file's `frame_acquisition_context_json`
+attribute. This is the constant camera setting for that isolated recording,
+not a delay inferred from host arrival time or a per-frame electrical timing
+measurement. Delay readback is checked again after recording. A mismatch or
+failed stop prevents plotting/deletion and retains the data for inspection.
+
+The existing intensity tool sums every raw pixel inside the rectangle for each frame,
 then calculates its average and sample STDEV (N−1). Error bars show fluctuations
 across individual frames, not standard error of the average. No background
 subtraction, filtering or frame rejection is performed; raw files remain unchanged.

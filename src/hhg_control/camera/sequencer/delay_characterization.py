@@ -51,6 +51,7 @@ def _session(manager):
     """Own camera serialization; restore delay, trigger mode and input state on exit."""
     with manager._operation("DELAY_DIAGNOSTIC"), manager._camera_lock:
         camera = manager.camera
+        camera.verify_acquisition_stopped()
         original_delay = camera.get_delay_time()
         original_trigger = camera.get_trigger_mode()
         original_external_input = camera.get_external_trigger_input_enabled()
@@ -59,6 +60,8 @@ def _session(manager):
             camera.set_external_trigger_input_enabled(True)
             yield camera, original_delay, original_trigger
         finally:
+            # Never change settings if recorder cleanup did not finish successfully.
+            camera.verify_acquisition_stopped()
             failures = []
             for restore in (lambda: camera.set_delay_time(original_delay),
                             lambda: camera.set_trigger_mode(original_trigger),
@@ -79,10 +82,23 @@ def _save(manager, run_id, index, delay_ns, count, abort_check):
     if (manager.camera.get_trigger_mode() != TriggerMode.EXTERNAL_EXPOSURE_START
             or not manager.camera.get_external_trigger_input_enabled()):
         raise RuntimeError("Delay characterization requires External Exposure Start with its input enabled.")
-    return manager._acquire_and_save_step(
-        "Camera delay", index, "Camera delay (ns)", delay_ns, count,
-        run_id=run_id, batch_size=1, queue_batches=None, abort_check=abort_check,
-    )[0]
+    manager.camera.verify_acquisition_stopped()
+    if not np.isclose(manager.camera.get_delay_time() * 1e9, delay_ns, rtol=0, atol=0.001):
+        raise RuntimeError("Delay readback changed before acquisition.")
+    context = {"run_id": run_id, "delay_point_index": index, "actual_delay_ns": delay_ns,
+               "trigger_mode": TriggerMode.EXTERNAL_EXPOSURE_START.value,
+               "delay_assignment": "verified_constant_setting_in_isolated_recording"}
+    try:
+        path = manager._acquire_and_save_step(
+            "Camera delay", index, "Camera delay (ns)", delay_ns, count,
+            run_id=run_id, batch_size=1, queue_batches=None, abort_check=abort_check,
+            frame_context=context,
+        )[0]
+    finally:
+        manager.camera.verify_acquisition_stopped()
+    if not np.isclose(manager.camera.get_delay_time() * 1e9, delay_ns, rtol=0, atol=0.001):
+        raise RuntimeError("Delay readback changed during acquisition; attribution is uncertain.")
+    return path
 
 
 def acquire_delay_reference(manager, run_id: str, frames_per_point: int, abort_check, log,
@@ -134,6 +150,7 @@ def characterize_delay(manager, run_id: str, frames_per_point: int, window: dict
             for index, requested_ns in enumerate(points, 1):
                 if abort_check():
                     raise AcquisitionAborted("Camera delay characterization stopped.")
+                camera.verify_acquisition_stopped()
                 camera.set_delay_time(requested_ns * 1e-9)
                 actual_ns = camera.get_delay_time() * 1e9
                 if not np.isclose(actual_ns, requested_ns, rtol=0, atol=0.001):

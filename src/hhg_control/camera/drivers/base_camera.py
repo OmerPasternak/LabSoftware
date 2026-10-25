@@ -141,6 +141,10 @@ class BaseCamera(ABC):
         """Read actual exposure-start delay in seconds."""
         raise NotImplementedError("Camera exposure-start delay is unsupported.")
 
+    def verify_acquisition_stopped(self) -> None:
+        """Require verified recorder and sensor inactivity before changing a delay point."""
+        raise NotImplementedError("Camera acquisition-stop verification is unsupported.")
+
     @abstractmethod
     def set_trigger_mode(self, mode: TriggerMode) -> None:
         """Select free-running or one fixed exposure per external trigger."""

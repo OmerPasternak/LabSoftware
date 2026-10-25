@@ -314,7 +314,10 @@ class CameraScanManager:
         preview_interval_s: float = 0.2,
         preview_schedule: list[float] | None = None,
         source=None,
+        frame_context: dict | None = None,
     ) -> tuple[Path, np.ndarray]:
+        """Save a step; optional JSON context is frozen before capture and copied per frame."""
+        frame_context_json = json.dumps(frame_context, allow_nan=False) if frame_context is not None else None
         step_started = time.perf_counter()
         self.last_step_timing = {}
         if not self.camera.is_connected:
@@ -406,6 +409,8 @@ class CameraScanManager:
                 attrs["external_trigger_input_verified"] = True
                 attrs["external_trigger_input_enabled"] = bool(trigger_input["enabled"])
                 attrs["external_trigger_input_polarity"] = str(trigger_input["polarity"])
+        if frame_context_json is not None:
+            attrs["frame_acquisition_context_json"] = frame_context_json
         mode = self.camera.get_readout_mode()
         attrs["readout_mode"] = mode.name
         attrs["readout_mode_value"] = int(mode.value)
@@ -579,7 +584,12 @@ class CameraScanManager:
                     else:
                         queued_images = images.copy()
                         producer_copied_image_bytes += images.nbytes
-                    copied_batch = (queued_images, list(metadata))
+                    if frame_context_json is None:
+                        saved_metadata = list(metadata)
+                    else:
+                        saved_metadata = [dict(meta, acquisition_context=json.loads(frame_context_json))
+                                          for meta in metadata]
+                    copied_batch = (queued_images, saved_metadata)
                     producer_copy_s += time.perf_counter() - copy_started
                     queue_put_started = time.perf_counter()
                     while True:

@@ -253,6 +253,23 @@ class PcoEdgeCamera(BaseCamera):
             self.state_unknown = True
             raise
 
+    def verify_acquisition_stopped(self) -> None:
+        """Verify both recorder inactivity and SDK sensor recording state off.
+
+        A stopped Python iterator alone is insufficient: no setting may change
+        while a previous exposure/readout can still belong to its recorder.
+        Unknown or active state fails closed; no buffered pixels are discarded.
+        """
+        try:
+            if self._cam is None or not self.is_connected or self.state_unknown:
+                raise RuntimeError("Camera is disconnected or its state is unknown.")
+            if (getattr(self, "_live_active", False) or self._cam.is_recording
+                    or self._cam.sdk.get_recording_state().get("recording state") != "off"):
+                raise RuntimeError("Camera recorder/sensor is still recording.")
+        except Exception as exc:
+            self.state_unknown = True
+            raise RuntimeError("Cannot verify acquisition stopped; camera state unknown.") from exc
+
     def get_delay_limits(self) -> tuple[float, float, float]:
         """Read SDK minimum, maximum and increment in seconds; require valid descriptors."""
         if self._cam is None or not self.is_connected:
