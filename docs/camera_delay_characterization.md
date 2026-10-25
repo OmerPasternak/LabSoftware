@@ -34,13 +34,12 @@ exposure, ROI, a 50 MiB/s storage assumption, a 10 ms frame/readout floor and
 are additional, so this is a planning estimate rather than a timing guarantee.
 Higher frame counts improve fluctuation sampling but require more time and disk.
 
-After successful acquisition and camera restoration, a Python window pops up with
-two side-by-side plots, one per delay range. A separate `camera_delay_<run>.json`
-report and PNG graph live in the current storage directory alongside all raw
-files and the selected rectangle JSON. Successful point reports and incomplete raw
-files survive STOP/failure; incomplete runs do not open a success graph. The mock
-exercises the whole workflow and labels the graph SIMULATED; its intensities do
-not model a physical dependence on delay.
+After successful acquisition and camera restoration, the Python graph is saved
+with two side-by-side plots, one per delay range. Once that PNG saves successfully,
+the tool deletes this run's reference and delay HDF5 files, selection JSON, and
+summary JSON, then opens the graph. A failed or cancelled run retains its data;
+an existing PNG also prevents cleanup. The mock labels the graph SIMULATED; its
+intensities do not model a physical dependence on delay.
 
 The driver uses the installed PCO 2.2.1 `delay_time` property and device delay
 descriptors, with readback checks of delay and unchanged exposure. See the
