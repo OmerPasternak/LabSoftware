@@ -70,8 +70,6 @@ class DelayDiagnostic(QObject):
         w.btn_go.setEnabled(False)
         w.cmb_camera_source.setEnabled(False)
         w.btn_camera_delay.setEnabled(False)
-        w._append_log(f"[DELAY][{w._scan_source_label()}] Starting camera-delay characterization; "
-                      f"1 measurement step per delay, {self.count} frames/step.")
         if w._is_live_active or w.active_live_task is not None:
             w._stop_live(after_stop=self._reference)
         else:
@@ -84,14 +82,24 @@ class DelayDiagnostic(QObject):
             return
         self.window.lbl_system_status.setText("Status: Delay diagnostic — reference; STOP cancels")
         self._run(lambda abort, log: acquire_delay_reference(
-            self.window.scan_manager, self.run_id, self.count, abort, log), self._select)
+            self.window.scan_manager, self.run_id, self.count, abort, log,
+            start_message=(f"[DELAY][{self.window._scan_source_label()}] Starting camera-delay "
+                           f"characterization; 1 measurement step per delay, {self.count} frames/step.")),
+            self._select)
 
     def _run(self, operation, on_success):
         """Hold a worker until it has finished restoring camera state."""
         self.task = DelayTask(operation, self.stop_event)
-        self.task.log.connect(lambda message: self.window._append_log(f"[DELAY] {message}"))
+        self.task.log.connect(self._append_task_log)
         self.task.finished.connect(lambda: self._task_finished(on_success))
         self.task.start()
+
+    def _append_task_log(self, message):
+        """Keep the estimate directly above the delay-start marker in the visible log."""
+        if message.startswith("Estimated characterization time:") or message.startswith("[DELAY]"):
+            self.window._append_log(message)
+        else:
+            self.window._append_log(f"[DELAY] {message}")
 
     def _task_finished(self, on_success):
         """Advance only after cleanup; keep failures and STOP from opening a result graph."""

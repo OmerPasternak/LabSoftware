@@ -79,7 +79,8 @@ def _save(manager, run_id, index, delay_ns, count, abort_check):
     )[0]
 
 
-def acquire_delay_reference(manager, run_id: str, frames_per_point: int, abort_check, log) -> Path:
+def acquire_delay_reference(manager, run_id: str, frames_per_point: int, abort_check, log,
+                            *, start_message: str = "[DELAY] Starting camera-delay characterization.") -> Path:
     """Preflight all points/storage, then save one externally triggered reference unchanged."""
     if frames_per_point < 2:
         raise ValueError("At least two frames per delay are required for sample STDEV.")
@@ -93,6 +94,7 @@ def acquire_delay_reference(manager, run_id: str, frames_per_point: int, abort_c
             "Estimate assumes sufficient external triggers and 50 MiB/s storage; "
             "trigger waits and window-selection time are additional. STOP cancels.")
         check_disk_space(manager.storage_dir, int(raw_bytes * 1.1))
+        log(start_message)
         log("Waiting for an external trigger to save the harmonic-selection reference.")
         path = _save(manager, run_id, 0, camera.get_delay_time() * 1e9, 1, abort_check)
         log(f"Reference saved: {path}. Delay ranges: {points} ns.")
