@@ -1,6 +1,7 @@
 """Offline acceptance of the separate motor GUI and its cancellation lifecycle."""
 
 import threading
+import json
 from dataclasses import replace
 
 import pytest
@@ -50,6 +51,7 @@ def test_construction_is_disconnected_and_does_not_create_driver(qtbot, motor_wi
     assert not panel.move_button.isEnabled()
     assert not panel.stop_button.isEnabled()
     assert panel.connect_button.isEnabled()
+    assert not panel.report_button.isEnabled()
 
 
 def test_mock_connection_locks_mode_and_displays_mm(qtbot, motor_window):
@@ -60,6 +62,50 @@ def test_mock_connection_locks_mode_and_displays_mm(qtbot, motor_window):
     assert "mm" in panel.position_label.text()
     assert "maximum move 2 mm" in panel.limits_label.text()
     assert panel.stop_button.isEnabled()
+
+
+def test_save_setup_report_through_worker(qtbot, motor_window, tmp_path, monkeypatch):
+    path = tmp_path / "TC motor setup.json"
+    monkeypatch.setattr("hhg_control.tc_motor.gui.motor_panel.QFileDialog.getSaveFileName",
+                        lambda *_args: (str(path), "JSON (*.json)"))
+    panel = motor_window()
+    connect_mock(qtbot, panel)
+    qtbot.mouseClick(panel.report_button, Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: "Setup report saved:" in panel.log.toPlainText())
+    report = json.loads(path.read_text(encoding="utf-8"))
+    assert report["identity"]["simulation"] is True
+    assert report["connection_request"]["mode"] == "Mock"
+    assert panel.position_label.text() == "0.000000 mm"
+    assert panel._connection.connected
+
+
+def test_report_write_failure_keeps_connection_and_window(qtbot, motor_window, tmp_path, monkeypatch):
+    path = tmp_path / "missing folder" / "report.json"
+    monkeypatch.setattr("hhg_control.tc_motor.gui.motor_panel.QFileDialog.getSaveFileName",
+                        lambda *_args: (str(path), "JSON (*.json)"))
+    panel = motor_window()
+    connect_mock(qtbot, panel)
+    qtbot.mouseClick(panel.report_button, Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: "FileNotFoundError" in panel.log.toPlainText())
+    assert panel.isVisible()
+    assert panel._connection.connected
+    qtbot.waitUntil(lambda: not panel.worker.is_busy)
+    assert panel.move_button.isEnabled()
+
+
+def test_report_cannot_overwrite_selected_safety_profile(qtbot, motor_window, tmp_path, monkeypatch):
+    path = tmp_path / "profile.json"
+    path.write_text("existing reviewed profile", encoding="utf-8")
+    monkeypatch.setattr("hhg_control.tc_motor.gui.motor_panel.QFileDialog.getSaveFileName",
+                        lambda *_args: (str(path), "JSON (*.json)"))
+    # Use a mock factory for all physical-mode UI actions; no serial resource opens.
+    panel = motor_window(lambda _: MotorSequencer(MockMotor(MotorLimits(0, 10, 1, 2, 2))))
+    panel.mode_combo.setCurrentText("Physical")
+    panel.profile_edit.setText(str(path))
+    connect_mock(qtbot, panel)
+    qtbot.mouseClick(panel.report_button, Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: "separate from the active safety profile" in panel.log.toPlainText())
+    assert path.read_text(encoding="utf-8") == "existing reviewed profile"
 
 
 def test_range_rejection_is_visible_without_motion(qtbot, motor_window):

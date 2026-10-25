@@ -4,7 +4,7 @@ The only cross-thread sequencer call is ``request_stop``, whose contract is to
 set a threading event without controller I/O. No queued motion survives STOP.
 """
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from threading import Condition, Event
 from typing import Callable
 
@@ -83,6 +83,7 @@ class MotorWorker(QThread):
         self._condition = Condition()
         self._cancel = Event()
         self._sequencer = None
+        self._connection_settings = None
         self._pending = None
         self._pending_stop = False
         self._pending_disconnect = False
@@ -161,6 +162,7 @@ class MotorWorker(QThread):
             if self._sequencer is not None:
                 raise RuntimeError("Disconnect the existing session before connecting another.")
             seq = self._factory(args[0])
+            self._connection_settings = args[0]
             with self._condition:
                 self._sequencer = seq
                 if self._cancel.is_set():
@@ -175,6 +177,7 @@ class MotorWorker(QThread):
             if self._sequencer is not None:
                 self._sequencer.disconnect()
                 self._sequencer = None
+                self._connection_settings = None
             self._publish_connection()
             self.cleanup_done.emit(True, "Stopped and disconnected.")
             return self._shutdown_on_disconnect
@@ -199,6 +202,19 @@ class MotorWorker(QThread):
                                "STOP acknowledged; a new move may be requested.")
         elif operation == "snapshot":
             self.status_ready.emit(self._sequencer.snapshot())
+        elif operation == "save_setup_report":
+            from pathlib import Path
+            from hhg_control.tc_motor.reporting import save_setup_report
+
+            if self._sequencer is None:
+                raise RuntimeError("Connect before saving a setup report.")
+            profile_path = self._connection_settings.profile_path
+            if profile_path and Path(args[0]).resolve() == Path(profile_path).resolve():
+                raise ValueError("Choose a report filename separate from the active safety profile.")
+            report = self._sequencer.setup_report()
+            report["connection_request"] = asdict(self._connection_settings)
+            save_setup_report(report, args[0])
+            self.activity.emit("Setup report saved: " + str(args[0]))
         elif operation in {"move_to", "move_relative"}:
             if self._cancel.is_set():
                 raise RuntimeError("Move cancelled before execution; STOP is latched.")

@@ -4,6 +4,29 @@ Workspace: `C:\Users\omeravp\Documents\GitHub\LabSoftware`.
 Feature branch: `codex/smc100-motor-control`; original base: `5188b6a`.
 No hardware has been contacted and nothing has been pushed.
 
+## Setup-report addition — 2026-10-25
+
+The motor GUI now has **Save setup report…** while connected/idle, in either
+Mock or Physical mode. It serializes a fresh status/position snapshot and cached
+connection/preflight settings through the existing sequencer/worker. It does not
+issue motion or configuration commands, enable motion, infer calibration, or
+generate an approved safety profile. Native units remain unverified without a
+profile; mock provenance is explicit. It reports READY versus not READY, but
+home type/speed/timeout are not queried and homing remains unsupported.
+The report cannot overwrite the active safety profile. JSON replacement is atomic;
+write errors remain visible without disconnecting or closing the window.
+
+Implementation is in `sequencer.py`, `reporting.py`, and `gui/`. The guide now
+starts with five short lab-PC setup steps. Added fake-serial, mock, file-failure,
+unit-provenance, and Qt export checks. On branch `codex/tc-motor-setup-report`,
+all **116 motor tests passed** using Python 3.12.10 and the working `.venv`, with
+normal filesystem access after the sandbox denied pytest temp-directory access.
+Command: `python -m pytest -q src/hhg_control/tc_motor/tests
+--basetemp=data/test_artifacts/pytest/tc_setup_report_20261025_access`.
+Per `docs/test_selection.md`, this isolated motor change did not require camera
+tests or another full-project run. No physical hardware or remote CI was used.
+Earlier validation evidence below belongs to the original implementation.
+
 ## Run and inspect
 
 Double-click `src/hhg_control/tc_motor/run_TC_motor.bat`, or run `.venv\Scripts\python.exe -m

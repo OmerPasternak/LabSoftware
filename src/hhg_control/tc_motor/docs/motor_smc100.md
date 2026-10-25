@@ -6,6 +6,39 @@ uses an underscore because spaces are not valid in a Python import name. Its
 window is named **TC motor**. The BAT launcher resolves the checkout from its own
 location; it does not depend on the directory from which it was double-clicked.
 
+## First setup on the lab PC
+
+1. **Identity:** confirm the controller label, actuator, and address. The app also
+   reads the firmware version and stage reference.
+2. **Millimetres:** obtain this actuator's calibration/control report. Compare its
+   encoder increment with SU in the exported report. A matching number alone does
+   not prove the actual motion scale or direction; that needs physical review.
+3. **Travel:** the controller can supply its configured limits, but someone must
+   check the mounted optics/cables and choose a safe interval and stopping margin.
+4. **Settings:** close other software using this serial port. Select Physical,
+   enter the confirmed COM/ASRL resource/address, leave the profile blank, and
+   connect for inspection. Click **Save setup report…** and save the JSON file.
+   No movement is enabled by collecting or saving this report.
+5. **Reference:** the report states whether the controller reports READY. If it
+   does, no home is needed just for this application. If not, review the reported
+   state; homing remains unavailable pending a separate safe procedure.
+
+The report includes a fresh status/position snapshot and the cached settings last
+read at connection or motion preflight: SU (encoder increment), VA (velocity),
+AC (acceleration), SL/SR (controller limits), BA/BH (compensation). Settings are
+native controller units until calibration is reviewed. It also records simulation
+provenance, requested port/address, unit verification, STOP latch, and current
+motion permission. Saving performs no setting writes or motion; status queries
+may clear controller error registers, which the driver retains locally.
+Home type/speed/timeout are not collected by this export. This diagnostic JSON is
+not a safety profile and does not supply calibration or mounted-clearance approval.
+The active safety profile cannot be overwritten using the report button.
+
+You can test the export in Mock mode first; that report is explicitly synthetic.
+Give the physical report to the next agent along with the calibration report and
+the reviewed mounted travel/clearance. Those facts are needed to finish the
+existing safety-profile template. Do not copy mock limits into a physical profile.
+
 Launch `src/hhg_control/tc_motor/run_TC_motor.bat` from this checkout, or run:
 
 ```powershell

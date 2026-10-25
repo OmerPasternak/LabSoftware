@@ -9,6 +9,7 @@ import pytest
 
 from hhg_control.tc_motor.drivers.base import MotorError, MotorLimits, MotorSafetyError
 from hhg_control.tc_motor.drivers.smc100 import SafetyProfile, SMC100Motor, VisaSerialTransport
+from hhg_control.tc_motor.sequencer import MotorSequencer
 
 
 VERSION = "SMC - Controller-driver version SYNTHETIC"
@@ -57,6 +58,25 @@ def make_driver(*, reviewed=True):
     driver = SMC100Motor("ASRL21::INSTR", profile=profile() if reviewed else None,
                          transport_factory=lambda: transport)
     return driver, transport
+
+
+def test_setup_report_only_queries_state_position_and_preserves_motion_lock():
+    driver, io = make_driver(reviewed=False)
+    seq = MotorSequencer(driver)
+    seq.connect()
+    try:
+        io.commands.clear()
+        report = seq.setup_report()
+        assert io.commands == ["1TS", "1TP"]
+        assert report["native_settings"] == {"SU": .0001, "VA": 1, "AC": 2,
+                                             "SL": 0, "SR": 10, "BA": 0, "BH": 0}
+        assert report["status"]["position_mm"] is None
+        assert report["status"]["native_position"] == 2
+        assert report["reviewed_limits"] is None
+        assert not report["move_permitted_now"]
+        assert not driver.motion_enabled
+    finally:
+        seq.disconnect()
 
 
 def test_connect_is_inspection_only_and_does_not_guess_mm():

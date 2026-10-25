@@ -2,7 +2,8 @@
 
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 import threading
 import time
 from typing import Generic, TypeVar
@@ -109,6 +110,52 @@ class MotorSequencer:
         """Read one status on the I/O owner; do not poll concurrently with moves."""
         with self._operation():
             return self.driver.get_status()
+
+    def setup_report(self) -> dict:
+        """Inspect current state without motion; keep native units explicitly unverified.
+
+        Settings are the last connection/preflight readbacks, not fresh settings
+        queries. This report is diagnostic evidence, never a motion profile or
+        proof of mounted clearance, mm calibration, or physical acceptance.
+        """
+        with self._operation():
+            status = self.driver.get_status()
+            info = self.driver.info
+            if info is None:
+                raise MotorError("Connect before collecting a setup report.")
+            return {
+                "schema_version": 1,
+                "report_type": "tc_motor_setup_inspection",
+                "created_utc": datetime.now(timezone.utc).isoformat(),
+                "identity": asdict(info),
+                "status": asdict(status),
+                "native_settings": self.inspection_settings,
+                "settings_source": "Last connection/preflight readbacks; not re-queried for export.",
+                "units_note": (
+                    "Mock values are synthetic mechanical mm."
+                    if info.simulation else
+                    "Native settings/position are controller units. SU readback alone does not prove mm; "
+                    "position_mm is populated only after the reviewed profile matches."
+                ),
+                "reviewed_limits": asdict(self.limits) if self.limits is not None else None,
+                "motion_profile_enabled": self.motion_enabled,
+                "stop_latched": self.stop_requested,
+                "move_permitted_now": bool(self.motion_enabled and status.is_ready
+                                           and not status.is_moving and not self.stop_requested),
+                "reference_check": (
+                    "Controller reports READY; physical reference/zero still needs review."
+                    if status.is_ready else
+                    "Controller does not report READY. Do not infer reference from position alone."
+                ),
+                "homing_supported": False,
+                "homing_note": "Home type/speed/timeout are not collected. Homing needs a separate reviewed procedure.",
+                "not_proven_by_report": [
+                    "Physical controller label and installed actuator/serial pairing.",
+                    "Stage-specific encoder calibration and actual mm displacement/direction.",
+                    "Mounted safe travel, per-move limit, cable clearance, and stopping distance.",
+                    "Supervised physical motion, STOP/holding, and disconnect acceptance.",
+                ],
+            }
 
     def request_stop(self) -> None:
         """Set sequencer/driver cancellation events from any thread, without I/O."""

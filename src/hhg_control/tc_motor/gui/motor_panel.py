@@ -97,6 +97,9 @@ class MotorPanel(QWidget):
         connection_buttons.addWidget(self.connect_button)
         connection_buttons.addWidget(self.disconnect_button)
         form.addRow(connection_buttons)
+        self.report_button = QPushButton("Save setup report…")
+        self.report_button.clicked.connect(self._save_setup_report)
+        form.addRow(self.report_button)
         layout.addWidget(connection_group)
 
         self.position_label = QLabel("— mm")
@@ -193,6 +196,14 @@ class MotorPanel(QWidget):
         """Submit one mm move; authoritative validation stays in the sequencer/driver."""
         self.worker.submit(operation, value, self.timeout_spin.value(), self.settle_spin.value())
 
+    def _save_setup_report(self) -> None:
+        """Choose a local diagnostic JSON file; collect/save through the I/O owner."""
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save motor setup report", "TC_motor_setup_report.json", "JSON (*.json)"
+        )
+        if path and not self.worker.submit("save_setup_report", path):
+            self._show_error("Motor is busy; retry saving the setup report when idle.")
+
     def _stop_motor(self) -> None:
         """Latch STOP synchronously; controller I/O remains in the worker thread."""
         self.worker.request_stop()
@@ -266,6 +277,8 @@ class MotorPanel(QWidget):
             self.activity_label.setText(message)
             if message.startswith("Inspected native controller settings:"):
                 self._append_log(message)
+            elif message.startswith("Setup report saved:"):
+                self._append_log(message)
 
     def _show_error(self, message) -> None:
         """Keep failures visible and bounded; never silently substitute a target."""
@@ -286,6 +299,7 @@ class MotorPanel(QWidget):
             widget.setEnabled(editable and (widget is self.mode_combo or physical))
         self.connect_button.setEnabled(editable)
         self.disconnect_button.setEnabled(state.has_session and not self._closing)
+        self.report_button.setEnabled(state.connected and not self._busy and not self._closing)
         ready = self._status is not None and self._status.is_ready
         permitted = (state.connected and state.motion_enabled and self._units_verified
                      and not self._stop_latched and not self._closing and not self._cleanup_uncertain)
