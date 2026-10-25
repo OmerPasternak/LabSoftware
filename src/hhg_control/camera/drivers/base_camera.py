@@ -81,6 +81,24 @@ class BaseCamera(ABC):
         """
         return False
 
+    @property
+    def supports_isolated_recordings(self) -> bool:
+        """Whether each iterator starts fresh storage and stops before returning.
+
+        Actuator scans refuse unknown drivers: a generic batched acquisition
+        does not establish a recording boundary between physical positions.
+        """
+        return False
+
+    @property
+    def is_simulated(self) -> bool:
+        """Identify physical versus synthetic provenance for coordinated scan records."""
+        return False
+
+    def confirm_recording_stopped(self) -> None:
+        """Verify exposure/recorder stop before an actuator may change position."""
+        raise NotImplementedError("Isolated recording boundaries are unsupported.")
+
     @abstractmethod
     def connect(self) -> None:
         """Establish communication and configure initial camera state."""

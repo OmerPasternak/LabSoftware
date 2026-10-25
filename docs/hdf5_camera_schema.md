@@ -47,6 +47,18 @@ this camera schema. Do not silently mix the two layouts in one analysis path;
 introduce a new schema version and reader migration if the storage hierarchy
 changes.
 
+## Motor–camera recording context
+
+The separate [motor–camera scan](motor_camera_scan.md) retains schema 2.0 and
+adds root `recording_context_json`, `scan_parameter_unit="mm"`, recording/point/
+repeat/attempt IDs and the target position. Every frame JSON includes the same
+immutable `recording_context`; the source manifest includes its root JSON string.
+The verifier compares all frame contexts before the coordinator may move again.
+Pre/post motor readbacks and recovery state live in the run's `run.json` without
+changing already-verified raw files. Each visit uses a fresh finite recording;
+recording-scoped frame IDs may reset between visits. Camera-only files keep
+their existing metadata and behavior.
+
 ## GUI measurement pipeline (4F/4G conclusions)
 
 The measurement button calls `CameraScanManager.execute_scan`. This path uses

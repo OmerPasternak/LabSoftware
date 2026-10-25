@@ -537,7 +537,7 @@ class PcoEdgeCamera(BaseCamera):
             # ROI once for the sequence rather than doing those calls per frame.
             for _ in range(num_frames):
                 if stop_check is not None and stop_check():
-                    return
+                    break
                 self._cam.wait_for_new_image(
                     delay=True, timeout=max(1.0, self._exposure_time_s + 1.0)
                 )
@@ -561,11 +561,6 @@ class PcoEdgeCamera(BaseCamera):
                 if not isinstance(raw_meta, dict) or "recorder image number" not in raw_meta:
                     raise RuntimeError("PCO FIFO image lacks a recorder frame number.")
                 frame_id = int(raw_meta["recorder image number"])
-                if previous_id is not None and frame_id != (previous_id + 1) % (2**32):
-                    raise RuntimeError(
-                        f"PCO FIFO frame gap: expected {previous_id + 1}, got {frame_id}."
-                    )
-                previous_id = frame_id
                 cam_time, time_text, timestamp_source = _frame_time_fields(raw_meta)
                 images.append(np.ascontiguousarray(frame))
                 metas.append({
@@ -578,6 +573,11 @@ class PcoEdgeCamera(BaseCamera):
                     "exposure_s": self._exposure_time_s,
                     "roi": roi,
                 })
+                if previous_id is not None and frame_id != (previous_id + 1) % (2**32):
+                    raise RuntimeError(
+                        f"PCO FIFO frame gap: expected {previous_id + 1}, got {frame_id}."
+                    )
+                previous_id = frame_id
                 if diagnostics is not None:
                     diagnostics.stage("python_frame_handling", time.perf_counter() - handling_started)
                 if len(images) == batch_size:
@@ -593,6 +593,7 @@ class PcoEdgeCamera(BaseCamera):
                 if diagnostics is not None:
                     diagnostics.stage("batch_stack", time.perf_counter() - stack_started)
                 yield batch, metas
+                images, metas = [], []
             status = self._cam.rec.get_status()
             if status.get("bFIFOOverflow") or status.get("dwLastError"):
                 raise RuntimeError(
@@ -600,6 +601,12 @@ class PcoEdgeCamera(BaseCamera):
                     f"{fifo_size} allocated frames "
                     f"({self.last_fifo_capacity_bytes / 2**20:.1f} MiB): {status}"
                 )
+        except Exception:
+            # A timeout/fault can occur partway through a batch. Return every
+            # already-read pixel before surfacing that error to the writer.
+            if images:
+                yield np.stack(images, axis=0), metas
+            raise
         finally:
             self._cam.stop()
 
@@ -641,4 +648,22 @@ class PcoEdgeCamera(BaseCamera):
             self._cam.stop()
         self._live_active = False
 
+
+    @property
+    def supports_isolated_recordings(self) -> bool:
+        """PCO 2.2.1 record() creates a fresh FIFO after deleting its previous recorder."""
+        return True
+
+    def confirm_recording_stopped(self) -> None:
+        """Read hardware recording OFF before allowing a physical setpoint change."""
+        if not self.is_connected or self._cam is None or self.state_unknown:
+            raise RuntimeError("Camera state is unknown or disconnected.")
+        if getattr(self, "_live_active", False):
+            raise RuntimeError("Stop camera live view before an actuator scan.")
+        try:
+            if self._cam.sdk.get_recording_state()["recording state"] != "off":
+                raise RuntimeError("Camera recording is still active; position change is prohibited.")
+        except Exception:
+            self.state_unknown = True
+            raise
 

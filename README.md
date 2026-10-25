@@ -59,6 +59,15 @@ inspection and reviewed motion profiles, STOP/close behavior, calibration, and
 measurement-loop examples are described in [the motor guide](src/hhg_control/tc_motor/docs/motor_smc100.md).
 No physical motor validation has been performed; the camera interface is separate.
 
+## Motor–camera Scan
+
+Launch `run_scan.bat` or `python -m hhg_control.scan` for the separate scan
+window. It starts disconnected in Mock mode. Each ordered position gets a fresh
+finite recording, immutable per-frame position/recording metadata, and a full
+verification barrier before the next motor move. See the
+[scan guide](docs/motor_camera_scan.md) for settings, physical prerequisites,
+STOP, retained attempts and explicit recovery.
+
 ## Validation
 
 Run offline tests before each lab deployment:

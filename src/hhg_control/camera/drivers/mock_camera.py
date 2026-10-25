@@ -293,3 +293,18 @@ class MockPcoCamera(BaseCamera):
             })
 
         return images, metadata
+
+    @property
+    def supports_isolated_recordings(self) -> bool:
+        """Mock batches are finite and own no exposures outside their iterator."""
+        return True
+
+    @property
+    def is_simulated(self) -> bool:
+        """Mark all mock acquisitions as synthetic, including motor–camera scans."""
+        return True
+
+    def confirm_recording_stopped(self) -> None:
+        """Require an idle connected mock; this provides no physical timing evidence."""
+        if not self.is_connected or getattr(self, "_live_active", False):
+            raise RuntimeError("Mock camera must be connected with live view stopped.")

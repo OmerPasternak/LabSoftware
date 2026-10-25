@@ -20,6 +20,13 @@ src/hhg_control/
     tests/                 offline motor and Qt regression tests
     docs/                  motor guide, profile template, and agent handoff
     run_TC_motor.bat       launcher resolving this checkout from its own path
+  scan/                    independent motor–camera experiment coordinator
+    plan.py                ordered visits, repeats and explicit mm/fs calibration
+    sequencer.py           finite recordings, metadata, STOP and attempt recovery
+    session.py             explicit instrument construction and safe cleanup
+    gui.py                 separate scan window and owning worker
+    tests/                 offline ordering/attribution/recovery/Qt checks
+  ownership.py             nonblocking sequencer session reservations
   safe_io.py               shared filesystem/resource checks
   project_paths.py         checkout-resource discovery, independent of cwd
 ```
@@ -41,6 +48,10 @@ Old imports under `hhg_control.drivers`, `hhg_control.sequencer`,
 They resolve to the same module/class objects, including monkeypatches and
 spawned-process imports. Edit canonical implementations in `camera/` or `gui/`,
 not the alias files. Existing notebooks/scripts keep their current import paths.
+
+`run_scan.bat` / `python -m hhg_control.scan` opens the independent scan window;
+see [motor–camera scan](motor_camera_scan.md). No camera-window registration or
+layout changes are required to use the shared sequencers.
 
 `run_camera_gui.bat` and `run_camera_gui.vbs` resolve the checkout from their own
 location and launch `python -m hhg_control.gui.camera`. The installed

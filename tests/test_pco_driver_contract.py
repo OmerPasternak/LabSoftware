@@ -364,6 +364,60 @@ def test_pco_saved_scan_reads_roi_only_once(monkeypatch):
     camera.close()
 
 
+@pytest.mark.parametrize("failure", ["stop", "timeout", "gap"])
+def test_pco_retains_frames_read_before_partial_batch_stop_or_fault(monkeypatch, failure):
+    """An interrupted four-frame batch must return already-read pixels unchanged."""
+    fake = FakePcoCamera("USB 3.0")
+    fake.rec = SimpleNamespace(get_status=lambda: {"bFIFOOverflow": False, "dwLastError": 0})
+    returned = []
+    def image(image_index=0):
+        index = len(returned)
+        returned.append(np.full((16, 64), 100 + index, dtype=np.uint16))
+        return returned[-1], {"recorder image number": index + (1 if failure == "gap" and index == 1 else 0)}
+    def wait(**kwargs):
+        if failure == "timeout" and len(returned) == 2:
+            raise TimeoutError("Fake SDK transfer timed out")
+    fake.image, fake.wait_for_new_image = image, wait
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface, serial: fake))
+    monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
+    camera = pco_edge.PcoEdgeCamera(serial="12345")
+    camera.connect()
+    iterator = camera.iter_frames(5, batch_size=4,
+        stop_check=lambda: failure == "stop" and len(returned) == 2)
+    try:
+        images, metadata = next(iterator)
+        assert len(images) == len(metadata) == len(returned) == 2
+        assert np.array_equal(images, np.stack(returned))
+        if failure == "stop":
+            assert list(iterator) == []
+        else:
+            with pytest.raises((RuntimeError, TimeoutError)):
+                next(iterator)
+    finally:
+        iterator.close()
+        camera.close()
+    assert not fake.is_recording
+
+
+def test_pco_isolated_boundary_requires_recording_off_readback(monkeypatch):
+    """Failure to confirm hardware OFF locks further physical acquisition."""
+    fake = FakePcoCamera("USB 3.0")
+    fake.sdk.get_recording_state = lambda: {"recording state": "off"}
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface, serial: fake))
+    monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
+    camera = pco_edge.PcoEdgeCamera(serial="12345")
+    camera.connect()
+    try:
+        assert camera.supports_isolated_recordings
+        camera.confirm_recording_stopped()
+        fake.sdk.get_recording_state = lambda: {"recording state": "on"}
+        with pytest.raises(RuntimeError, match="still active"):
+            camera.confirm_recording_stopped()
+        assert camera.state_unknown
+    finally:
+        camera.close()
+
+
 def test_pco_fifo_capacity_is_byte_bounded_for_acceptance_roi():
     frames = pco_edge._fifo_buffer_frames(10_000, height=128, width=2560)
     allocated_bytes = frames * 128 * 2560 * 2

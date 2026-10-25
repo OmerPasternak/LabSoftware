@@ -20,6 +20,8 @@ import numpy as np
 
 from ..drivers.base_camera import BaseCamera, TriggerMode
 from ...safe_io import available_physical_memory_bytes, check_disk_space, filesystem_path
+from hhg_control.ownership import InstrumentOwnership, reserved_access
+from .recording import RecordingBoundary
 
 
 HDF5_SCHEMA_VERSION = "2.0"
@@ -127,10 +129,12 @@ class CameraScanManager:
         self.storage_dir = Path(storage_dir)
         filesystem_path(self.storage_dir).mkdir(parents=True, exist_ok=True)
         self._camera_lock = threading.RLock()
+        self._ownership = InstrumentOwnership()
         self._state_lock = threading.Lock()
         self._state = "IDLE"
         self.last_step_timing: dict[str, Any] = {}
         self.last_scan_pipeline: dict[str, Any] = {}
+        self._recording_source = None
 
     @property
     def state(self) -> str:
@@ -140,21 +144,41 @@ class CameraScanManager:
 
     @contextmanager
     def _operation(self, state: str):
-        with self._state_lock:
-            if self._state != "IDLE":
-                raise RuntimeError(f"Camera is busy ({self._state}); cannot start {state}.")
-            self._state = state
-        try:
-            yield
-        finally:
+        with self.reserve():
             with self._state_lock:
-                self._state = "IDLE"
+                if self._state != "IDLE":
+                    raise RuntimeError(f"Camera is busy ({self._state}); cannot start {state}.")
+                self._state = state
+            try:
+                yield
+            finally:
+                with self._state_lock:
+                    self._state = "IDLE"
 
+    def reserve(self):
+        """Reserve camera operations/settings across a coordinated experiment."""
+        return self._ownership.reserve()
+
+    @reserved_access
+    def confirm_recording_stopped(self):
+        """Require idle acquisition/worker ownership and verified hardware recording OFF."""
+        if self.state != "IDLE":
+            raise RuntimeError("Camera operation is still active.")
+        source = self._recording_source
+        writer = getattr(source, "storage_writer", None)
+        if (source is not None and source.reader.is_alive()) or (writer is not None and writer.is_alive()):
+            raise RuntimeError("Camera recording workers are still active; cleanup remains pending.")
+        if getattr(self.camera, "state_unknown", False):
+            raise RuntimeError("Camera state is unknown; reconnect before a new recording.")
+        self.camera.confirm_recording_stopped()
+
+    @reserved_access
     def set_storage_dir(self, new_dir: Path | str) -> None:
         """Set and create the scan output directory."""
         self.storage_dir = Path(new_dir)
         filesystem_path(self.storage_dir).mkdir(parents=True, exist_ok=True)
 
+    @reserved_access
     def set_writer_queue_memory(
         self, byte_budget: int, *, reserve_bytes: int | None = None,
     ) -> None:
@@ -197,8 +221,14 @@ class CameraScanManager:
     def disconnect(self) -> None:
         """Release the camera under the same lock used by acquisition."""
         with self._operation("DISCONNECTING"), self._camera_lock:
+            if self._recording_source is not None and self._recording_source.reader.is_alive():
+                raise RuntimeError("Camera reader still owns the SDK; disconnect is prohibited.")
+            unfinished_writer = getattr(self._recording_source, "storage_writer", None)
+            if unfinished_writer is not None and unfinished_writer.is_alive():
+                raise RuntimeError("Recording HDF5 writer cleanup is still pending; retry cleanup after it finishes.")
             self.camera.close()
 
+    @reserved_access
     def get_roi(self) -> tuple[int, int, int, int]:
         """Get zero-based, upper-exclusive hardware ROI bounds in pixels."""
         with self._camera_lock:
@@ -209,11 +239,20 @@ class CameraScanManager:
         with self._operation("CONFIGURING"), self._camera_lock:
             self.camera.set_trigger_mode(mode)
 
+    @reserved_access
     def get_trigger_mode(self) -> TriggerMode:
         """Read the active camera trigger mode under the camera access lock."""
         with self._camera_lock:
             return self.camera.get_trigger_mode()
 
+    def set_external_trigger_input_enabled(self, enabled: bool):
+        """Configure the explicit trigger-input enable choice and verify its readback."""
+        with self._operation("CONFIGURING"), self._camera_lock:
+            self.camera.set_external_trigger_input_enabled(enabled)
+            if self.camera.get_external_trigger_input_enabled() != enabled:
+                raise RuntimeError("External trigger input enable readback differs from request.")
+
+    @reserved_access
     def start_live(self, buffer_size: int = 4) -> None:
         """Enter LIVE state and start the camera's persistent preview buffer."""
         with self._state_lock:
@@ -228,6 +267,7 @@ class CameraScanManager:
                 self._state = "IDLE"
             raise
 
+    @reserved_access
     def acquire_live_frame(self, timeout_s: float | None = None) -> tuple[np.ndarray, dict]:
         """Read the newest frame from an active live acquisition."""
         if self.state != "LIVE":
@@ -235,6 +275,7 @@ class CameraScanManager:
         with self._camera_lock:
             return self.camera.acquire_live_frame(timeout_s=timeout_s)
 
+    @reserved_access
     def stop_live(self) -> None:
         """Stop preview acquisition and return to IDLE after the active read completes."""
         if self.state != "LIVE":
@@ -410,6 +451,14 @@ class CameraScanManager:
         attrs["readout_mode"] = mode.name
         attrs["readout_mode_value"] = int(mode.value)
         if source is not None:
+            if source.boundary is not None:
+                attrs["recording_context_json"] = source.boundary.context_json
+                attrs["scan_parameter_unit"] = "mm"
+                context = source.boundary.context
+                for key in ("recording_id", "point_index", "repeat_index", "visit_index", "attempt_index",
+                            "target_position_mm"):
+                    if key in context:
+                        attrs[key] = context[key]
             source.prepare_manifest(filepath, attrs)
         pending: Queue[tuple[np.ndarray, list[dict[str, Any]]]] = Queue(maxsize=queue_batches)
         producer_done = threading.Event()
@@ -538,10 +587,14 @@ class CameraScanManager:
 
         with self._camera_lock:
             writer = threading.Thread(target=write_batches, name="camera-hdf5-writer")
+            boundary = source.boundary if source is not None else None
+            if boundary is not None:
+                source.storage_writer = writer
             writer.start()
             iterator = None
             try:
-                writer_ready.wait()
+                if not writer_ready.wait(timeout=boundary.storage_timeout_s if boundary else None):
+                    raise TimeoutError("HDF5 setup exceeded the recording storage deadline.")
                 if writer_errors:
                     raise RuntimeError("HDF5 writer failed during initialization.") from writer_errors[0]
                 producer_started = time.perf_counter()
@@ -552,7 +605,8 @@ class CameraScanManager:
                     ),
                 )
                 for images, metadata in iterator:
-                    if abort_check is not None and abort_check():
+                    if (abort_check is not None and abort_check()
+                            and not getattr(self.camera, "preserve_returned_frames", False)):
                         raise AcquisitionAborted(
                             f"Acquisition stopped after {captured} of {num_frames} frames."
                         )
@@ -579,6 +633,9 @@ class CameraScanManager:
                     else:
                         queued_images = images.copy()
                         producer_copied_image_bytes += images.nbytes
+                    if source is not None and source.boundary is not None:
+                        metadata = [{"recording_context": source.boundary.context, **item}
+                                    for item in metadata]
                     copied_batch = (queued_images, list(metadata))
                     producer_copy_s += time.perf_counter() - copy_started
                     queue_put_started = time.perf_counter()
@@ -591,7 +648,10 @@ class CameraScanManager:
                             queue_full_wait_events += 1
                             if writer_errors:
                                 raise RuntimeError("HDF5 writer failed during acquisition.") from writer_errors[0]
-                            if abort_check is not None and abort_check():
+                            if boundary is not None and time.perf_counter() - queue_put_started >= boundary.storage_timeout_s:
+                                raise TimeoutError("HDF5 queue did not drain before its storage deadline.") from exc
+                            if (abort_check is not None and abort_check()
+                                    and not getattr(self.camera, "preserve_returned_frames", False)):
                                 raise AcquisitionAborted(
                                     f"Acquisition stopped after {captured} of {num_frames} frames."
                                 ) from exc
@@ -647,7 +707,9 @@ class CameraScanManager:
                         producer_complete = False
                 producer_done.set()
                 drain_started = time.perf_counter()
-                writer.join()
+                writer.join(timeout=boundary.storage_timeout_s if boundary else None)
+                if writer.is_alive():
+                    writer_errors.append(TimeoutError("HDF5 writer cleanup is still pending; partial data retained."))
                 writer_drain_s = time.perf_counter() - drain_started
 
         self.last_step_timing = {
@@ -711,6 +773,7 @@ class CameraScanManager:
         continuous: bool = False,
         preview_callback: Optional[Callable[[np.ndarray], None]] = None,
         preview_interval_s: float = 0.2,
+        recording: RecordingBoundary | None = None,
     ) -> Iterator[tuple[int, float, Path, np.ndarray]]:
         """Run steps with dedicated retrieval and overlapped durable pixel checks.
 
@@ -728,6 +791,13 @@ class CameraScanManager:
         """
         if not self.camera.is_connected:
             raise RuntimeError("Cannot execute scan: Camera is disconnected.")
+        if recording is not None:
+            if continuous or num_steps != 1 or start_step != 0:
+                raise ValueError("An isolated recording requires exactly one finite step.")
+            if not self.camera.supports_isolated_recordings:
+                raise RuntimeError("Camera driver cannot establish isolated recording boundaries.")
+            if getattr(self.camera, "state_unknown", False):
+                raise RuntimeError("Camera state is unknown; reconnect before a new recording.")
         if num_steps < 1:
             raise ValueError(f"Number of steps must be at least 1, got {num_steps}.")
         if num_frames < 1:
@@ -744,7 +814,8 @@ class CameraScanManager:
         # Keep the original camera identity and the established setpoint/file
         # boundary. Only SDK retrieval, hashing and closed-file work move apart.
         with self._operation("SCANNING"), self._camera_lock:
-            storage = ClosedFilePipeline()
+            storage = (ClosedFilePipeline(startup_timeout_s=recording.storage_timeout_s)
+                       if recording is not None else ClosedFilePipeline())
             continuous_source = None
             preview_schedule = [0.0]
             try:
@@ -767,7 +838,10 @@ class CameraScanManager:
                             self.writer_queue_byte_budget, self.writer_memory_reserve_bytes, storage.collect,
                             continuous=True)
                     source = continuous_source if continuous else BufferedCamera(self.camera, num_frames, 4,
-                        self.writer_queue_byte_budget, self.writer_memory_reserve_bytes, storage.collect)
+                        self.writer_queue_byte_budget, self.writer_memory_reserve_bytes, storage.collect,
+                        boundary=recording, abort_check=abort_check)
+                    if recording is not None:
+                        self._recording_source = source
                     # Reuse exactly the existing writer and schema. Its one-batch
                     # queue shares the configured byte limit with the SDK reader.
                     writer = CameraScanManager(source, self.storage_dir, compression=self.compression,
@@ -800,7 +874,10 @@ class CameraScanManager:
                     # STOP between files must end SDK retrieval immediately,
                     # before waiting for outstanding closed-file checks.
                     continuous_source.close()
-                storage.finish()
+                if recording is None:
+                    storage.finish()
+                else:
+                    storage.finish(timeout_s=recording.storage_timeout_s)
                 self.last_scan_pipeline = {"files_verified": storage.completed,
                                            "max_pending_files": storage.peak_pending,
                                            "batch_size": 4, "compression": self.compression or "none",

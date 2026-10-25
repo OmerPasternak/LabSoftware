@@ -7,6 +7,8 @@ import threading
 import time
 from typing import Generic, TypeVar
 
+from hhg_control.ownership import InstrumentOwnership
+
 from .drivers.base import BaseMotor, MotorError, MotorInfo, MotorLimits, MotorSafetyError, MotorStatus, finite
 
 T = TypeVar("T")
@@ -52,6 +54,8 @@ class MotorSequencer:
         self.position_tolerance_mm = self._positive(position_tolerance_mm, "Position tolerance (mm)")
         self.stop_timeout_s = self._positive(stop_timeout_s, "Stop verification timeout (s)")
         self._operation_lock = threading.Lock()
+        self._ownership = InstrumentOwnership()
+        self._position_holds = 0
         self._stop_lock = threading.Lock()
         self._stop_generation = 0
         self._stop_event = threading.Event()
@@ -93,12 +97,27 @@ class MotorSequencer:
     @contextmanager
     def _operation(self):
         """Reject concurrent operations instead of queueing stale motion commands."""
-        if not self._operation_lock.acquire(blocking=False):
-            raise MotorError("Another motor operation is active; use request_stop() to cancel it.")
-        try:
-            yield
-        finally:
-            self._operation_lock.release()
+        with self.reserve():
+            if not self._operation_lock.acquire(blocking=False):
+                raise MotorError("Another motor operation is active; use request_stop() to cancel it.")
+            try:
+                yield
+            finally:
+                self._operation_lock.release()
+
+    def reserve(self):
+        """Reserve this sequencer across a complete experiment on its I/O owner."""
+        return self._ownership.reserve()
+
+    @contextmanager
+    def hold_position(self):
+        """Prohibit moves while a detector recording is active; status and STOP remain usable."""
+        with self.reserve():
+            self._position_holds += 1
+            try:
+                yield
+            finally:
+                self._position_holds -= 1
 
     def connect(self) -> MotorInfo:
         """Connect without clearing STOP, homing, zeroing, or changing settings."""
@@ -228,6 +247,8 @@ class MotorSequencer:
         on_status: Callable[[MotorStatus], None] | None,
     ) -> MotorStatus:
         """Run one already-validated target while owning the operation lock."""
+        if self._position_holds:
+            raise MotorSafetyError("Position is held for a detector recording; motion is prohibited.")
         deadline = time.monotonic() + timeout_s
         self._check_motion_deadline(deadline, cancel_event)
         initial = self._checked_status(require_ready=True)

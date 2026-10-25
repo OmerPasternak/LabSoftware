@@ -36,9 +36,22 @@ class BufferedCamera:
     can_pause_acquisition = True  # RAM consumer can wait; physical reader cannot.
     acquisition_diagnostics = None
 
-    def __init__(self, camera, frames, batch_size, budget, reserve, poll, *, continuous=False):
+    def __init__(self, camera, frames, batch_size, budget, reserve, poll, *, continuous=False,
+                 boundary=None, abort_check=None):
         """Cache settings and preflight byte budgets before starting SDK reads."""
         self.camera, self.frames, self.batch_size, self.poll = camera, frames, batch_size, poll
+        self.boundary, self.abort_check = boundary, abort_check
+        self.preserve_returned_frames = boundary is not None
+        self.recording_stopped = False
+        self.cancel_error = None
+        if boundary is not None:
+            expected = boundary.context.get("camera_settings")
+            if expected is not None and (expected["roi"] != list(self.camera.get_roi())
+                    or expected["exposure_s"] != self.camera.get_exposure_time()
+                    or expected["trigger_mode"] != self.camera.get_trigger_mode().value
+                    or expected["readout_mode"] != self.camera.get_readout_mode().name
+                    or expected["identity"] != json.loads(json.dumps(self.camera.get_sensor_info(), default=str))):
+                raise RuntimeError("Camera settings differ from the immutable recording context.")
         self.sensor = camera.get_sensor_info()
         self.roi = camera.get_roi()
         self.exposure = camera.get_exposure_time()
@@ -123,10 +136,146 @@ class BufferedCamera:
                   "shape": [self.file_frames, *self.shape], "settings": {
                       key: attrs[key] for key in ("camera_serial", "roi_bounds", "exposure_time_s",
                                                  "trigger_mode", "readout_mode", "scan_step_index")}}
+        if self.boundary is not None:
+            header["settings"]["recording_context_json"] = self.boundary.context_json
         self._manifest.write(json.dumps(header, separators=(",", ":")) + "\n")
+
+    def _isolated_stop_check(self):
+        """Request owner-thread stop without discarding a batch already returned by the SDK."""
+        from .scan_manager import AcquisitionAborted
+        if self.abort_check is not None and self.abort_check():
+            self.cancel_error = self.cancel_error or AcquisitionAborted("Recording stopped; returned frames retained.")
+            self.stop.set()
+        if time.monotonic() >= self.capture_deadline:
+            self.cancel_error = self.cancel_error or TimeoutError("Finite camera recording exceeded its deadline.")
+            self.stop.set()
+        return self.stop.is_set()
+
+    def _read_isolated(self):
+        """Own a fresh finite recorder and drain each SDK-returned batch, including on STOP."""
+        from .scan_manager import AcquisitionBackpressure
+        iterator, previous = None, None
+        try:
+            self.camera.confirm_recording_stopped()
+            if self._isolated_stop_check():
+                return
+            iterator = self.camera.iter_frames(self.frames, batch_size=self.batch_size,
+                                               stop_check=self._isolated_stop_check)
+            for images, metadata in iterator:
+                if (images.ndim != 3 or images.shape[1:] != self.shape or images.dtype != np.uint16
+                        or not 0 < len(images) <= self.batch_size
+                        or self.retrieved + len(images) > self.frames or len(metadata) != len(images)):
+                    raise ValueError("Invalid isolated camera batch; position changes remain prohibited.")
+                owned = images if self.camera.yields_owned_batches else images.copy()
+                batch = owned, [dict(item) for item in metadata]
+                self.retrieved += len(images)
+                for item in metadata:
+                    if ("recording_context" in item and item["recording_context"] != self.boundary.context):
+                        self.error = self.error or RuntimeError("Camera returned a conflicting recording/delay context.")
+                        self.stop.set()
+                    try:
+                        frame_id = int(item["frame_id"])
+                    except (KeyError, TypeError, ValueError) as exc:
+                        self.error = self.error or ValueError(f"Camera frame identity is invalid: {exc}")
+                        self.stop.set()
+                        continue
+                    if previous is not None and frame_id != (previous + 1) % 2**32:
+                        self.error = self.error or RuntimeError("Camera frame-ID gap or duplicate in isolated recording.")
+                        self.stop.set()
+                    previous = frame_id
+                available = available_physical_memory_bytes()
+                self.min_available = min(self.min_available, available)
+                if self.expanded and available < self.reserve + self.working_bytes:
+                    self.error = self.error or AcquisitionBackpressure("Camera reader reached RAM reserve.")
+                    self.stop.set()
+                # The consumer drains until done, including transfers which
+                # returned after the user pressed STOP.
+                while True:
+                    try:
+                        self.pending.put(batch, timeout=0.05)
+                        self.peak_batches = max(self.peak_batches, self.pending.qsize())
+                        break
+                    except Full:
+                        self.full_events += 1
+                        self._isolated_stop_check()
+                        if not self.camera.can_pause_acquisition:
+                            self.error = self.error or AcquisitionBackpressure("Camera reader queue filled.")
+                            self.stop.set()
+                        if getattr(self, "consumer_failed", False):
+                            raise RuntimeError("Storage consumer failed; returned pixels could not all be saved.")
+                self._isolated_stop_check()
+        except BaseException as exc:
+            self.error = self.error or exc
+        finally:
+            try:
+                if iterator is not None:
+                    iterator.close()
+                self.camera.confirm_recording_stopped()
+                self.recording_stopped = True
+            except BaseException as exc:
+                self.error = RuntimeError(f"Recording cleanup uncertain: {exc}; original error: {self.error}")
+            self.done.set()
+
+    def _iter_isolated(self, stop_check):
+        """Yield all returned frames before reporting STOP, timeout, or reader errors."""
+        from .scan_manager import AcquisitionAborted
+        self.poll()
+        self.capture_deadline = time.monotonic() + self.boundary.capture_timeout_s
+        self.reader.start()
+        stop_deadline = None
+        next_health_at = 0.0
+        try:
+            while not self.done.is_set() or not self.pending.empty():
+                self._isolated_stop_check()
+                try:
+                    self.poll()
+                    if self.boundary.health_check is not None and time.monotonic() >= next_health_at:
+                        self.boundary.health_check()
+                        next_health_at = time.monotonic() + 0.1
+                except Exception as exc:
+                    self.error = self.error or exc
+                    self.stop.set()
+                if stop_check is not None and stop_check():
+                    self.stop.set()
+                    self.cancel_error = self.cancel_error or AcquisitionAborted("Recording stopped; returned frames retained.")
+                if self.stop.is_set() and stop_deadline is None:
+                    stop_deadline = time.monotonic() + self.boundary.cleanup_timeout_s
+                if stop_deadline is not None and time.monotonic() >= stop_deadline and not self.done.is_set():
+                    raise TimeoutError("Camera did not acknowledge STOP within its cleanup deadline.")
+                try:
+                    images, metadata = self.pending.get(timeout=0.05)
+                except Empty:
+                    continue
+                pixels = np.ascontiguousarray(images, dtype="<u2")
+                began = time.perf_counter()
+                digest = hashlib.sha256(memoryview(pixels).cast("B")).hexdigest()
+                self.hash_s += time.perf_counter() - began
+                first, last = metadata[0].get("frame_id"), metadata[-1].get("frame_id")
+                if self.first_id is None:
+                    self.first_id = first
+                self.last_id = last
+                self._manifest.write(json.dumps({"start": self.delivered, "frames": len(images),
+                    "sha256": digest, "first_id": first, "last_id": last}) + "\n")
+                self.delivered += len(images)
+                yield images, metadata
+            self.reader.join(timeout=self.boundary.cleanup_timeout_s)
+            if self.reader.is_alive() or not self.recording_stopped:
+                raise RuntimeError("Camera recording stop is uncertain; no further movement is permitted.")
+            if self.error is not None:
+                raise self.error
+            if self.cancel_error is not None:
+                raise self.cancel_error
+            if self.delivered != self.frames:
+                raise RuntimeError(f"Camera returned {self.delivered} frames; expected {self.frames}.")
+        finally:
+            self.consumer_failed = True
+            self.close()
 
     def _read(self):
         """Own iterator creation, SDK reads and iterator cleanup on one thread."""
+        if self.boundary is not None:
+            self._read_isolated()
+            return
         from .scan_manager import AcquisitionBackpressure
         iterator = None
         previous = None
@@ -182,6 +331,9 @@ class BufferedCamera:
                 or not self.continuous and num_frames != self.frames
                 or self.delivered + num_frames > self.frames):
             raise ValueError("Measurement dimensions changed after buffer planning.")
+        if self.boundary is not None:
+            yield from self._iter_isolated(stop_check)
+            return
         file_end = self.delivered + num_frames
         succeeded = False
         try:
@@ -239,7 +391,10 @@ class BufferedCamera:
         """Stop and join only this reader; never close the connected camera."""
         self.stop.set()
         if self.reader.ident is not None:
-            self.reader.join()
+            self.reader.join(timeout=self.boundary.cleanup_timeout_s if self.boundary else None)
+            if self.reader.is_alive():
+                self.camera.state_unknown = True
+                raise RuntimeError("Camera reader cleanup timed out; recording stop is uncertain.")
         if self._manifest is not None:
             self._manifest.close()
 
@@ -324,7 +479,11 @@ def verify_file(path, manifest_path, *, read_bytes=64 * 2**20):
                     images.read_direct(buffer, np.s_[window_start:window_stop], np.s_[:window_stop-window_start])
                     window_ids = []
                     for record in metadata[window_start:window_stop]:
-                        identifier = int(json.loads(record)["frame_id"])
+                        item = json.loads(record)
+                        context_json = header["settings"].get("recording_context_json")
+                        if context_json is not None and item.get("recording_context") != json.loads(context_json):
+                            raise ValueError("Saved frame recording/delay attribution differs from source.")
+                        identifier = int(item["frame_id"])
                         if previous is not None and identifier != (previous + 1) % 2**32:
                             raise ValueError("Saved frame IDs have a gap or duplicate.")
                         if first is None:
@@ -343,7 +502,8 @@ def verify_file(path, manifest_path, *, read_bytes=64 * 2**20):
             raise ValueError("Source manifest does not cover every saved frame.")
     return {"frames_verified": count, "pixels_equal_source": True, "consecutive_frame_ids": True,
             "first_frame_id": first, "last_frame_id": previous, "verification_s": time.perf_counter()-began,
-            "external_trigger_accounting": "NOT_TESTED"}
+            "external_trigger_accounting": "NOT_TESTED",
+            "recording_context_verified": "recording_context_json" in header["settings"]}
 
 
 def _sync_files(tasks, results):
@@ -494,9 +654,12 @@ class ClosedFilePipeline:
         self.peak_pending = max(self.peak_pending, len(self.pending))
         self.tasks.put_nowait(task)
 
-    def finish(self):
+    def finish(self, timeout_s=None):
         """Complete all submitted durability and integrity work before success."""
+        deadline = time.monotonic() + timeout_s if timeout_s is not None else None
         while self.pending:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("Closed-file sync/verification exceeded the recording deadline.")
             self.collect(timeout=0.05)
 
     def durable_summary(self):
