@@ -62,7 +62,7 @@ class DelayDiagnostic(QObject):
             return
         self.active = True
         self.stop_event.clear()
-        self.count = max(2, w.spn_frames.value())
+        self.count = 2000
         self.run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "_" + uuid4().hex[:8]
         self.window_path = w.scan_manager.storage_dir / f"camera_delay_{self.run_id}_window.json"
         w._clear_paused_scan("Starting camera delay characterization")
@@ -71,7 +71,7 @@ class DelayDiagnostic(QObject):
         w.cmb_camera_source.setEnabled(False)
         w.btn_camera_delay.setEnabled(False)
         w._append_log(f"[DELAY][{w._scan_source_label()}] Starting camera-delay characterization; "
-                      f"{self.count} frames/delay (current Frames/step, minimum 2).")
+                      f"1 measurement step per delay, {self.count} frames/step.")
         if w._is_live_active or w.active_live_task is not None:
             w._stop_live(after_stop=self._reference)
         else:

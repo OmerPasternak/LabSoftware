@@ -199,8 +199,14 @@ def test_diagnostics_window_moves_buttons_and_keeps_stop_available(qtbot):
 
 @pytest.mark.parametrize("live", [False, True])
 def test_gui_full_workflow_with_only_rectangle_selection(qtbot, manager, monkeypatch, live):
-    """Exercise actual Qt workers and writer; substitute only the human selector and final plot launch."""
+    """Check the fixed 2,000-frame request; use small real acquisitions for GUI lifecycle checks."""
+    from hhg_control.gui.camera import diagnostics
     from hhg_control.gui.camera.camera_panel import CameraMainWindow
+    original_characterize = diagnostics.characterize_delay
+    def bounded_characterize(manager, run_id, count, selected_window, abort, log):
+        assert count == 2000
+        return original_characterize(manager, run_id, 3, selected_window, abort, log)
+    monkeypatch.setattr(diagnostics, "characterize_delay", bounded_characterize)
     window = CameraMainWindow()
     qtbot.addWidget(window)
     window.camera, window.scan_manager = manager.camera, manager
@@ -220,6 +226,7 @@ def test_gui_full_workflow_with_only_rectangle_selection(qtbot, manager, monkeyp
         window._start_live()
         qtbot.waitUntil(lambda: bool(getattr(manager.camera, "_live_active", False)), timeout=5000)
     controller.start()
+    assert controller.count == 2000 and window.spn_frames.value() == 3
     assert controller.active and not window.control_panel.isEnabled()
     assert not window.btn_go.isEnabled() and not window.cmb_camera_source.isEnabled()
     assert window.btn_stop.isEnabled()

@@ -6,8 +6,8 @@ Saved-data analysis works as before and requires no camera connection.
 
 For characterization, select the intended camera source and existing ROI/exposure
 settings, then click **Camera delay characterization**. An idle, disconnected source
-connects automatically; active live view stops first. The tool uses the current
-Frames/step count (at least two) at each delay. Its only interactive acquisition
+connects automatically; active live view stops first. The tool uses one measurement
+step of 2,000 frames at each delay, independent of the main scan controls. Its only interactive acquisition
 step is drawing one harmonic rectangle on a freshly saved reference and clicking
 **Use this window**. Closing selection cancels; STOP cancels selection or acquisition.
 
