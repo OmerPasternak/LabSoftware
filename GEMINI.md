@@ -65,7 +65,16 @@ Whenever planning or adding a new instrument:
 - Before writing a new driver from scratch, check whether PyMoDAQ (or a PyMoDAQ plugin) already covers the instrument, and say so explicitly rather than defaulting to a bespoke implementation.
 - Data format: HDF5 for saved scan data (compatible with the student's existing MATLAB analysis pipeline). Always save metadata (timestamps, instrument settings, scan parameters) alongside raw data.
 - Version control: git, from the first file. Commit in small, logical chunks with descriptive messages. Never suggest force-pushing to a shared branch or rewriting history the student has already pushed, without explaining the risk first.
-- Testing: unit tests against mock drivers for sequencer logic. Do not skip tests "to save time" without flagging that trade-off explicitly.
+- Testing: follow [the shared test selection guide](docs/test_selection.md) and
+  [AGENTS.md](AGENTS.md) for scope, environment and pre-push gates. Run the
+  smallest relevant mock/fake-SDK group for routine work; broaden for a specific
+  unresolved risk. Documentation-only edits need checked links/paths and diff.
+  A full code/test pre-push check must include the nested TC motor tests.
+  Reuse already-valid results instead of repeating successful checks on an
+  unchanged state. Never run notebook Run All or physical hardware as a routine
+  development test. Use 4H for current GUI external-trigger diagnostics;
+  4F/4G use a separate benchmark implementation. Keep the detailed routing map
+  in the shared guide rather than duplicating it here.
 
 ## SAFETY AND HARDWARE-RISK RULES
 

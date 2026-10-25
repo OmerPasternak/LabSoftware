@@ -15,6 +15,15 @@ See [external-trigger rate and scope timing](external_trigger_validation.md).
 4F/4G Auto Sequence benchmarks and the legacy section 8 count check alone do not
 measure electrical trigger-to-exposure delay.
 
+For agents choosing or repeating tests, use the
+[current test selection guide](test_selection.md). Select by the unresolved
+question; the first-session sequence below is not a requirement to rerun every
+cell. 4F/4G use a separate benchmark implementation, while 4H calls the current
+GUI public sequencer. Sections 4B and 4E are specific comparison tools, not
+routine prerequisites for current production diagnostics. Camera delay
+characterization measures signal versus configured delay and is distinct from
+the scope's electrical latency/jitter measurement.
+
 Use this at the first physical-camera session. Recheck the code and rerun the
 offline tests after further edits. The evidence below is from 2026-09-24 and
 is not a hardware acceptance result. The notebook now defaults to a centered
@@ -105,12 +114,12 @@ is not a hardware acceptance result. The notebook now defaults to a centered
    capture is slow, compare the camera SDK/camware baseline with our saved run
    before changing the writer. If capture is fast but the queue fills, profile
    the writer and storage on that PC before changing FIFO or batch settings.
-5. After the identity, short scan and section 4 comparison pass, explicitly
-   enable notebook section 4B on the same drive, serial, ROI, exposure, shutter
-   and Auto Sequence mode. Compare direct-file capture and sync rates with
-   CamWare and HDF5, and require exact counts, no recorder errors, and
-   consecutive frame IDs. Repeat on a new internal NVMe drive if installed.
-   Do not infer external trigger accounting from Auto Sequence results.
+5. Only if native PCO file mode remains an unresolved alternative, select
+   notebook 4B at matched settings and compare counts, errors, capture/sync
+   rates and available integrity checks. Otherwise continue with the diagnostic
+   selected in the guide (4C for stage isolation, 4D for storage, 4H for current
+   production external triggering). Do not infer external trigger accounting
+   from Auto Sequence results or repeat settled format comparisons by default.
 
 ## Acceptance for research use
 

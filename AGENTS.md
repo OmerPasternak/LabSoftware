@@ -71,6 +71,31 @@ Whenever planning or adding a new instrument:
 - Version control: git, from the first file. Commit in small, logical chunks with descriptive messages. Never suggest force-pushing to a shared branch or rewriting history the student has already pushed, without explaining the risk first.
 - Testing: use mock drivers for sequencer tests and run the tests relevant to each code change. Use judgment about adjacent risks; small, focused edits do not require the full suite every time. Run the full suite periodically, after broad or high-risk changes, and before commits or pushes when its coverage is warranted. Documentation-only edits usually need no test run; report what was and was not checked.
 
+## SELECT TESTS BY THE QUESTION, NOT BY NOTEBOOK ORDER
+
+Read [the test selection guide](docs/test_selection.md) before choosing validation.
+It is the shared routing authority for this file and `GEMINI.md`; keep the detailed
+map there rather than maintaining competing test lists in agent files.
+
+- State the changed component or unresolved measurement question, then select
+  the smallest relevant test group from the guide. Reuse a passing result on the
+  same code/environment when its assumptions still hold. Broaden only for a
+  changed dependency, a failure, an uncovered risk, or the full pre-push gate below.
+- Documentation-only changes need link/path and diff checks, not acquisition,
+  pytest, MATLAB, or storage benchmarks. Software regression checks use mocks or
+  fake SDKs; physical runs require the user's reviewed hardware authorization.
+- Never run the notebook with Run All or treat sections 1 through 8 as routine
+  prerequisites. For current GUI acquisition use production-pipeline tests;
+  for external triggers use 4H. 4C isolates camera/queue/writer stages, 4D isolates
+  synthetic storage, and 4F/4G exercise a separate benchmark implementation.
+  A 4F/4G pass alone does not validate the GUI's current pipeline.
+- Include `src/hhg_control/tc_motor/tests` in a full-project check. `pytest tests`
+  alone omits it. Avoid collecting copied checkouts under ignored `data/`;
+  use the guide's local full-suite command or a clean tracked export.
+- Record which tests ran, revision/diff scope, environment, result and remaining
+  evidence gap. Do not repeat successful tests just for a new progress update,
+  final response, or a commit containing exactly the already-validated code.
+
 ## GITHUB ACTIONS AND PRE-PUSH VALIDATION
 
 ### Match the environment that actually runs CI
