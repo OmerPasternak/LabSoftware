@@ -64,6 +64,7 @@ def test_scan_raw_frames_statistics_settings_and_plot(manager, monkeypatch):
     assert report["original_trigger_mode"] == TriggerMode.AUTO_SEQUENCE.value
     assert camera.get_delay_time() == pytest.approx(3000e-9)
     assert camera.get_trigger_mode() == TriggerMode.AUTO_SEQUENCE
+    assert not camera.get_external_trigger_input_enabled()
     assert manager.state == "IDLE"
     assert len(report["points"]) == 15
     assert len(captured) == 45
@@ -72,6 +73,8 @@ def test_scan_raw_frames_statistics_settings_and_plot(manager, monkeypatch):
             images = source["images"][:]
             assert source.attrs["complete"]
             assert source.attrs["trigger_mode"] == TriggerMode.EXTERNAL_EXPOSURE_START.value
+            assert source.attrs["external_trigger_input_enabled"]
+            assert source.attrs["external_trigger_input_polarity"] == "rising edge"
             assert source.attrs["scan_parameter_name"] == "Camera delay (ns)"
             assert source.attrs["scan_parameter_value"] == pytest.approx(point["actual_delay_ns"])
             expected_frames = [item[0] for item in captured[index*3:index*3+3]]
@@ -115,7 +118,9 @@ def test_scan_raw_frames_statistics_settings_and_plot(manager, monkeypatch):
     assert filesystem_path(unrelated).is_file()
 
 
-def test_stop_preserves_completed_points_and_restores_settings(manager):
+@pytest.mark.parametrize("initial_external_input", [False, True])
+def test_stop_preserves_completed_points_and_restores_settings(manager, initial_external_input):
+    manager.camera.set_external_trigger_input_enabled(initial_external_input)
     window = select(manager)
     stopped = Event()
     def log(message):
@@ -127,6 +132,7 @@ def test_stop_preserves_completed_points_and_restores_settings(manager):
     assert not report["complete"] and len(report["points"]) == 1
     assert manager.camera.get_delay_time() == pytest.approx(3000e-9)
     assert manager.camera.get_trigger_mode() == TriggerMode.AUTO_SEQUENCE
+    assert manager.camera.get_external_trigger_input_enabled() is initial_external_input
     assert manager.state == "IDLE"
 
 
@@ -141,6 +147,7 @@ def test_analysis_failure_retains_raw_and_restores(manager, monkeypatch):
     assert len(list(manager.storage_dir.glob("*.h5"))) == 2
     assert manager.camera.get_delay_time() == pytest.approx(3000e-9)
     assert manager.camera.get_trigger_mode() == TriggerMode.AUTO_SEQUENCE
+    assert not manager.camera.get_external_trigger_input_enabled()
     assert manager.state == "IDLE"
 
 
@@ -158,6 +165,7 @@ def test_cleanup_failure_is_explicit_and_report_is_incomplete(manager, monkeypat
     assert not report["complete"] and "cleanup failed" in report["error"]
     assert manager.camera.state_unknown
     assert manager.camera.get_trigger_mode() == TriggerMode.AUTO_SEQUENCE
+    assert not manager.camera.get_external_trigger_input_enabled()
 
 
 def test_delay_grid_and_range_validation():
@@ -168,6 +176,22 @@ def test_delay_grid_and_range_validation():
     for limits in ((0, 1, 100e-9), (1e-9, 1, 1e-9), (0, 2000e-9, 1e-9)):
         with pytest.raises(ValueError):
             delay_points_ns(limits)
+
+
+@pytest.mark.parametrize("fault", ["mode", "input"])
+def test_reference_rejects_unverified_external_trigger(manager, monkeypatch, fault):
+    """Never start a recorder if trigger configuration silently fails to take effect."""
+    camera = manager.camera
+    if fault == "mode":
+        monkeypatch.setattr(camera, "set_trigger_mode", lambda mode: None)
+    else:
+        monkeypatch.setattr(camera, "set_external_trigger_input_enabled", lambda enabled: None)
+    with pytest.raises(RuntimeError, match="requires External Exposure Start"):
+        acquire_delay_reference(manager, "invalid_trigger", 3, lambda: False, lambda _: None)
+    assert not list(manager.storage_dir.glob("*.h5*"))
+    assert manager.state == "IDLE"
+    assert camera.get_trigger_mode() == TriggerMode.AUTO_SEQUENCE
+    assert not camera.get_external_trigger_input_enabled()
 
 
 def test_physical_delay_adapter_uses_seconds_and_verifies_readback(monkeypatch):
@@ -204,6 +228,35 @@ def test_physical_delay_adapter_uses_seconds_and_verifies_readback(monkeypatch):
     assert camera.state_unknown
 
 
+def test_physical_external_trigger_input_preserves_edge_and_verifies_readback(monkeypatch):
+    """Exercise HWIO-1 enable logic using an SDK stand-in, without camera discovery."""
+    from hhg_control.camera.drivers import pco_edge
+    monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
+    from hhg_control.camera.drivers.pco_edge import PcoEdgeCamera
+    camera = PcoEdgeCamera()
+    state = {"enabled": "off", "polarity": "falling edge", "type": "TTL",
+             "filter": "off", "selected": 0, "parameter": [0, 0, 0, 0]}
+    fake = SimpleNamespace(
+        is_recording=False,
+        sdk=SimpleNamespace(get_hwio_signal=lambda index: dict(state)),
+    )
+    def configure(enabled, polarity):
+        state.update(enabled="on" if enabled else "off", polarity=polarity)
+    fake.configureHWIO_1_exposureTrigger = configure
+    camera._cam, camera._is_connected = fake, True
+    assert not camera.get_external_trigger_input_enabled()
+    assert camera.get_external_trigger_input_settings()["polarity"] == "falling edge"
+    camera.set_external_trigger_input_enabled(True)
+    assert camera.get_external_trigger_input_enabled()
+    assert state["polarity"] == "falling edge"
+    camera.set_external_trigger_input_enabled(False)
+    assert not camera.get_external_trigger_input_enabled()
+    assert state["polarity"] == "falling edge"
+    for invalid in (1, "on", None):
+        with pytest.raises(ValueError, match="bool"):
+            camera.set_external_trigger_input_enabled(invalid)
+
+
 def test_diagnostics_window_moves_buttons_and_keeps_stop_available(qtbot):
     from hhg_control.gui.camera.camera_panel import CameraMainWindow
     window = CameraMainWindow()
@@ -213,6 +266,8 @@ def test_diagnostics_window_moves_buttons_and_keeps_stop_available(qtbot):
     assert window.diagnostics_window.isVisible()
     for button in (window.btn_spectral_covariance, window.btn_mark_harmonics, window.btn_harmonic_g2):
         assert button.parentWidget() is window.diagnostics_window
+    assert window.spn_delay_frames.value() == 2000
+    assert window.spn_delay_frames.minimum() == 2
     assert window.delay_diagnostic.active is False
     window.diagnostics_window.close()
     window.close()
@@ -220,19 +275,26 @@ def test_diagnostics_window_moves_buttons_and_keeps_stop_available(qtbot):
 
 @pytest.mark.parametrize("live", [False, True])
 def test_gui_full_workflow_with_only_rectangle_selection(qtbot, manager, monkeypatch, live):
-    """Check the fixed 2,000-frame request; use small real acquisitions for GUI lifecycle checks."""
+    """Check the editable frame count; use small acquisitions for GUI lifecycle checks."""
     from hhg_control.gui.camera import diagnostics
     from hhg_control.gui.camera.camera_panel import CameraMainWindow
     original_characterize = diagnostics.characterize_delay
+    original_reference = diagnostics.acquire_delay_reference
+    def bounded_reference(manager, run_id, count, abort, log, **kwargs):
+        assert count == 2468
+        assert "External Exposure Start" in kwargs["start_message"]
+        return original_reference(manager, run_id, 3, abort, log, **kwargs)
     def bounded_characterize(manager, run_id, count, selected_window, abort, log):
-        assert count == 2000
+        assert count == 2468
         return original_characterize(manager, run_id, 3, selected_window, abort, log)
+    monkeypatch.setattr(diagnostics, "acquire_delay_reference", bounded_reference)
     monkeypatch.setattr(diagnostics, "characterize_delay", bounded_characterize)
     window = CameraMainWindow()
     qtbot.addWidget(window)
     window.camera, window.scan_manager = manager.camera, manager
     window._connected_source = "simulated"
     window.spn_frames.setValue(3)
+    window.spn_delay_frames.setValue(2468)
     controller = window.delay_diagnostic
     launched = []
     monkeypatch.setattr(window, "_launch_analysis_script", lambda *args: launched.append(args))
@@ -247,12 +309,14 @@ def test_gui_full_workflow_with_only_rectangle_selection(qtbot, manager, monkeyp
         window._start_live()
         qtbot.waitUntil(lambda: bool(getattr(manager.camera, "_live_active", False)), timeout=5000)
     controller.start()
-    assert controller.count == 2000 and window.spn_frames.value() == 3
+    assert controller.count == 2468 and window.spn_frames.value() == 3
     assert controller.active and not window.control_panel.isEnabled()
+    assert not window.spn_delay_frames.isEnabled()
     assert not window.btn_go.isEnabled() and not window.cmb_camera_source.isEnabled()
     assert window.btn_stop.isEnabled()
     qtbot.waitUntil(lambda: not controller.active, timeout=15000)
     assert window.control_panel.isEnabled()
+    assert window.spn_delay_frames.isEnabled()
     assert window.btn_go.isEnabled() and window.cmb_camera_source.isEnabled()
     assert len(launched) == 1 and launched[0][0] == "plot_camera_delay.py"
     assert manager.camera.get_delay_time() == pytest.approx(3000e-9)
@@ -277,5 +341,6 @@ def test_gui_stop_cancels_selection_without_scanning(qtbot, manager, monkeypatch
     assert len(list(manager.storage_dir.glob("*.h5"))) == 1
     assert manager.camera.get_delay_time() == pytest.approx(3000e-9)
     assert manager.camera.get_trigger_mode() == TriggerMode.AUTO_SEQUENCE
+    assert not manager.camera.get_external_trigger_input_enabled()
     window.camera = MockPcoCamera()
     window.close()

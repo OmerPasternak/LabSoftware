@@ -44,6 +44,13 @@ class BufferedCamera:
         self.exposure = camera.get_exposure_time()
         self.readout = camera.get_readout_mode()
         self.trigger = camera.get_trigger_mode()
+        self.trigger_input = None
+        from ..drivers.base_camera import TriggerMode
+        if self.trigger == TriggerMode.EXTERNAL_EXPOSURE_START:
+            try:
+                self.trigger_input = camera.get_external_trigger_input_settings()
+            except NotImplementedError:
+                pass
         self.shape = (self.roi[3] - self.roi[1], self.roi[2] - self.roi[0])
         batch_bytes = min(frames, batch_size) * math.prod(self.shape) * 2
         if budget < 2 * batch_bytes:
@@ -99,6 +106,12 @@ class BufferedCamera:
     def get_trigger_mode(self):
         """Preserve auto or external triggering exactly as configured."""
         return self.trigger
+
+    def get_external_trigger_input_settings(self):
+        """Return input settings cached before the reader owns SDK access."""
+        if self.trigger_input is None:
+            raise NotImplementedError("Camera external trigger input readback is unsupported.")
+        return dict(self.trigger_input)
 
     def prepare_manifest(self, filepath, attrs):
         """Stream source references beside the HDF5 file, without a RAM-sized list."""

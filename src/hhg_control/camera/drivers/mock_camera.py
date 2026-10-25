@@ -44,6 +44,8 @@ class MockPcoCamera(BaseCamera):
         self._dark_idx = 0
         self._frame_count = 0
         self._delay_time_s = 0.0
+        self._external_trigger_input_enabled = False
+        self._external_trigger_input_polarity = "rising edge"
 
     def _prepare_simulation_data(self) -> None:
         """Build separated bright/weak lines and a noisy sloping background.
@@ -153,6 +155,17 @@ class MockPcoCamera(BaseCamera):
     def get_trigger_mode(self) -> TriggerMode:
         """Return the simulated acquisition trigger selection."""
         return self._trigger_mode
+
+    def get_external_trigger_input_settings(self) -> dict[str, object]:
+        """Return simulated input settings; polarity does not model electrical pulses."""
+        return {"enabled": self._external_trigger_input_enabled,
+                "polarity": self._external_trigger_input_polarity}
+
+    def set_external_trigger_input_enabled(self, enabled: bool) -> None:
+        """Store external input enable state for contract tests; no hardware is controlled."""
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled must be a bool.")
+        self._external_trigger_input_enabled = enabled
 
     # ------------------------------------------------------------------
     # Sensor information & ROI

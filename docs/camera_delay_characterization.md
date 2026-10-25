@@ -6,18 +6,30 @@ Saved-data analysis works as before and requires no camera connection.
 
 For characterization, select the intended camera source and existing ROI/exposure
 settings, then click **Camera delay characterization**. An idle, disconnected source
-connects automatically; active live view stops first. The tool uses one measurement
-step of 2,000 frames at each delay, independent of the main scan controls. Its only interactive acquisition
-step is drawing one harmonic rectangle on a freshly saved reference and clicking
+connects automatically; active live view stops first. Set **Frames per delay** in
+the diagnostics window (default 2,000; minimum 2 for sample STDEV), independent of
+the main scan controls. It sets the frame count for one measurement step at each
+delay; the reference remains one frame. Its only interactive acquisition step is
+drawing one harmonic rectangle on a freshly saved reference and clicking
 **Use this window**. Closing selection cancels; STOP cancels selection or acquisition.
 
-The procedure temporarily selects External Exposure Start, so supply the camera's
-usual external trigger pulses. It changes only the camera's trigger-to-exposure
-delay, not a delay generator or optical stage. It preserves exposure, ROI and
-readout mode. Delay and trigger mode are restored after each acquisition phase,
+The characterization always uses External Exposure Start, regardless of the main
+GUI trigger selection. Before the reference and every delay acquisition it verifies
+the mode and enabled input, failing without recording if either is incorrect.
+The procedure temporarily selects and verifies External Exposure Start and enables
+the PCO HWIO-1 exposure-trigger input if needed, preserving its configured rising
+or falling edge. The camera records one frame for each accepted external trigger
+pulse. Supply one pulse for the reference and the selected frame count at each of
+the 15 delay points; the GUI does not drive or pace the trigger source. It changes
+only the camera's trigger-to-exposure delay, not a delay generator or optical stage.
+It preserves exposure, ROI, readout mode and the trigger input's prior enable state.
+Delay, trigger mode and input state are restored after each acquisition phase,
 including cancellation or failure. Cleanup failures explicitly flag unknown camera
-state and block further camera commands until disconnect/reconnect. No physical
-camera is exercised by automated development tests.
+state and block further camera commands until disconnect/reconnect. Mock tests verify
+the selected trigger mode and input-state lifecycle but cannot model electrical pulse
+acceptance; no physical camera is exercised by automated development tests. The raw
+HDF5 files record the active external-trigger input enable and edge polarity alongside
+the trigger mode.
 
 The scan takes five points across **0–100 ns**, then ten across **1900–2100 ns**.
 Targets round to the SDK's supported timing grid; insufficient range/resolution

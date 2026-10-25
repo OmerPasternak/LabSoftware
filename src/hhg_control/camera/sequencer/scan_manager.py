@@ -360,6 +360,7 @@ class CameraScanManager:
                 )
         check_disk_space(self.storage_dir, int(num_frames * (roi[2] - roi[0]) * (roi[3] - roi[1]) * 2 * 1.1))
 
+        trigger_mode = self.camera.get_trigger_mode()
         attrs = {
                 "experiment_name": clean_exp,
                 "experiment_identifier": clean_exp,
@@ -387,7 +388,7 @@ class CameraScanManager:
                 "sensor_pixel_height": int(sensor_info.get("height", roi[3] - roi[1])),
                 "roi_bounds": roi,
                 "storage_compression": self.compression or "none",
-                "trigger_mode": self.camera.get_trigger_mode().value,
+                "trigger_mode": trigger_mode.value,
                 "writer_queue_batches": int(queue_batches),
                 "writer_queue_capacity_frames": int(queue_capacity_frames),
                 "writer_queue_capacity_bytes": int(queue_capacity_bytes),
@@ -396,6 +397,15 @@ class CameraScanManager:
                 "available_physical_memory_at_start_bytes": int(available_memory_at_start),
                 "camera_yields_owned_batches": bool(self.camera.yields_owned_batches),
         }
+        if trigger_mode == TriggerMode.EXTERNAL_EXPOSURE_START:
+            try:
+                trigger_input = self.camera.get_external_trigger_input_settings()
+            except NotImplementedError:
+                attrs["external_trigger_input_verified"] = False
+            else:
+                attrs["external_trigger_input_verified"] = True
+                attrs["external_trigger_input_enabled"] = bool(trigger_input["enabled"])
+                attrs["external_trigger_input_polarity"] = str(trigger_input["polarity"])
         mode = self.camera.get_readout_mode()
         attrs["readout_mode"] = mode.name
         attrs["readout_mode_value"] = int(mode.value)

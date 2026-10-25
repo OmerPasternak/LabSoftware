@@ -7,7 +7,7 @@ import sys
 from uuid import uuid4
 
 from PyQt6.QtCore import QObject, QProcess, QThread, QTimer, pyqtSignal
-from PyQt6.QtWidgets import QDialog, QLabel, QVBoxLayout, QPushButton
+from PyQt6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QSpinBox, QVBoxLayout
 
 from hhg_control.camera.sequencer.delay_characterization import (
     acquire_delay_reference, characterize_delay,
@@ -62,7 +62,7 @@ class DelayDiagnostic(QObject):
             return
         self.active = True
         self.stop_event.clear()
-        self.count = 2000
+        self.count = w.spn_delay_frames.value()
         self.run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "_" + uuid4().hex[:8]
         self.window_path = w.scan_manager.storage_dir / f"camera_delay_{self.run_id}_window.json"
         w._clear_paused_scan("Starting camera delay characterization")
@@ -70,6 +70,7 @@ class DelayDiagnostic(QObject):
         w.btn_go.setEnabled(False)
         w.cmb_camera_source.setEnabled(False)
         w.btn_camera_delay.setEnabled(False)
+        w.spn_delay_frames.setEnabled(False)
         if w._is_live_active or w.active_live_task is not None:
             w._stop_live(after_stop=self._reference)
         else:
@@ -84,7 +85,9 @@ class DelayDiagnostic(QObject):
         self._run(lambda abort, log: acquire_delay_reference(
             self.window.scan_manager, self.run_id, self.count, abort, log,
             start_message=(f"[DELAY][{self.window._scan_source_label()}] Starting camera-delay "
-                           f"characterization; 1 measurement step per delay, {self.count} frames/step.")),
+                           f"characterization in External Exposure Start; one accepted external "
+                           f"pulse per frame; 1 measurement step per delay, "
+                           f"{self.count} frames/step.")),
             self._select)
 
     def _run(self, operation, on_success):
@@ -179,6 +182,7 @@ class DelayDiagnostic(QObject):
         w.btn_go.setEnabled(not w._hardware_state_unknown)
         w.cmb_camera_source.setEnabled(not w._hardware_state_unknown and w.active_live_task is None)
         w.btn_camera_delay.setEnabled(True)
+        w.spn_delay_frames.setEnabled(True)
         if w._hardware_state_unknown:
             w._configuration_controls(False)
             w.lbl_system_status.setText("Status: Camera state unknown — disconnect and reconnect")
@@ -194,14 +198,32 @@ def build_diagnostics_window(window):
     """Move saved-analysis buttons into an extensible, separate diagnostics window."""
     dialog = QDialog(window)
     dialog.setWindowTitle("Camera Diagnostics")
-    dialog.resize(420, 250)
+    dialog.resize(420, 300)
     layout = QVBoxLayout(dialog)
     layout.addWidget(QLabel("Saved-data analysis"))
     for button in (window.btn_spectral_covariance, window.btn_mark_harmonics, window.btn_harmonic_g2):
         layout.addWidget(button)
     layout.addWidget(QLabel("Camera characterization"))
+    count_row = QHBoxLayout()
+    count_label = QLabel("Frames per delay:")
+    window.spn_delay_frames = QSpinBox(dialog)
+    window.spn_delay_frames.setObjectName("delayFrameCountSpinBox")
+    window.spn_delay_frames.setRange(2, 9_999_999)
+    window.spn_delay_frames.setValue(2000)
+    window.spn_delay_frames.setSuffix(" frames")
+    window.spn_delay_frames.setToolTip(
+        "Frames captured at each delay point. Requires one accepted external trigger pulse per frame."
+    )
+    count_label.setBuddy(window.spn_delay_frames)
+    count_row.addWidget(count_label)
+    count_row.addWidget(window.spn_delay_frames)
+    count_row.addStretch(1)
+    layout.addLayout(count_row)
     window.btn_camera_delay = QPushButton("Camera delay characterization")
-    window.btn_camera_delay.setToolTip("Choose one harmonic rectangle; measure 5 delays at 0–100 ns and 10 at 1900–2100 ns.")
+    window.btn_camera_delay.setToolTip(
+        "Choose one harmonic rectangle; measure 5 delays at 0–100 ns and 10 at 1900–2100 ns. "
+        "External trigger pulses must be supplied during acquisition."
+    )
     layout.addWidget(window.btn_camera_delay)
     layout.addStretch(1)
     window.delay_diagnostic = DelayDiagnostic(window)

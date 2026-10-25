@@ -151,6 +151,21 @@ class BaseCamera(ABC):
         """Read the active hardware trigger mode, not only a cached request."""
         pass
 
+    def get_external_trigger_input_settings(self) -> dict[str, object]:
+        """Read external exposure-trigger input settings, including enable and edge polarity."""
+        raise NotImplementedError("Camera external trigger input readback is unsupported.")
+
+    def get_external_trigger_input_enabled(self) -> bool:
+        """Read whether the external exposure-trigger input is enabled."""
+        enabled = self.get_external_trigger_input_settings().get("enabled")
+        if not isinstance(enabled, bool):
+            raise RuntimeError("Camera returned an invalid external trigger input enable state.")
+        return enabled
+
+    def set_external_trigger_input_enabled(self, enabled: bool) -> None:
+        """Enable or disable external exposure triggering while preserving edge polarity."""
+        raise NotImplementedError("Camera external trigger input configuration is unsupported.")
+
     @abstractmethod
     def acquire_frames(self, num_frames: int) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
         """

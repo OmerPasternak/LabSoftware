@@ -48,18 +48,21 @@ def estimate_duration_s(frames_per_point: int, exposure_s: float, shape_yx) -> t
 
 @contextmanager
 def _session(manager):
-    """Own camera serialization for one phase and restore delay/trigger on every exit."""
+    """Own camera serialization; restore delay, trigger mode and input state on exit."""
     with manager._operation("DELAY_DIAGNOSTIC"), manager._camera_lock:
         camera = manager.camera
         original_delay = camera.get_delay_time()
         original_trigger = camera.get_trigger_mode()
+        original_external_input = camera.get_external_trigger_input_enabled()
         try:
             camera.set_trigger_mode(TriggerMode.EXTERNAL_EXPOSURE_START)
+            camera.set_external_trigger_input_enabled(True)
             yield camera, original_delay, original_trigger
         finally:
             failures = []
             for restore in (lambda: camera.set_delay_time(original_delay),
-                            lambda: camera.set_trigger_mode(original_trigger)):
+                            lambda: camera.set_trigger_mode(original_trigger),
+                            lambda: camera.set_external_trigger_input_enabled(original_external_input)):
                 try:
                     restore()
                 except Exception as exc:
@@ -73,6 +76,9 @@ def _save(manager, run_id, index, delay_ns, count, abort_check):
     """Use the existing bounded, integrity-checked raw writer while holding session ownership."""
     if abort_check():
         raise AcquisitionAborted("Camera delay characterization stopped.")
+    if (manager.camera.get_trigger_mode() != TriggerMode.EXTERNAL_EXPOSURE_START
+            or not manager.camera.get_external_trigger_input_enabled()):
+        raise RuntimeError("Delay characterization requires External Exposure Start with its input enabled.")
     return manager._acquire_and_save_step(
         "Camera delay", index, "Camera delay (ns)", delay_ns, count,
         run_id=run_id, batch_size=1, queue_batches=None, abort_check=abort_check,
