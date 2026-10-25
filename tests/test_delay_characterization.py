@@ -41,7 +41,10 @@ def select(manager, run_id="test"):
     logs = []
     reference = acquire_delay_reference(manager, run_id, 3, lambda: False, logs.append)
     assert any("Estimated characterization time" in line for line in logs)
-    return make_intensity_window((1, 2, 8, 6), reference)
+    window = make_intensity_window((1, 2, 8, 6), reference)
+    (manager.storage_dir / f"camera_delay_{run_id}_window.json").write_text(
+        json.dumps(window), encoding="utf-8")
+    return window
 
 
 def test_scan_raw_frames_statistics_settings_and_plot(manager, monkeypatch):
@@ -86,12 +89,30 @@ def test_scan_raw_frames_statistics_settings_and_plot(manager, monkeypatch):
     assert "SIMULATED" in figure._suptitle.get_text()
     figure.savefig(filesystem_path(manager.storage_dir / "test.png"))
     from scripts import plot_camera_delay
+    report_for_safety_check = json.loads(json.dumps(report))
+    unrelated = manager.storage_dir / "unrelated.h5"
+    filesystem_path(unrelated).write_bytes(b"")
+    report_for_safety_check["points"][0]["source_files"] = [
+        str(unrelated)]
+    with pytest.raises(ValueError, match="Unexpected gathered-data file"):
+        plot_camera_delay.delete_gathered_data(path, report_for_safety_check)
+    assert all(filesystem_path(source).is_file()
+               for point in report["points"] for source in point["source_files"])
+    assert filesystem_path(report["window"]["reference_file"]).is_file()
+    window_path = manager.storage_dir / "camera_delay_test_window.json"
+    assert filesystem_path(window_path).is_file()
     shown = []
     monkeypatch.setattr("hhg_control.camera.analysis.plot_windows.show_analysis_figures",
                         lambda: shown.append(True))
     assert plot_camera_delay.main([str(path)]) == 0
     assert shown == [True]
     assert filesystem_path(path.with_suffix(".png")).is_file()
+    assert not filesystem_path(path).exists()
+    assert not filesystem_path(window_path).exists()
+    assert not filesystem_path(report["window"]["reference_file"]).exists()
+    assert all(not filesystem_path(source).exists()
+               for point in report["points"] for source in point["source_files"])
+    assert filesystem_path(unrelated).is_file()
 
 
 def test_stop_preserves_completed_points_and_restores_settings(manager):
