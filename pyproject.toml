@@ -35,7 +35,7 @@ hhg-tc-motor = "hhg_control.tc_motor.gui.motor_panel:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"hhg_control.tc_motor" = ["docs/*.md", "docs/*.json", "run_TC_motor.bat"]
+"hhg_control.tc_motor" = ["docs/*.md", "docs/*.json", "run_TC_motor.bat", "*.vbs"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

@@ -3,7 +3,7 @@
 All motor-specific implementation, GUI, tests, documentation, profile template,
 and launcher live together under `src/hhg_control/tc_motor/`. The Python package
 uses an underscore because spaces are not valid in a Python import name. Its
-window is named **TC motor**. The BAT launcher resolves the checkout from its own
+window is named **TC motor**. The launchers resolve the checkout from their own
 location; it does not depend on the directory from which it was double-clicked.
 
 ## First setup on the lab PC
@@ -16,7 +16,8 @@ location; it does not depend on the directory from which it was double-clicked.
 3. **Travel:** the controller can supply its configured limits, but someone must
    check the mounted optics/cables and choose a safe interval and stopping margin.
 4. **Settings:** close other software using this serial port. Select Physical,
-   enter the confirmed COM/ASRL resource/address, leave the profile blank, and
+   enter only the COM port number (21 for COM21) and controller address,
+   leave the profile blank, and
    connect for inspection. Click **Save setup report…** and save the JSON file.
    No movement is enabled by collecting or saving this report.
 5. **Reference:** the report states whether the controller reports READY. If it
@@ -39,7 +40,9 @@ Give the physical report to the next agent along with the calibration report and
 the reviewed mounted travel/clearance. Those facts are needed to finish the
 existing safety-profile template. Do not copy mock limits into a physical profile.
 
-Launch `src/hhg_control/tc_motor/run_TC_motor.bat` from this checkout, or run:
+Double-click `src/hhg_control/tc_motor/run_TC_motor.vbs` for a GUI without a console.
+The BAT launcher remains available for compatibility and visible troubleshooting.
+You can also run:
 
 ```powershell
 .\.venv\Scripts\python.exe -m hhg_control.tc_motor.gui
@@ -86,16 +89,30 @@ verified. Blank LabVIEW front-panel fields are not instrument readbacks.
 
 The original VI uses 57600 baud, 8 data bits, no parity, one stop bit, XON/XOFF,
 and a displayed 300 ms VISA timeout. Its parent supplies serial port 21 and axis 1;
-these are historical configuration clues, not hardcoded port selection. The Python
+the GUI starts at the user's confirmed COM number 21 and requires explicit Connect. The Python
 transport uses Newport's documented CRLF framing and the same serial parameters.
 
 ## Physical mode starts with inspection
 
-Install the optional transport dependency only when physical access is planned:
+If Physical mode reports missing PyVISA, close the GUI and double-click
+`src/hhg_control/tc_motor/setup_physical_mode.vbs`. It opens a visible setup console
+so errors can be read. The equivalent command from the project root in PowerShell is:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install ".[hardware-smc100]"
+.\src\hhg_control\tc_motor\run_TC_motor.bat setup
 ```
+
+The setup command installs the PyVISA requirement (`pyvisa>=1.14,<2`, matching
+the `hardware-smc100` extra) into this checkout's `.venv` without reinstalling the application,
+then loads the system VISA runtime in a separate diagnostic process. It does not
+enumerate/open serial ports or command hardware. It requires internet access for
+any missing Python packages. Installation failure stops before the runtime check.
+PyVISA is a Python package; it does not include the native VISA runtime. If the
+check reports that the runtime is missing, install/repair NI-VISA on the lab PC
+and rerun setup. Installing `pyvisa-py` is not a substitute for this driver's
+reviewed exclusive-access requirement. A passed check proves library loading,
+not device availability or successful locking. Restart the GUI after setup.
+Mock mode does not require this setup or a VISA installation.
 
 A system VISA backend supporting exclusive serial-resource access is required
 (normally NI-VISA already used by LabVIEW). The driver requests an exclusive lock;
@@ -103,8 +120,8 @@ it does not fall back to shared access if the backend cannot provide it. Close
 LabVIEW/Newport utility sessions controlling this port before Python connects.
 Do not run two controllers of the same axis concurrently.
 
-Select **Physical**, type the actual COM/ASRL resource and axis, leave the profile
-blank, and click Connect only when authorized to query the physical controller.
+Select **Physical**, enter the COM port **number only** (default 21) and axis,
+leave the profile blank, and click Connect only when authorized to query the physical controller.
 No ports are enumerated or opened automatically. The driver queries version,
 stage reference, state, position, encoder increment, velocity, acceleration,
 software limits, and compensation. The activity log records native configuration.

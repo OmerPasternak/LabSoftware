@@ -306,8 +306,8 @@ def test_physical_selection_has_no_mock_limits_or_auto_connection(qtbot, motor_w
     assert "INSPECTION ONLY" in panel.banner.text()
     assert "mm unverified" in panel.position_label.text()
     assert "not loaded" in panel.limits_label.text()
-    assert panel.resource_edit.isEnabled()
-    assert panel.resource_edit.text() == ""
+    assert panel.com_port_spin.isEnabled()
+    assert panel.com_port_spin.value() == 21
     assert not panel.move_button.isEnabled()
 
 
@@ -329,3 +329,20 @@ def test_inspection_connection_displays_native_units_and_locks_motion(qtbot, mot
     assert panel.position_label.text() == "7.250000 controller units (mm unverified)"
     assert not panel.move_button.isEnabled()
     assert "inspection only" in panel.identity_label.text()
+
+
+def test_com_number_is_passed_as_explicit_port_without_discovery(qtbot, motor_window):
+    requests = []
+
+    def factory(settings):
+        requests.append(settings)
+        return MotorSequencer(MockMotor(MotorLimits(0, 10, 1, 2, 2)))
+
+    panel = motor_window(factory)
+    panel.mode_combo.setCurrentText("Physical")
+    panel.com_port_spin.setValue(21)
+    assert requests == []
+    connect_mock(qtbot, panel)
+    assert requests[0].resource == "COM21"
+    assert requests[0].axis == 1
+    assert not panel.com_port_spin.isEnabled()

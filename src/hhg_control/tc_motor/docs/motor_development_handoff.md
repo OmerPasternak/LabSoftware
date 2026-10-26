@@ -4,6 +4,32 @@ Workspace: `C:\Users\omeravp\Documents\GitHub\LabSoftware`.
 Feature branch: `codex/smc100-motor-control`; original base: `5188b6a`.
 No hardware has been contacted and nothing has been pushed.
 
+## Dependency setup and VBS launchers — 2026-10-26
+
+The GUI now asks for a numeric COM port (default 21, confirmed by the user) and
+internally passes COM21/ASRL21 to the existing driver. No discovery/auto-connect
+was added. `run_TC_motor.vbs` launches with pythonw without a terminal;
+`setup_physical_mode.vbs` opens visible setup output via `run_TC_motor.bat setup`.
+The BAT remains for compatibility. VBS files are included in package data.
+Setup installs only PyVISA (matching the hardware-smc100 extra) into the checkout's .venv and
+checks PyVISA/native VISA in a separate process without opening or listing ports.
+Missing Python packages versus missing native runtime now have distinct errors.
+The setup cannot install/repair NI-VISA itself; that is a lab-PC system dependency.
+PyVISA 1.16.2 was installed in the local working .venv; the local native VISA
+runtime is absent, and the new check reports that correctly. No motor was opened.
+
+Targeted GUI/launcher/dependency checks passed (60 tests); harmless VBS/BAT stubs
+exercise spaces, unrelated cwd, interpreter selection, and installer failure.
+An early full run was stopped after long test-output paths broke existing camera
+benchmark fixture lookups. Use a short clean export and the configured default
+pytest path for final validation; do not alter camera code for this path artifact.
+Final clean-export validation: **426 passed** using the exact `python -m pytest -q`
+command in `C:\Temp\tcm26final`, Python 3.12.10, isolated test-only environment
+with neither PyVISA nor PCO installed. The installed clean wheel includes both
+VBS launchers, BAT, and the dependency checker. No camera source was changed.
+The previous setup-report feature is already pushed as `04e87cc`; this addition
+targets the same `codex/smc100-motor-control` branch.
+
 ## Setup-report addition — 2026-10-25
 
 The motor GUI now has **Save setup report…** while connected/idle, in either

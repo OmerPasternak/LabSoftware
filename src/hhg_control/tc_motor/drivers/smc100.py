@@ -98,11 +98,22 @@ class VisaSerialTransport:
             import pyvisa
             from pyvisa import constants
         except ImportError as exc:
-            raise MotorError('Physical mode requires pip install ".[hardware-smc100]" and a VISA backend.') from exc
+            raise MotorError(
+                'PyVISA is missing from the GUI Python environment. Double-click '
+                'src\\hhg_control\\tc_motor\\setup_physical_mode.vbs, then restart the GUI. '
+                'Setup installs the Python dependency and checks the system VISA runtime without opening a port.'
+            ) from exc
         try:
             with _MANAGER_LOCK:
                 if self.backend not in _VISA_MANAGERS:
-                    _VISA_MANAGERS[self.backend] = pyvisa.ResourceManager(self.backend)
+                    try:
+                        _VISA_MANAGERS[self.backend] = pyvisa.ResourceManager(self.backend)
+                    except Exception as exc:
+                        raise MotorError(
+                            'PyVISA is installed, but the VISA runtime could not be loaded. '
+                            'Install or repair the system VISA runtime (normally NI-VISA), then restart the GUI. '
+                            f'Backend error: {exc}'
+                        ) from exc
                 self._manager = _VISA_MANAGERS[self.backend]
             self._session = self._manager.open_resource(
                 self.resource, access_mode=constants.AccessModes.exclusive_lock,

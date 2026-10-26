@@ -236,6 +236,25 @@ def test_transport_configures_host_only_and_closes_resources(monkeypatch):
     assert "close manager" not in calls
 
 
+def test_missing_python_dependency_has_exact_setup_command(monkeypatch):
+    monkeypatch.setitem(sys.modules, "pyvisa", None)
+    with pytest.raises(MotorError, match="setup_physical_mode.vbs"):
+        VisaSerialTransport("COM21").open()
+
+
+def test_missing_native_runtime_is_distinct_from_missing_python_package(monkeypatch):
+    from hhg_control.tc_motor.drivers import smc100
+
+    def unavailable(_backend):
+        raise OSError("No VISA library")
+
+    monkeypatch.setattr(smc100, "_VISA_MANAGERS", {})
+    monkeypatch.setitem(sys.modules, "pyvisa", SimpleNamespace(
+        ResourceManager=unavailable, constants=SimpleNamespace()))
+    with pytest.raises(MotorError, match="PyVISA is installed.*NI-VISA"):
+        VisaSerialTransport("COM21").open()
+
+
 @pytest.mark.parametrize("resource,axis", [("", 1), ("TCPIP::anything", 1), ("COM21", 0),
                                          ("COM21", True), ("COM21", 32)])
 def test_explicit_serial_resource_and_address_only(resource, axis):
