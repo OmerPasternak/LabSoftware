@@ -82,6 +82,11 @@ class MotorSequencer:
         return self.driver.motion_enabled
 
     @property
+    def communication_uncertain(self) -> bool:
+        """Return the driver's latched serial fault without performing I/O."""
+        return self.driver.communication_uncertain
+
+    @property
     def stop_requested(self) -> bool:
         """Return whether STOP is latched and requires explicit acknowledgement."""
         return self._stop_event.is_set()
@@ -213,20 +218,42 @@ class MotorSequencer:
         with self._operation():
             return self._stop_and_verify()
 
-    def disconnect(self) -> None:
-        """Stop/verify before closing; propagate uncertainty and retain open ownership."""
+    def disconnect(self) -> bool:
+        """Close the driver; return True if a faulted inspection release is unverified.
+
+        Motion-capable sessions still require confirmed standstill. A read-only
+        inspection session that has lost communication may release its port
+        without pretending that STOP or a fresh position was verified.
+        """
         self.request_stop()
         with self._operation():
             if not self.driver.is_connected:
-                return
+                return False
+            if self.driver.can_release_inspection_session:
+                self.driver.close()
+                return True
             try:
                 status = self.driver.get_status()
             except Exception:
+                if self.driver.can_release_inspection_session:
+                    self.driver.close()
+                    return True
                 self._stop_and_verify()
             else:
                 if status.is_moving or self.driver.motion_enabled:
                     self._stop_and_verify()
             self.driver.close()
+            return self.driver.communication_uncertain
+
+    def release_after_manual_verification(self) -> None:
+        """Release a failed physical connection after an external standstill check.
+
+        The driver enforces communication-loss and attempted-STOP prerequisites.
+        No further serial query or motion command is issued here.
+        """
+        self.request_stop()
+        with self._operation():
+            self.driver.release_after_manual_verification()
 
     def _checked_status(self, *, require_ready: bool = False) -> MotorStatus:
         """Reject faults, unknown mm coordinates, or travel outside the reviewed range."""

@@ -11,7 +11,43 @@ from hhg_control.tc_motor.gui.motor_panel import MotorPanel
 from hhg_control.tc_motor.gui.workers import ConnectionSettings, MotorWorker
 from hhg_control.tc_motor.drivers.base import MotorError, MotorLimits
 from hhg_control.tc_motor.drivers.mock import MockMotor
+from hhg_control.tc_motor.drivers.smc100 import SafetyProfile, SMC100Motor
 from hhg_control.tc_motor.sequencer import MotorSequencer
+
+
+class SyntheticSerial:
+    """One controlled fake SMC100 session; no VISA or physical port is touched."""
+
+    def __init__(self):
+        self.commands = []
+        self.corrupt_position = False
+        self.closed = False
+        self.responses = {
+            "VE": "SMC_CC - Controller-driver version SYNTHETIC",
+            "ZX?": "LTA-HS", "TS": "000032", "TP": "2", "TE": "@",
+            "SU?": "0.0001", "VA?": "1", "AC?": "2", "SL?": "0",
+            "SR?": "10", "BA?": "0", "BH?": "0",
+        }
+
+    def open(self):
+        """Record a synthetic connection without accessing hardware."""
+        self.closed = False
+
+    def query(self, text):
+        """Return one addressed response or inject the reported decoding fault."""
+        self.commands.append(text)
+        command = text[1:]
+        if command == "TP" and self.corrupt_position:
+            raise UnicodeDecodeError("ascii", b"\xca", 0, 1, "invalid byte")
+        return text[:3] + self.responses[command]
+
+    def write(self, text):
+        """Record a motor command without executing it."""
+        self.commands.append(text)
+
+    def close(self):
+        """Record release of the synthetic serial handle."""
+        self.closed = True
 
 
 @pytest.fixture
@@ -329,6 +365,86 @@ def test_inspection_connection_displays_native_units_and_locks_motion(qtbot, mot
     assert panel.position_label.text() == "7.250000 controller units (mm unverified)"
     assert not panel.move_button.isEnabled()
     assert "inspection only" in panel.identity_label.text()
+
+
+def test_inspection_serial_fault_pauses_polling_and_closes_without_stop(qtbot, motor_window):
+    serial = SyntheticSerial()
+    panel = motor_window(lambda _: MotorSequencer(
+        SMC100Motor("COM21", transport_factory=lambda: serial)))
+    panel.mode_combo.setCurrentText("Physical")
+    qtbot.mouseClick(panel.connect_button, Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: panel._connection.connected and not panel.worker.is_busy)
+    serial.corrupt_position = True
+    assert panel.worker.submit("snapshot")
+    qtbot.waitUntil(lambda: panel._connection.communication_uncertain and not panel.worker.is_busy)
+    assert not panel.poll_timer.isActive()
+    assert "Position unknown" in panel.position_label.text()
+    assert "state unverified" in panel.state_label.text()
+    assert panel.worker.submit("snapshot") is False
+    first_error_count = panel.log.toPlainText().count("SMC100 query TP failed")
+    panel._poll()
+    panel._poll()
+    assert panel.log.toPlainText().count("SMC100 query TP failed") == first_error_count == 1
+    assert not panel.move_button.isEnabled()
+    qtbot.mouseClick(panel.disconnect_button, Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: not panel._connection.has_session)
+    assert serial.closed
+    assert "Inspection port released after serial fault" in panel.log.toPlainText()
+    assert not any(command.startswith(("1ST", "1PA")) for command in serial.commands)
+    panel.close()
+    qtbot.waitUntil(lambda: not panel.worker.isRunning())
+
+
+def test_rejected_connect_cleans_session_and_allows_new_attempt(qtbot, motor_window):
+    serials = []
+
+    def factory(_):
+        serial = SyntheticSerial()
+        if not serials:
+            serial.responses["TE"] = "M"
+        serials.append(serial)
+        return MotorSequencer(SMC100Motor("COM21", transport_factory=lambda: serial))
+
+    panel = motor_window(factory)
+    panel.mode_combo.setCurrentText("Physical")
+    qtbot.mouseClick(panel.connect_button, Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: "Controller command error M" in panel.log.toPlainText()
+                    and not panel.worker.is_busy)
+    assert serials[0].closed and not panel._connection.has_session
+    assert panel.connect_button.isEnabled()
+    qtbot.mouseClick(panel.connect_button, Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: panel._connection.connected and not panel.worker.is_busy)
+    assert len(serials) == 2 and not serials[1].closed
+
+
+def test_motion_profile_serial_fault_requires_explicit_physical_recovery(
+        qtbot, motor_window, monkeypatch):
+    serial = SyntheticSerial()
+    version = serial.responses["VE"]
+    reviewed = SafetyProfile(MotorLimits(1, 9, 1, 2, 2), version, "LTA-HS", .0001,
+                             .1, True, True, True)
+    panel = motor_window(lambda _: MotorSequencer(
+        SMC100Motor("COM21", profile=reviewed, transport_factory=lambda: serial)))
+    panel.mode_combo.setCurrentText("Physical")
+    panel.profile_edit.setText("synthetic test profile")
+    qtbot.mouseClick(panel.connect_button, Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: panel._connection.connected and not panel.worker.is_busy)
+    serial.corrupt_position = True
+    assert panel.worker.submit("snapshot")
+    qtbot.waitUntil(lambda: panel._connection.communication_uncertain and not panel.worker.is_busy)
+    panel.close()
+    qtbot.waitUntil(lambda: panel._cleanup_uncertain and not panel.worker.is_busy)
+    assert panel.isVisible() and panel.recovery_button.isVisible()
+    assert "1ST" in serial.commands and not serial.closed
+    command_count = len(serial.commands)
+    monkeypatch.setattr("hhg_control.tc_motor.gui.motor_panel.QInputDialog.getText",
+                        lambda *_args: ("STATIONARY", True))
+    qtbot.mouseClick(panel.recovery_button, Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: not panel._connection.has_session)
+    assert serial.closed and len(serial.commands) == command_count
+    assert "software STOP remains unverified" in panel.log.toPlainText()
+    panel.close()
+    qtbot.waitUntil(lambda: not panel.worker.isRunning())
 
 
 def test_com_number_is_passed_as_explicit_port_without_discovery(qtbot, motor_window):

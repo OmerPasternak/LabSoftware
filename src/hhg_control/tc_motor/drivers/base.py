@@ -168,6 +168,20 @@ class BaseMotor(ABC):
         """Whether this connection has passed its motion prerequisites."""
         return self._is_connected and self._motion_enabled
 
+    @property
+    def communication_uncertain(self) -> bool:
+        """Whether status replies can no longer be trusted in this session."""
+        return False
+
+    @property
+    def can_release_inspection_session(self) -> bool:
+        """Whether read-only access can be released after a lost status stream."""
+        return False
+
+    def release_after_manual_verification(self) -> None:
+        """Release a failed session only after the operator confirms standstill."""
+        raise MotorSafetyError("Manual recovery is unavailable for this motor session.")
+
     def require_connected(self) -> None:
         """Refuse reads or commands after disconnect."""
         if not self.is_connected:

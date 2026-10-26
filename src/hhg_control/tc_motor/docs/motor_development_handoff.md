@@ -2,7 +2,33 @@
 
 Workspace: `C:\Users\omeravp\Documents\GitHub\LabSoftware`.
 Feature branch: `codex/smc100-motor-control`; original base: `5188b6a`.
-No hardware has been contacted and nothing has been pushed.
+At the original 2026-10-20 checkpoint, no hardware had been contacted or pushed.
+Later branch pushes and the lab-PC inspection are recorded below.
+
+## Lab serial-fault recovery — 2026-10-26
+
+The user ran inspection-only Physical mode on the lab PC at COM21, address 1.
+The lab log reported `SMC_CC - Controller-driver version 3.1.2`, stage reference
+`LTA-HS`, and native settings `SU=3.53932e-05`, `VA=5`, `AC=20`, `SL=0`,
+`SR=50`, `BA=0`, `BH=0`. These observations establish the responding controller
+family and stage reference, but do not verify mechanical mm calibration, mounted
+travel, or physical motion safety. No motion profile was loaded in that session.
+
+An earlier connection returned Newport TE error `M`; a subsequent connect
+succeeded. About six seconds later, a `TP` position query failed decoding an
+unexpected byte `0xCA`. The old GUI kept polling, then repeatedly failed to
+verify STOP and trapped window close. Root cause of the byte corruption remains
+unproven on the lab PC; investigate cable/adapter, controller power and EMI,
+while preserving 57600 8N1 XON/XOFF CRLF from the manual.
+
+The new code pauses polling on the first failed snapshot, hides stale position,
+disables motion, and releases a faulted inspection-only serial handle without
+issuing ST. A motion-capable session still requires physical standstill/holding
+confirmation before an explicit COM release; that recovery sends no further
+motor command. Disconnect scheduling is atomic so it cannot race into an extra
+ST. Failed connect with a successfully closed port leaves the GUI ready for a
+fresh attempt. Offline fake-serial/Qt tests cover the reported fault and both
+recovery paths. Physical acceptance remains outstanding.
 
 ## Dependency setup and VBS launchers — 2026-10-26
 

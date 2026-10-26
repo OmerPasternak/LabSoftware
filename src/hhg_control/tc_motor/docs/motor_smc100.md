@@ -133,6 +133,33 @@ parameters, change units, or change limits/speed/acceleration. The physical moti
 interface deliberately has no configuration setters. Existing settings are read
 back and checked before each move; unsafe or changed values cause refusal.
 
+### Serial fault and safe exit
+
+A malformed or non-ASCII controller reply latches communication as uncertain.
+Automatic position polling stops after the first failed read, and physical motion
+stays locked. This protects against a repeated-error loop and against using an
+untrusted position. Check the serial cable, controller power, grounding/EMI, and
+VISA serial settings before another physical session; a successful connection
+alone does not prove the link will remain reliable.
+
+Newport command error `M` means the controller rejected a command while its
+internal state was MOVING. A failed inspection connection releases its port and
+permits a fresh attempt; this code sends no move during Connect. `M` alone does
+not establish visible motion at the time the GUI displays the error. A byte such
+as `0xCA` in an ASCII `TP` position reply is invalid protocol data, so the GUI
+does not guess a position or silently retry a command on that stream.
+
+For an inspection-only session that never commanded motion, **Stop & disconnect**
+or window close releases the COM handle after a serial fault without sending a
+motor command. The message explicitly says the current standstill could not be
+reconfirmed. For a session with an enabled motion profile, failed STOP verification
+keeps the window open. After checking that the stage is physically stationary and
+holding, use **Release COM port after physical standstill check…** and type
+`STATIONARY`. This recovery closes only the COM handle; it sends no new command and
+does not claim software STOP succeeded. It appears only after communication loss
+and a failed disconnect attempt. If physical standstill/holding is uncertain,
+use the lab's independent stop procedure before releasing the connection.
+
 ## Required calibration and apparatus review
 
 The nominal 50 mm actuator stroke does not establish a safe mounted travel range,

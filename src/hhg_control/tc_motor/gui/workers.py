@@ -10,7 +10,7 @@ from typing import Callable
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from hhg_control.tc_motor.drivers.base import MotorLimits
+from hhg_control.tc_motor.drivers.base import MotorError, MotorLimits
 
 
 @dataclass(frozen=True)
@@ -31,6 +31,8 @@ class ConnectionState:
     motion_enabled: bool
     has_session: bool
     limits: MotorLimits | None
+    communication_uncertain: bool = False
+    polling_paused: bool = False
 
 
 def create_sequencer(settings: ConnectionSettings):
@@ -90,6 +92,7 @@ class MotorWorker(QThread):
         self._shutdown_on_disconnect = False
         self._busy = False
         self._stop_generation = 0
+        self._poll_faulted = False
 
     @property
     def is_busy(self) -> bool:
@@ -106,6 +109,8 @@ class MotorWorker(QThread):
         """Accept one explicit action; refuse queueing behind any active action."""
         with self._condition:
             if self._busy or self._pending is not None:
+                return False
+            if operation == "snapshot" and self._poll_faulted:
                 return False
             if operation in {"move_to", "move_relative"} and self._cancel.is_set():
                 return False
@@ -133,14 +138,24 @@ class MotorWorker(QThread):
         self.busy_changed.emit(True)
 
     def request_disconnect(self, *, close_window: bool = False) -> None:
-        """Cancel motion and defer disconnect until the active operation yields."""
-        self.request_stop()
+        """Atomically latch cancellation and queue disconnect as the next action.
+
+        Publishing STOP before the disconnect flag creates a race where the
+        worker can dispatch a separate ST first, including in inspection mode.
+        """
         with self._condition:
+            self._stop_generation += 1
+            self._cancel.set()
+            if self._sequencer is not None:
+                self._sequencer.request_stop()
             self._pending = None
+            self._pending_stop = False
             self._pending_disconnect = True
             self._shutdown_on_disconnect = close_window
             self._busy = True
             self._condition.notify()
+        self.stop_latched.emit(True)
+        self.busy_changed.emit(True)
 
     def _publish_connection(self) -> None:
         """Copy sequencer state; this method executes exclusively in the worker."""
@@ -153,6 +168,8 @@ class MotorWorker(QThread):
             motion_enabled=bool(seq is not None and seq.motion_enabled),
             has_session=seq is not None,
             limits=seq.limits if seq is not None else None,
+            communication_uncertain=bool(seq is not None and seq.communication_uncertain),
+            polling_paused=self._poll_faulted,
         ))
 
     def _execute(self, operation: str, args: tuple) -> bool:
@@ -169,18 +186,34 @@ class MotorWorker(QThread):
                     seq.request_stop()
             self.info_ready.emit(seq.connect())
             self.status_ready.emit(seq.snapshot())
+            self._poll_faulted = False
             if args[0].mode == "Physical":
                 settings = getattr(seq, "inspection_settings", {})
                 if settings:
                     self.activity.emit("Inspected native controller settings: " + repr(settings))
         elif operation == "disconnect":
+            released_unverified = False
             if self._sequencer is not None:
-                self._sequencer.disconnect()
+                released_unverified = self._sequencer.disconnect()
                 self._sequencer = None
                 self._connection_settings = None
+            self._poll_faulted = False
             self._publish_connection()
-            self.cleanup_done.emit(True, "Stopped and disconnected.")
+            self.cleanup_done.emit(True, (
+                "Inspection port released after serial fault; current standstill was not reconfirmed."
+                if released_unverified else "Stopped and disconnected."
+            ))
             return self._shutdown_on_disconnect
+        elif operation == "release_after_manual_verification":
+            if self._sequencer is None:
+                raise MotorError("No motor session is open for manual release.")
+            self._sequencer.release_after_manual_verification()
+            self._sequencer = None
+            self._connection_settings = None
+            self._poll_faulted = False
+            self._publish_connection()
+            self.cleanup_done.emit(True, "COM port released after your physical standstill confirmation; "
+                                   "software STOP remains unverified.")
         elif operation == "stop":
             if self._sequencer is not None and self._sequencer.is_connected:
                 self.status_ready.emit(self._sequencer.stop())
@@ -255,6 +288,11 @@ class MotorWorker(QThread):
                 should_exit = self._execute(operation, args)
             except Exception as exc:
                 message = f"{type(exc).__name__}: {exc}"
+                if operation == "snapshot":
+                    self._poll_faulted = True
+                if operation == "connect" and self._sequencer is not None and not self._sequencer.is_connected:
+                    self._sequencer = None
+                    self._connection_settings = None
                 self.error.emit(message)
                 if operation == "disconnect":
                     self._shutdown_on_disconnect = False

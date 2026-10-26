@@ -182,7 +182,47 @@ class SMC100Motor(BaseMotor):
         self._owned_motion = False
         self._preparing_move = False
         self._units_verified = False
+        self._last_status_moving = True
+        self._stop_attempted = False
         self.inspection_settings: dict[str, float] = {}
+
+    @property
+    def communication_uncertain(self) -> bool:
+        """Expose a latched serial framing/decoding failure without more I/O."""
+        return self._stream_uncertain
+
+    @property
+    def can_release_inspection_session(self) -> bool:
+        """Allow port release after a fault only if this session never owned motion.
+
+        Inspection-only connect first confirms a stationary controller. A later
+        serial failure cannot reconfirm standstill, but closing this read-only
+        session does not issue a motor command or change servo holding.
+        """
+        return (self._is_connected and self.profile is None and self._stream_uncertain
+                and not self._owned_motion and not self._last_status_moving)
+
+    def _release_port_unverified(self) -> None:
+        """Close only this VISA handle; do not claim a confirmed motor STOP."""
+        self._transport.close()
+        self._is_connected = False
+        self._motion_enabled = False
+        self._owned_motion = False
+        self._units_verified = False
+        self.info = None
+
+    def release_after_manual_verification(self) -> None:
+        """Release an uncertain port after an operator verifies standstill/holding.
+
+        This recovery sends no controller command. It is available only after
+        a communication fault and an attempted STOP; the operator must confirm
+        the physical state outside this driver.
+        """
+        with self._lock:
+            self.require_connected()
+            if not self._stream_uncertain or not self._stop_attempted:
+                raise MotorSafetyError("Manual release requires communication loss and an attempted STOP.")
+            self._release_port_unverified()
 
     def _fail(self, message: str, *, stream: bool = False) -> None:
         """Latch faults so clearing controller error registers cannot re-enable motion."""
@@ -227,7 +267,8 @@ class SMC100Motor(BaseMotor):
         """Read and preserve the clearing TE register; @ means no command error."""
         code = self._query("TE")
         if code != "@":
-            self._fail(f"Controller command error {code}")
+            meaning = " (command rejected while controller reported MOVING)" if code == "M" else ""
+            self._fail(f"Controller command error {code}{meaning}")
             raise MotorError(self._fault)
 
     def _read_settings(self) -> dict[str, float]:
@@ -268,6 +309,8 @@ class SMC100Motor(BaseMotor):
             self._fault = ""
             self._stream_uncertain = False
             self._units_verified = False
+            self._last_status_moving = True
+            self._stop_attempted = False
             self._transport = self._transport_factory()
             # Own the connection attempt until even a failed open is cleaned up.
             # A cleanup failure must remain visible to the GUI close guard.
@@ -317,8 +360,10 @@ class SMC100Motor(BaseMotor):
             state = body[4:].upper()
             known_states = {f"{code:02X}" for code in range(0x0A, 0x12)} | {"14", "3C", "3D", "3E"} | self.READY | self.MOVING
             if state not in known_states:
+                self._last_status_moving = True
                 self._fail(f"Unknown controller state {state}", stream=True)
                 raise MotorError(f"Unknown controller state {state}; standstill is unconfirmed.")
+            self._last_status_moving = state in self.MOVING
             if error:
                 self._fail(f"Positioner error 0x{error:04X}")
             if self._motion_enabled and state not in self.READY:
@@ -389,6 +434,7 @@ class SMC100Motor(BaseMotor):
             # even when called from a status check within that preparation.
             self._preparing_move = False
             try:
+                self._stop_attempted = True
                 self._transport.write(f"{self.axis}ST")
                 if self._stream_uncertain:
                     raise MotorError("STOP sent, but communication loss prevents verification.")
@@ -398,14 +444,23 @@ class SMC100Motor(BaseMotor):
                 raise MotorError(f"STOP could not be confirmed: {exc}") from exc
 
     def close(self) -> None:
-        """Confirm standstill before release; leave connection open on uncertain cleanup."""
+        """Confirm standstill, or release a faulted read-only inspection session."""
         with self._lock:
             if not self.is_connected:
+                return
+            if self.can_release_inspection_session:
+                self._release_port_unverified()
                 return
             if self._owned_motion or self._stream_uncertain:
                 self.stop()
             deadline = time.monotonic() + 3.0
-            status = self.get_status()
+            try:
+                status = self.get_status()
+            except Exception:
+                if self.can_release_inspection_session:
+                    self._release_port_unverified()
+                    return
+                raise
             if status.is_moving:
                 self.stop()
             while status.is_moving:

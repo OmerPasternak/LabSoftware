@@ -95,6 +95,46 @@ def test_connect_is_inspection_only_and_does_not_guess_mm():
     assert io.closed
 
 
+def test_inspection_only_serial_corruption_releases_port_without_motor_command():
+    driver, io = make_driver(reviewed=False)
+    seq = MotorSequencer(driver)
+    seq.connect()
+    io.responses["TP"] = UnicodeDecodeError("ascii", b"\xca", 0, 1, "invalid byte")
+    with pytest.raises(MotorError, match="SMC100 query TP failed"):
+        seq.snapshot()
+    assert driver.communication_uncertain
+    assert seq.disconnect() is True
+    assert io.closed and not driver.is_connected
+    assert not any(command.startswith(("1ST", "1PA")) for command in io.commands)
+
+
+def test_motion_capable_serial_corruption_requires_external_verification_to_release():
+    driver, io = make_driver(reviewed=True)
+    seq = MotorSequencer(driver)
+    seq.connect()
+    io.responses["TP"] = UnicodeDecodeError("ascii", b"\xca", 0, 1, "invalid byte")
+    with pytest.raises(MotorError, match="SMC100 query TP failed"):
+        seq.snapshot()
+    with pytest.raises(MotorError, match="STOP could not be confirmed"):
+        seq.disconnect()
+    assert driver.is_connected and not io.closed
+    assert "1ST" in io.commands
+    commands_before_release = list(io.commands)
+    seq.release_after_manual_verification()
+    assert io.closed and not driver.is_connected
+    assert io.commands == commands_before_release  # Recovery closes the port; it sends no command.
+
+
+def test_manual_release_requires_fault_and_attempted_stop():
+    driver, io = make_driver(reviewed=True)
+    seq = MotorSequencer(driver)
+    seq.connect()
+    with pytest.raises(MotorSafetyError, match="communication loss and an attempted STOP"):
+        seq.release_after_manual_verification()
+    assert driver.is_connected and not io.closed
+    seq.disconnect()
+
+
 def test_reviewed_move_uses_documented_protocol_and_preserves_configuration():
     driver, io = make_driver()
     driver.connect()

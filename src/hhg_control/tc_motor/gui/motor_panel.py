@@ -7,7 +7,7 @@ from PyQt6.QtCore import QTimer
 from PyQt6.QtGui import QCloseEvent, QFont
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
+    QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
     QSpinBox, QVBoxLayout, QWidget,
 )
 
@@ -99,6 +99,10 @@ class MotorPanel(QWidget):
         connection_buttons.addWidget(self.connect_button)
         connection_buttons.addWidget(self.disconnect_button)
         form.addRow(connection_buttons)
+        self.recovery_button = QPushButton("Release COM port after physical standstill check…")
+        self.recovery_button.clicked.connect(self._release_after_manual_verification)
+        self.recovery_button.setVisible(False)
+        form.addRow(self.recovery_button)
         self.report_button = QPushButton("Save setup report…")
         self.report_button.clicked.connect(self._save_setup_report)
         form.addRow(self.report_button)
@@ -214,9 +218,27 @@ class MotorPanel(QWidget):
         """Stop and disconnect asynchronously, preserving cleanup uncertainty."""
         self.worker.request_disconnect()
 
+    def _release_after_manual_verification(self) -> None:
+        """Require a deliberate physical confirmation before releasing a failed port."""
+        if not (self._connection.connected and self._connection.communication_uncertain
+                and self._cleanup_uncertain and not self._busy):
+            return
+        answer, accepted = QInputDialog.getText(
+            self,
+            "Manual motor recovery",
+            "Software cannot verify STOP through this serial connection.\n"
+            "Check the stage directly and confirm it is stationary and holding.\n"
+            "Type STATIONARY to release the COM port without another motor command:",
+        )
+        if accepted and answer == "STATIONARY":
+            if not self.worker.submit("release_after_manual_verification"):
+                self._show_error("Motor is busy; manual release was not started.")
+
     def _poll(self) -> None:
         """Request bounded idle polling; never accumulate snapshots or moves."""
-        if self._connection.connected and not self._busy and not self._closing:
+        if (self._connection.connected and not self._connection.polling_paused
+                and not self._connection.communication_uncertain
+                and not self._busy and not self._closing):
             self.worker.submit("snapshot")
 
     def _show_status(self, status) -> None:
@@ -247,7 +269,20 @@ class MotorPanel(QWidget):
 
     def _show_connection(self, state) -> None:
         """Apply cached connection/limit state without querying a driver in the GUI."""
+        was_faulted = self._connection.polling_paused or self._connection.communication_uncertain
         self._connection = state
+        if state.polling_paused or state.communication_uncertain:
+            self.poll_timer.stop()
+            self.activity_label.setText(
+                "Automatic reads paused after a status error. Check the log before disconnecting."
+            )
+            self.position_label.setText("Position unknown — status read failed")
+            self.state_label.setText("Controller state unverified")
+            if state.communication_uncertain:
+                self.banner.setText("PHYSICAL — SERIAL FAULT. Motion is locked; use Disconnect or the "
+                                    "physical standstill recovery control.")
+        elif state.connected and not self._closing and not self.poll_timer.isActive():
+            self.poll_timer.start()
         if state.limits is not None:
             lim = state.limits
             self.limits_label.setText(
@@ -261,6 +296,8 @@ class MotorPanel(QWidget):
             self._units_verified = False
             self.identity_label.setText("Disconnected")
             self.state_label.setText("No session")
+            if was_faulted:
+                self._mode_changed()
         self._refresh_controls()
 
     def _show_busy(self, busy) -> None:
@@ -301,9 +338,14 @@ class MotorPanel(QWidget):
             widget.setEnabled(editable and (widget is self.mode_combo or physical))
         self.connect_button.setEnabled(editable)
         self.disconnect_button.setEnabled(state.has_session and not self._closing)
-        self.report_button.setEnabled(state.connected and not self._busy and not self._closing)
+        self.report_button.setEnabled(state.connected and not state.communication_uncertain
+                                      and not self._busy and not self._closing)
+        self.recovery_button.setVisible(state.connected and state.communication_uncertain
+                                        and self._cleanup_uncertain)
+        self.recovery_button.setEnabled(not self._busy and not self._closing)
         ready = self._status is not None and self._status.is_ready
         permitted = (state.connected and state.motion_enabled and self._units_verified
+                     and not state.polling_paused and not state.communication_uncertain
                      and not self._stop_latched and not self._closing and not self._cleanup_uncertain)
         # Periodic readback must not steal keyboard focus from numeric editors.
         for widget in (self.target_spin, self.step_spin, self.timeout_spin, self.settle_spin):
@@ -321,7 +363,8 @@ class MotorPanel(QWidget):
         self._cleanup_uncertain = not success
         if not success:
             self._closing = False
-            self.poll_timer.start()
+            if not self._connection.polling_paused and not self._connection.communication_uncertain:
+                self.poll_timer.start()
         self._refresh_controls()
 
     def _worker_finished(self) -> None:
@@ -336,6 +379,11 @@ class MotorPanel(QWidget):
             event.accept()
             return
         event.ignore()
+        if self._cleanup_uncertain and self._connection.communication_uncertain:
+            self.activity_label.setText(
+                "STOP could not be verified. Check the stage physically, then use the COM release control."
+            )
+            return
         if not self._closing:
             self._closing = True
             self.poll_timer.stop()
