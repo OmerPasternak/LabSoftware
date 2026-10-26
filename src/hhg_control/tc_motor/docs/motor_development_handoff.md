@@ -31,6 +31,18 @@ readbacks, but its `0xCA` serial fault has not been diagnosed.
 
 ## Lab serial-fault recovery — 2026-10-26
 
+At 13:33:17 a later inspection-only Physical connection again read the same
+`SMC_CC` version 3.1.2, `LTA-HS`, address 1, and native settings
+`SU=3.53932e-05`, `VA=5`, `AC=20`, `SL=0`, `SR=50`, `BA=0`, `BH=0`.
+At 13:33:19 its `TS` status query received an invalid non-ASCII byte `0xB1`
+at the start of the response. At 13:33:24 the GUI released the inspection
+port and reported that standstill was not reconfirmed. There was no repeated
+error loop. This second failure on a different query (`TS` versus earlier
+`TP`) strengthens evidence of an intermittent response-path problem, but does
+not identify whether the cable, serial adapter, controller, VISA backend, or
+software read synchronization caused it. Do not enable physical motion until
+the response path is stable and the cause is investigated.
+
 The user ran inspection-only Physical mode on the lab PC at COM21, address 1.
 The lab log reported `SMC_CC - Controller-driver version 3.1.2`, stage reference
 `LTA-HS`, and native settings `SU=3.53932e-05`, `VA=5`, `AC=20`, `SL=0`,
