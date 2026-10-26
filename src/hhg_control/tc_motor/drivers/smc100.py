@@ -147,6 +147,7 @@ class VisaSerialTransport:
             self._session.flush(constants.BufferOperation.discard_read_buffer)
             self.session_details = {
                 "resource": self.resource,
+                "driver_file": str(Path(__file__).resolve()),
                 "pyvisa_version": getattr(pyvisa, "__version__", "unknown"),
                 "visa_library": str(getattr(self._manager, "visalib", "unknown")),
                 "receive_method": "available-byte-count / strict ASCII CRLF",
@@ -195,8 +196,16 @@ class VisaSerialTransport:
                 if count > self.MAX_REPLY_BYTES - len(received):
                     raise MotorError(f"Reply exceeds {self.MAX_REPLY_BYTES} bytes.")
                 self._session.timeout = max(1, int(remaining * 1000))
-                chunk = self._session.read_bytes(count, break_on_termchar=False)
+                # read_bytes() contains its own loop, with a new I/O timeout for
+                # each partial read. One low-level call keeps this deadline real
+                # even if a backend reports available bytes but returns short.
+                # VI_SUCCESS_MAX_CNT (0x3FFF0006) is expected when a counted
+                # read fills its request; suppress only that warning, per session.
+                with self._session.ignore_warning(0x3FFF0006):
+                    chunk, _ = self._session.visalib.read(self._session.session, count)
                 received.extend(chunk)
+                if time.monotonic() > deadline:
+                    raise TimeoutError(f"Reply arrived after the {self.timeout_ms} ms deadline.")
                 if len(chunk) != count:
                     raise MotorError("VISA returned an incomplete counted read.")
                 if any(byte > 127 or (byte < 32 and byte not in (10, 13)) for byte in chunk):

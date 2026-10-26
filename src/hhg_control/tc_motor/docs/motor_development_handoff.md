@@ -36,12 +36,21 @@ TS clears controller status errors; all replies are retained. The checker closes
 only the port and does not verify standstill. All implementation validation here
 uses fake byte-level VISA peers; no hardware was accessed by the agent.
 
-Validation of this correction: **166 motor tests passed** in the working Python
-3.12 environment; **466 full offline tests passed** in a clean tracked-file
-export at `C:\Temp\tcm26buffered`, using the isolated test-only Python 3.12.10
+Validation of the final correction: **167 motor tests passed** in the working
+Python 3.12 environment; **467 full offline tests passed** in a clean tracked-file
+export at `C:\Temp\tcm26singlefinal`, using the isolated test-only Python 3.12.10
 environment with neither PyVISA nor PCO installed. The clean wheel contains the
 new module/VBS. Local Python 3.10 and 3.11 are unavailable; their CI matrix results
 must be checked for the pushed revision. No physical validation is claimed.
+
+The final implementation uses one low-level VISA read per available count,
+avoiding the nested partial-read loop in PyVISA's `read_bytes` helper. A short
+read or late return fails once. Only the normal full-count warning is suppressed
+for this session. A separate offline smoke check used actual PyVISA 1.16.2
+resource descriptors with a fake backend to verify serial attribute types,
+CRLF output, counted read, warning scope, and close. The report records the loaded
+driver file; VBS and documented PowerShell commands select this checkout's source
+explicitly rather than an older installed wheel.
 
 ## Setup report reviewed — 2026-10-26
 

@@ -1,5 +1,6 @@
 """Exercise real transport logic with byte-level VISA peers, never hardware."""
 
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -42,6 +43,18 @@ class BufferedVisa:
         self.pending = []
         self.buffer = bytearray()
         self.write_times = []
+        self.session = 1
+        self.visalib = SimpleNamespace(read=self.read_available)
+        self.count_warning_ignored = False
+
+    @contextmanager
+    def ignore_warning(self, status):
+        assert status == 0x3FFF0006  # Only the expected full-count status.
+        self.count_warning_ignored = True
+        try:
+            yield
+        finally:
+            self.count_warning_ignored = False
 
     def write(self, command):
         assert not self.pending and not self.buffer
@@ -58,15 +71,16 @@ class BufferedVisa:
             self.buffer.extend(chunk)
         return len(self.buffer)
 
-    def read_bytes(self, count, *, break_on_termchar):
-        assert not break_on_termchar
+    def read_available(self, session, count):
+        assert session == self.session
+        assert self.count_warning_ignored
         assert self.clock.now > self.write_times[-1]
         assert 0 < count <= len(self.buffer)
         assert 1 <= self.timeout <= 300
         self.read_counts.append(count)
         result = bytes(self.buffer[:count])
         del self.buffer[:count]
-        return result
+        return result, 0x3FFF0006
 
     def close(self):
         self.closed = True
@@ -147,9 +161,24 @@ def test_oversize_input_is_bounded(serial_peer):
 
 def test_counted_read_cannot_return_less_than_announced(serial_peer):
     transport, session, _ = serial_peer([b"1TP2\r\n"])
-    session.read_bytes = lambda *a, **kw: b"1TP"
+    session.visalib.read = lambda *a: (b"1TP", 0)
     with pytest.raises(MotorError, match="incomplete counted read"):
         transport.query("1TP")
+
+
+def test_late_backend_return_is_not_accepted_as_a_current_reply(serial_peer):
+    transport, session, clock = serial_peer([b"1TP2\r\n"])
+    read = session.visalib.read
+
+    def late_read(*args):
+        result = read(*args)
+        clock.now += 0.4
+        return result
+
+    session.visalib.read = late_read
+    with pytest.raises(MotorError, match="arrived after"):
+        transport.query("1TP")
+    assert session.writes == ["1TP"] and session.timeout == 300
 
 
 def test_real_transport_with_driver_survives_repeated_fragmented_snapshots(serial_peer):

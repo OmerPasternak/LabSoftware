@@ -61,6 +61,7 @@ The BAT launcher remains available for compatibility and visible troubleshooting
 You can also run:
 
 ```powershell
+$env:PYTHONPATH = (Resolve-Path .\src).Path
 .\.venv\Scripts\python.exe -m hhg_control.tc_motor.gui
 ```
 
@@ -175,6 +176,7 @@ each reply, raw receive bytes, durations and cleanup outcome. An alternative to
 the VBS launcher, from the checkout root, is:
 
 ```powershell
+$env:PYTHONPATH = (Resolve-Path .\src).Path
 .\.venv\Scripts\python.exe -m hhg_control.tc_motor.check_serial_link --physical --port 21
 ```
 
