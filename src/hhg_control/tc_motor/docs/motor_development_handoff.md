@@ -5,6 +5,30 @@ Feature branch: `codex/smc100-motor-control`; original base: `5188b6a`.
 At the original 2026-10-20 checkpoint, no hardware had been contacted or pushed.
 Later branch pushes and the lab-PC inspection are recorded below.
 
+## Setup report reviewed — 2026-10-26
+
+The supplied `TC_motor_setup_report.json` was exported at
+`2026-10-26T10:20:51.228002+00:00`. It explicitly says `simulation: true`,
+`mode: Mock`, `MOCK SMC100CC (project emulator)`, and `MOCK LTA-HS`.
+Its COM21 request and axis 1 are saved UI inputs; this report did not open or
+identify the physical serial device. It contains no native controller settings.
+
+The report confirms the mock's READY state at synthetic position 0 mm and its
+test envelope: 0–10 mm, 1 mm/s maximum velocity, 2 mm/s² maximum acceleration,
+and 2 mm maximum move. These values are **mock specifications only**. Do not
+transfer them, `units_verified: true`, `motion_profile_enabled: true`, or
+`move_permitted_now: true` into a physical safety profile. The physical profile
+template remains intentionally unfilled and motion-locked.
+
+Still open for physical operation: an actual Physical-mode setup report after
+stable serial readback; controller label and installed actuator/serial pairing;
+stage-specific encoder calibration, mm scale and direction; physical reference
+and current position; mounted safe interval and stop clearance; reviewed velocity,
+acceleration and per-move limit; and supervised motion, STOP/holding, and
+disconnect acceptance. Homing parameters/procedure are also unreviewed and
+homing remains unavailable. The separate earlier lab log below provides native
+readbacks, but its `0xCA` serial fault has not been diagnosed.
+
 ## Lab serial-fault recovery — 2026-10-26
 
 The user ran inspection-only Physical mode on the lab PC at COM21, address 1.

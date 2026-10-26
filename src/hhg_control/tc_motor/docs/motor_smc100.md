@@ -36,6 +36,11 @@ not a safety profile and does not supply calibration or mounted-clearance approv
 The active safety profile cannot be overwritten using the report button.
 
 You can test the export in Mock mode first; that report is explicitly synthetic.
+The Mock export dated 2026-10-26 reports `simulation: true`, mock READY at 0 mm,
+and an empty `native_settings` object. Its COM21/axis-1 fields are requested GUI
+inputs, not a physical connection check. Its `units_verified`, motion permission,
+and 0–10 mm/1 mm/s/2 mm/s²/2 mm limits apply only to the emulator. The physical
+safety profile remains blank; see the handoff for the outstanding checks.
 Give the physical report to the next agent along with the calibration report and
 the reviewed mounted travel/clearance. Those facts are needed to finish the
 existing safety-profile template. Do not copy mock limits into a physical profile.
