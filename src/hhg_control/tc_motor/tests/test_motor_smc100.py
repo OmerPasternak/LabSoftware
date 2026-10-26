@@ -261,6 +261,7 @@ def test_transport_configures_host_only_and_closes_resources(monkeypatch):
                               close=lambda: calls.append("close manager"))
     constants = SimpleNamespace(Parity=SimpleNamespace(none=0), StopBits=SimpleNamespace(one=10),
                                 ControlFlow=SimpleNamespace(xon_xoff=1),
+                                SerialTermination=SimpleNamespace(none=0),
                                 AccessModes=SimpleNamespace(exclusive_lock=1),
                                 BufferOperation=SimpleNamespace(discard_read_buffer=1))
     monkeypatch.setitem(sys.modules, "pyvisa", SimpleNamespace(
@@ -269,7 +270,10 @@ def test_transport_configures_host_only_and_closes_resources(monkeypatch):
     transport.open()
     assert session.baud_rate == 57600 and session.timeout == 300
     assert session.data_bits == 8 and session.flow_control == 1
-    assert session.read_termination == session.write_termination == "\r\n"
+    assert session.read_termination is None and session.write_termination == "\r\n"
+    assert session.end_input == session.end_output == 0
+    assert session.xon_char == "\x11" and session.xoff_char == "\x13"
+    assert session.discard_null is False
     assert calls == [("flush", 1)]
     transport.close()
     assert calls[-1] == "close port"

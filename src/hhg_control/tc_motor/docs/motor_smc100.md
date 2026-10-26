@@ -8,6 +8,17 @@ location; it does not depend on the directory from which it was double-clicked.
 
 ## First setup on the lab PC
 
+If replacing LabVIEW currently produces a serial decoding error, first close
+LabVIEW and TC motor, then double-click `check_serial_link.vbs` beside the motor
+launcher and enter **21**. It uses address 1 and the GUI's corrected transport
+for a bounded 30-second query-only check. The console stays visible and names
+the JSON file saved under `tc_motor/reports/`, including when communication fails.
+Send that report for diagnosis. No move, STOP, home, enable, reset, zero or
+configuration write is sent; this tool closes only its own COM handle. It cannot
+stop externally initiated motion or confirm holding. A passing result establishes
+only communication during the check, not calibration or motion safety. `TS`
+queries clear the controller's status error register; replies are saved verbatim.
+
 1. **Identity:** confirm the controller label, actuator, and address. The app also
    reads the firmware version and stage reference.
 2. **Millimetres:** obtain this actuator's calibration/control report. Compare its
@@ -146,6 +157,29 @@ stays locked. This protects against a repeated-error loop and against using an
 untrusted position. Check the serial cable, controller power, grounding/EMI, and
 VISA serial settings before another physical session; a successful connection
 alone does not prove the link will remain reliable.
+
+The receive path now follows the supplied LabVIEW `read_write.vi`: wait in
+10 ms intervals for available serial bytes, read exactly that count, assemble
+one complete CRLF frame, then validate ASCII and the expected address/command.
+It replaces PyVISA's immediate large blocking text read. VISA serial input/output
+termination modes, XON/XOFF characters and NUL handling are explicit rather than
+inherited. A single total deadline (300 ms by default) and 256-byte reply limit
+bound partial/silent/malformed replies. STOP writes do not wait for this polling.
+Corrupt data is never converted to a guessed position, flushed and retried, or
+accepted by stripping high bits. Errors include received hex bytes and resource.
+This corrects differences in Python's receive implementation; whether they
+caused the lab's invalid bytes needs a physical run of the updated code.
+
+The connection checker saves VISA library/version, actual host serial attributes,
+each reply, raw receive bytes, durations and cleanup outcome. An alternative to
+the VBS launcher, from the checkout root, is:
+
+```powershell
+.\.venv\Scripts\python.exe -m hhg_control.tc_motor.check_serial_link --physical --port 21
+```
+
+The tool never scans other ports and aborts after the first failure without a
+retry. Generated reports stay under the motor folder and are ignored by Git.
 
 Newport command error `M` means the controller rejected a command while its
 internal state was MOVING. A failed inspection connection releases its port and

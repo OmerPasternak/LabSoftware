@@ -91,6 +91,14 @@ class VisaSerialTransport:
         self.timeout_ms = timeout_ms
         self._manager = None
         self._session = None
+        self.session_details: dict = {}
+        self.last_exchange: dict = {}
+
+    # The supplied LabVIEW read_write.vi waits 10 ms between checks of Bytes at
+    # Port and reads only the available count. Do the same instead of posting a
+    # large blocking VISA text read while the USB/RS-232 adapter is still filling.
+    POLL_INTERVAL_S = 0.01
+    MAX_REPLY_BYTES = 256
 
     def open(self) -> None:
         """Open and configure only the host serial port; discard stale input bytes."""
@@ -125,17 +133,96 @@ class VisaSerialTransport:
             self._session.parity = constants.Parity.none
             self._session.stop_bits = constants.StopBits.one
             self._session.flow_control = constants.ControlFlow.xon_xoff
-            self._session.read_termination = "\r\n"
+            self._session.xon_char = "\x11"
+            self._session.xoff_char = "\x13"
+            self._session.discard_null = False
+            # Counted raw reads own CRLF framing. Explicitly disable both VISA
+            # termination mechanisms so split CR/LF and stale serial attributes
+            # cannot silently truncate a counted read.
+            self._session.read_termination = None
+            self._session.end_input = constants.SerialTermination.none
+            self._session.end_output = constants.SerialTermination.none
             self._session.write_termination = "\r\n"
             self._session.encoding = "ascii"
             self._session.flush(constants.BufferOperation.discard_read_buffer)
+            self.session_details = {
+                "resource": self.resource,
+                "pyvisa_version": getattr(pyvisa, "__version__", "unknown"),
+                "visa_library": str(getattr(self._manager, "visalib", "unknown")),
+                "receive_method": "available-byte-count / strict ASCII CRLF",
+                "timeout_ms": self.timeout_ms,
+                "baud_rate": self._session.baud_rate,
+                "data_bits": self._session.data_bits,
+                "parity": int(self._session.parity),
+                "stop_bits": int(self._session.stop_bits),
+                "flow_control": int(self._session.flow_control),
+            }
         except Exception:
             self.close()
             raise
 
     def query(self, command: str) -> str:
-        """Perform one bounded request/response, with no automatic retry."""
-        return self._session.query(command)
+        """Read one ASCII CRLF frame by available count, within timeout_ms.
+
+        Match the legacy Bytes-at-Port receive pattern. Never issue a second
+        request, flush a bad reply, strip a high bit, or accept a partial frame.
+        The caller latches any failure until disconnect/reconnect. Replies are
+        bounded to 256 bytes; error messages retain the received hex bytes.
+        """
+        if self._session is None:
+            raise MotorError("Serial port is not open.")
+        received = bytearray()
+        timeout = self._session.timeout
+        started = time.monotonic()
+        deadline = started + self.timeout_ms / 1000
+        failure = None
+        try:
+            if self._session.bytes_in_buffer:
+                raise MotorError("Unexpected input before request; response stream is not synchronized.")
+            self.write(command)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"No complete CRLF reply within {self.timeout_ms} ms.")
+                # Sleeping also avoids a CPU spin when the device is silent.
+                time.sleep(min(self.POLL_INTERVAL_S, remaining))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"No complete CRLF reply within {self.timeout_ms} ms.")
+                count = self._session.bytes_in_buffer
+                if not count:
+                    continue
+                if count > self.MAX_REPLY_BYTES - len(received):
+                    raise MotorError(f"Reply exceeds {self.MAX_REPLY_BYTES} bytes.")
+                self._session.timeout = max(1, int(remaining * 1000))
+                chunk = self._session.read_bytes(count, break_on_termchar=False)
+                received.extend(chunk)
+                if len(chunk) != count:
+                    raise MotorError("VISA returned an incomplete counted read.")
+                if any(byte > 127 or (byte < 32 and byte not in (10, 13)) for byte in chunk):
+                    raise MotorError("Reply contains non-ASCII or unexpected control bytes.")
+                end = received.find(b"\r\n")
+                if end < 0:
+                    continue
+                if end != len(received) - 2 or b"\r" in received[:end] or b"\n" in received[:end]:
+                    raise MotorError("Unexpected extra frame or malformed CRLF reply.")
+                if self._session.bytes_in_buffer:
+                    raise MotorError("Unexpected trailing input after CRLF reply.")
+                return bytes(received[:-2]).decode("ascii")
+        except Exception as exc:
+            failure = str(exc)
+            raise MotorError(
+                f"Serial exchange {command!r} failed: {exc} "
+                f"[resource={self.resource}; RX hex={received.hex(' ') or '<none>'}]"
+            ) from exc
+        finally:
+            self.last_exchange = {
+                "command": command,
+                "rx_hex": received.hex(" "),
+                "elapsed_s": time.monotonic() - started,
+                "error": failure,
+            }
+            self._session.timeout = timeout
 
     def write(self, command: str) -> None:
         """Write one command with the configured CRLF terminator."""

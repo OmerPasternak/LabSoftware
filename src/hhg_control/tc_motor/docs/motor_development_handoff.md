@@ -5,6 +5,44 @@ Feature branch: `codex/smc100-motor-control`; original base: `5188b6a`.
 At the original 2026-10-20 checkpoint, no hardware had been contacted or pushed.
 Later branch pushes and the lab-PC inspection are recorded below.
 
+## Python serial receive correction — 2026-10-26
+
+The user reports the existing LabVIEW program works through the lab setup.
+Device Manager identifies COM21 as ATEN USB to Serial Bridge,
+`USB\\VID_0557&PID_2008&REV_0300`, ATEN driver `3.8.15.5`, displayed date
+`10/2/2017`. This does not establish that the driver is faulty. ATEN identifies
+VID 0557 / PID 2008 with its older UC232A family in its
+[hardware revision note](https://eservice.aten.com/eServiceCx/Common/FAQ/view.do?id=17892).
+Do not replace the adapter or update its driver based only on its age.
+
+Review found the supplied LabVIEW `read_write.vi` waits for Bytes at Port, reads
+only available bytes and waits 10 ms between receive checks. Python instead used
+immediate `session.query()` / a large blocking text read, relied on defaults for
+VISA serial end modes, and had no byte-level transport regression tests. The
+corrected `VisaSerialTransport.query` uses available counts, raw reads and strict
+CRLF/ASCII validation under a single deadline and 256-byte limit. Serial end
+modes, XON/XOFF characters and NUL handling are explicit; STOP remains an immediate
+write. Bad bytes still latch a fault and are included as hex in the error. No
+automatic retry or masking of corrupt bytes was added. This removes concrete
+implementation differences, but lab causality/resolution is not yet proven.
+
+`check_serial_link.vbs` asks for a COM number (default 21) and runs a 30-second
+query-only link check at address 1. Close LabVIEW and TC motor first. It opens only
+the chosen resource, never sends motion/configuration/STOP commands, and saves
+success or failure plus backend metadata and raw reply diagnostics to the motor
+folder's ignored `reports/` directory. Its transport is identical to the GUI's;
+its PASS is a communication observation, not a motion/calibration acceptance.
+TS clears controller status errors; all replies are retained. The checker closes
+only the port and does not verify standstill. All implementation validation here
+uses fake byte-level VISA peers; no hardware was accessed by the agent.
+
+Validation of this correction: **166 motor tests passed** in the working Python
+3.12 environment; **466 full offline tests passed** in a clean tracked-file
+export at `C:\Temp\tcm26buffered`, using the isolated test-only Python 3.12.10
+environment with neither PyVISA nor PCO installed. The clean wheel contains the
+new module/VBS. Local Python 3.10 and 3.11 are unavailable; their CI matrix results
+must be checked for the pushed revision. No physical validation is claimed.
+
 ## Setup report reviewed — 2026-10-26
 
 The supplied `TC_motor_setup_report.json` was exported at

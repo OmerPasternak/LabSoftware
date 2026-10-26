@@ -9,9 +9,16 @@ if not exist ".venv\Scripts\python.exe" (
 )
 set "PYTHONPATH=%CD%\src"
 if /I "%~1"=="setup" goto setup
+if /I "%~1"=="check-link" goto check_link
 ".venv\Scripts\python.exe" -m hhg_control.tc_motor.gui
 if errorlevel 1 pause
 exit /b
+
+:check_link
+".venv\Scripts\python.exe" -m hhg_control.tc_motor.check_serial_link --physical --port "%~2"
+set "check_result=%errorlevel%"
+pause
+exit /b %check_result%
 
 :setup
 echo Installing TC motor physical-mode Python dependencies into the project .venv...
