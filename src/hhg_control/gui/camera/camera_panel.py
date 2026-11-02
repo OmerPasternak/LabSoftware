@@ -2,7 +2,7 @@
 PyQt6 Graphical User Interface for pco.edge 5.5 sCMOS Camera Control and Scan Sequencer.
 Implements top-left Go/Stop controls, horizontal widescreen layout with side control panel,
 bright, directly editable color-scale limits beside the image,
-source-labelled frame timestamps, and hardware-constrained symmetrical ROI.
+source-labelled frame timestamps, and hardware-constrained ROI controls.
 """
 
 import sys
@@ -545,33 +545,33 @@ class CameraMainWindow(QMainWindow):
         self.spn_roi_x1.valueChanged.connect(self._on_roi_x1_changed)
         lay_cam.addWidget(self.spn_roi_x1, 2, 2, 1, 2)
 
-        lay_cam.addWidget(QLabel("Y (sym):"), 3, 0)
+        self.lbl_roi_y_axis = QLabel("Y:")
+        lay_cam.addWidget(self.lbl_roi_y_axis, 3, 0)
         self.spn_roi_y0 = QSpinBox()
         self.spn_roi_y0.setMinimumWidth(60)
         self.spn_roi_y0.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        # Accept either sensor-side edge here. An upper-half coordinate is
-        # normalized to the matching lower edge after editing.
         self.spn_roi_y0.setRange(0, 2160)
         self.spn_roi_y0.setValue(0)
         self.spn_roi_y0.setKeyboardTracking(False)
-        self.spn_roi_y0.setToolTip("ROI Y lower edge; entering an upper edge (e.g. 1116) sets its symmetric pair.")
+        self.spn_roi_y0.setToolTip("ROI Y start in sensor pixels.")
         self.spn_roi_y0.valueChanged.connect(self._on_roi_y0_changed)
         lay_cam.addWidget(self.spn_roi_y0, 3, 1)
 
         self.spn_roi_y1 = QSpinBox()
         self.spn_roi_y1.setMinimumWidth(60)
         self.spn_roi_y1.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        self.spn_roi_y1.setRange(1088, 2160)
+        self.spn_roi_y1.setRange(0, 2160)
         self.spn_roi_y1.setValue(2160)
         self.spn_roi_y1.setKeyboardTracking(False)
-        self.spn_roi_y1.setToolTip("ROI Y End — auto-set symmetrically")
+        self.spn_roi_y1.setToolTip("ROI Y end in sensor pixels (exclusive).")
         self.spn_roi_y1.valueChanged.connect(self._on_roi_y1_changed)
         lay_cam.addWidget(self.spn_roi_y1, 3, 2, 1, 2)
 
-        lbl_roi_hint = QLabel("Y edges mirror around 1080; enter either edge. X in 4-px steps.")
-        lbl_roi_hint.setWordWrap(True)
-        lbl_roi_hint.setStyleSheet("font-size: 9px; color: #6c757d; font-style: italic;")
-        lay_cam.addWidget(lbl_roi_hint, 4, 0, 1, 4)
+        self.lbl_roi_hint = QLabel()
+        self.lbl_roi_hint.setWordWrap(True)
+        self.lbl_roi_hint.setStyleSheet("font-size: 9px; color: #6c757d; font-style: italic;")
+        lay_cam.addWidget(self.lbl_roi_hint, 4, 0, 1, 4)
+        self._update_roi_constraint_ui()
 
         roi_btn_row = QHBoxLayout()
         roi_btn_row.setSpacing(4)
@@ -1024,6 +1024,7 @@ class CameraMainWindow(QMainWindow):
         self._hardware_state_unknown = False
         self.camera = camera
         self.scan_manager.camera = self.camera
+        self._update_roi_constraint_ui()
         self._connected_source = "simulated" if is_sim else "physical"
         self._configure_writer_memory()
         self._append_log(f"[CAMERA SETTINGS] Serial {camera.get_sensor_info().get('serial_number')}; exposure {camera._exposure_time_s} s; mode {camera._readout_mode.name}; trigger {camera._trigger_mode.value}.")
@@ -1140,6 +1141,7 @@ class CameraMainWindow(QMainWindow):
         self.chk_external_trigger.blockSignals(False)
         self.camera = MockPcoCamera()
         self.scan_manager.camera = self.camera
+        self._update_roi_constraint_ui()
         self.figure.clear()
         self.axis = self.figure.add_axes(IMAGE_AXIS_RECT)
         self.canvas.coordinate_axis = self.axis
@@ -1674,7 +1676,7 @@ class CameraMainWindow(QMainWindow):
             self._blit_frame()
 
     # =========================================================================
-    # Hardware ROI Symmetrical Constraints & Dynamic Redraw
+    # Hardware ROI Constraints & Dynamic Redraw
     # =========================================================================
     def _sync_roi_patch_from_spinboxes(self) -> None:
         """Redraw the persistent ROI rectangle patch directly from current spinbox values."""
@@ -1720,29 +1722,88 @@ class CameraMainWindow(QMainWindow):
             self._is_updating_roi = False
         self._sync_roi_patch_from_spinboxes()
 
-    def _on_roi_y0_changed(self) -> None:
-        """Map either typed Y edge to a centered ROI with at least 16 px height."""
-        if self._is_updating_roi:
-            return
+    def _roi_vertical_limits(self) -> tuple[int, int, int, bool]:
+        """Return sensor height, Y step, minimum height, and symmetry requirement."""
+        height = int(self.camera.get_sensor_info().get("height", 2160))
+        limits = self.camera.get_roi_limits()
+        step_y = max(1, int(limits["steps"][1]))
+        min_height = max(1, int(limits["minimum"][1]))
+        symmetric_y = bool(limits["symmetric"][1])
+        return height, step_y, min_height, symmetric_y
+
+    def _update_roi_constraint_ui(self) -> None:
+        """Show the connected camera's Y ROI capability without altering raw coordinates."""
+        height, step_y, min_height, symmetric_y = self._roi_vertical_limits()
         self._is_updating_roi = True
         try:
-            edge = self.spn_roi_y0.value()
-            lower = min(edge, 2160 - edge, 1072)
-            self.spn_roi_y0.setValue(lower)
-            self.spn_roi_y1.setValue(2160 - lower)
+            self.spn_roi_y0.setSingleStep(step_y)
+            self.spn_roi_y1.setSingleStep(step_y)
+            if symmetric_y:
+                half_minimum = (min_height + 1) // 2
+                # Accept a coordinate from either half, then map it to the
+                # hardware-required mirrored pair in the value-change handler.
+                self.spn_roi_y0.setRange(0, height)
+                self.spn_roi_y1.setRange(min(height, height // 2 + half_minimum), height)
+                y0 = min(self.spn_roi_y0.value(), max(0, height // 2 - half_minimum))
+                self.spn_roi_y0.setValue(y0)
+                self.spn_roi_y1.setValue(height - y0)
+                self.lbl_roi_y_axis.setText("Y (sym):")
+                self.lbl_roi_hint.setText(
+                    f"Y bounds must mirror around {height // 2}; X uses 4-pixel steps."
+                )
+            else:
+                self.spn_roi_y0.setRange(0, height)
+                self.spn_roi_y1.setRange(0, height)
+                self.lbl_roi_y_axis.setText("Y:")
+                self.lbl_roi_hint.setText(
+                    f"Y bounds can be positioned independently; minimum height {min_height} px. "
+                    "X uses 4-pixel steps."
+                )
+        finally:
+            self._is_updating_roi = False
+        self._sync_roi_patch_from_spinboxes()
+
+    def _on_roi_y0_changed(self) -> None:
+        """Keep Y bounds valid while preserving off-center placement when supported."""
+        if self._is_updating_roi:
+            return
+        height, _step_y, min_height, symmetric_y = self._roi_vertical_limits()
+        self._is_updating_roi = True
+        try:
+            y0, y1 = self.spn_roi_y0.value(), self.spn_roi_y1.value()
+            if symmetric_y:
+                half_minimum = (min_height + 1) // 2
+                lower = min(y0, height - y0, height // 2 - half_minimum)
+                y0 = max(0, lower)
+                y1 = height - y0
+            elif y1 - y0 < min_height:
+                y1 = min(height, y0 + min_height)
+                if y1 - y0 < min_height:
+                    y0 = max(0, y1 - min_height)
+            self.spn_roi_y0.setValue(y0)
+            self.spn_roi_y1.setValue(y1)
         finally:
             self._is_updating_roi = False
         self._sync_roi_patch_from_spinboxes()
 
     def _on_roi_y1_changed(self) -> None:
-        """Force symmetrical vertical constraint around y=1080 (Y0 = 2160 - Y1) and redraw ROI."""
+        """Keep the Y span valid without recentering an asymmetric ROI."""
         if self._is_updating_roi:
             return
+        height, _step_y, min_height, symmetric_y = self._roi_vertical_limits()
         self._is_updating_roi = True
         try:
-            val = self.spn_roi_y1.value()
-            val = max(1088, min(2160, val))
-            self.spn_roi_y0.setValue(2160 - val)
+            y0, y1 = self.spn_roi_y0.value(), self.spn_roi_y1.value()
+            if symmetric_y:
+                half_minimum = (min_height + 1) // 2
+                y1 = max(height // 2 + half_minimum, min(height, y1))
+                y0 = height - y1
+            elif y1 - y0 < min_height:
+                y0 = max(0, y1 - min_height)
+                if y1 - y0 < min_height:
+                    y1 = min(height, y0 + min_height)
+            self.spn_roi_y0.setValue(y0)
+            self.spn_roi_y1.setValue(y1)
         finally:
             self._is_updating_roi = False
         self._sync_roi_patch_from_spinboxes()
@@ -1753,8 +1814,24 @@ class CameraMainWindow(QMainWindow):
         else:
             self._on_canvas_button_release(None)
 
+    @staticmethod
+    def _snap_roi_span(start: float, end: float, sensor_size: int,
+                       step: int, minimum: int) -> tuple[int, int]:
+        """Round a drawn interval outward to hardware steps and minimum size."""
+        step = max(1, step)
+        minimum_span = ((minimum + step - 1) // step) * step
+        lower = max(0, int(np.floor(start / step)) * step)
+        upper = min(sensor_size, int(np.ceil(end / step)) * step)
+        if upper - lower < minimum_span:
+            upper = min(sensor_size, lower + minimum_span)
+            if upper - lower < minimum_span:
+                lower = max(0, upper - minimum_span)
+                lower = (lower // step) * step
+                upper = min(sensor_size, lower + minimum_span)
+        return lower, upper
+
     def _on_roi_drawn(self, start_x: float, start_y: float, end_x: float, end_y: float) -> None:
-        """Handle rectangle drawn on image: expand Y symmetrically around 1080 and snap X."""
+        """Snap a drawn rectangle to hardware steps while preserving its placement."""
         x_min, x_max = sorted([start_x, end_x])
         y_min, y_max = sorted([start_y, end_y])
 
@@ -1764,15 +1841,15 @@ class CameraMainWindow(QMainWindow):
         x0 = max(0, min(2496, x0))
         x1 = max(x0 + 64, min(2560, x1))
 
-        # Enforce pco.edge 5.5 vertical symmetry centered at 1080 (minimal bounding)
-        center_y = 1080
-        max_dist = max(abs(center_y - y_min), abs(y_max - center_y))
-        max_dist = max(8.0, max_dist)
-
-        y0 = int(round(center_y - max_dist))
-        y1 = int(round(center_y + max_dist))
-        y0 = max(0, min(1072, y0))
-        y1 = min(2160, max(1088, y1))
+        height, step_y, min_height, symmetric_y = self._roi_vertical_limits()
+        if symmetric_y:
+            center_y = height / 2
+            max_dist = max(abs(center_y - y_min), abs(y_max - center_y), min_height / 2)
+            y0 = int(np.floor((center_y - max_dist) / step_y) * step_y)
+            y0 = max(0, min(height // 2, y0))
+            y1 = height - y0
+        else:
+            y0, y1 = self._snap_roi_span(y_min, y_max, height, step_y, min_height)
 
         self._is_updating_roi = True
         try:
@@ -1783,11 +1860,11 @@ class CameraMainWindow(QMainWindow):
         finally:
             self._is_updating_roi = False
 
-        # Display the persistent minimal symmetric ROI outline
+        # Display the persistent outline at the exact selected sensor bounds.
         self._draw_roi_patch(x0, y0, x1, y1)
 
         self._append_log(
-            f"[ROI SELECTED] Minimal bounding symmetric ROI: X:[{x0}, {x1}], Y:[{y0}, {y1}] ({x1-x0}x{y1-y0} px).\n"
+            f"[ROI SELECTED] X:[{x0}, {x1}], Y:[{y0}, {y1}] ({x1-x0}x{y1-y0} px).\n"
             f"               Click 'Apply Hardware ROI' to apply to camera sensor."
         )
 
@@ -1835,8 +1912,15 @@ class CameraMainWindow(QMainWindow):
         x0 = max(0, min(2496, x0))
         x1 = max(x0 + 64, min(2560, x1))
 
-        y0 = self.spn_roi_y0.value()
-        y1 = 2160 - y0
+        height, step_y, min_height, symmetric_y = self._roi_vertical_limits()
+        if symmetric_y:
+            y0 = self.spn_roi_y0.value()
+            y1 = height - y0
+        else:
+            y0, y1 = self._snap_roi_span(
+                self.spn_roi_y0.value(), self.spn_roi_y1.value(), height,
+                step_y, min_height,
+            )
 
         self._is_updating_roi = True
         try:

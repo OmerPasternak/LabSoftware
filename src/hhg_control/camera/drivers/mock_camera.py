@@ -153,8 +153,8 @@ class MockPcoCamera(BaseCamera):
         }
 
     def get_roi_limits(self) -> Dict[str, Any]:
-        """Hardware ROI limits matching pco.edge 5.5: 4-pixel X steps, Y symmetric around 1080."""
-        return {"steps": (4, 1), "minimum": (64, 16), "symmetric": (False, True)}
+        """Return simulated pco.edge 5.5 ROI limits, including off-center Y placement."""
+        return {"steps": (4, 1), "minimum": (64, 16), "symmetric": (False, False)}
 
     def set_roi(self, roi: tuple[int, int, int, int]) -> None:
         """Simulate hardware sensor ROI in unbinned sensor pixels."""

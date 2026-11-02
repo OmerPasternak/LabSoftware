@@ -242,9 +242,9 @@ class PcoEdgeCamera(BaseCamera):
             return {
                 "steps": desc.get("roi steps", (4, 1)),
                 "minimum": (desc.get("min width", 64), desc.get("min height", 16)),
-                "symmetric": (desc.get("roi is horz symmetric", False), desc.get("roi is vert symmetric", True))
+                "symmetric": (desc.get("roi is horz symmetric", False), desc.get("roi is vert symmetric", False))
             }
-        return {"steps": (4, 1), "minimum": (64, 16), "symmetric": (False, True)}
+        return {"steps": (4, 1), "minimum": (64, 16), "symmetric": (False, False)}
 
     def get_roi(self) -> tuple[int, int, int, int]:
         """Translate SDK one-based inclusive ROI (x0, y0, x1, y1) to zero-based exclusive bounds."""

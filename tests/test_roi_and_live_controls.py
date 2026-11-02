@@ -1,5 +1,5 @@
 """
-Unit tests for hardware ROI validation, symmetrical constraints, camera timestamps,
+Unit tests for hardware ROI validation, camera timestamps,
 and scan manager integration for the pco.edge 5.5 camera.
 """
 
@@ -13,8 +13,8 @@ from hhg_control.drivers.mock_camera import MockPcoCamera
 from hhg_control.sequencer.scan_manager import CameraScanManager
 
 
-def test_base_camera_roi_symmetry_and_step_validation():
-    """Test that BaseCamera enforces pco.edge 5.5 vertical symmetry and 4-px step rules."""
+def test_base_camera_roi_hardware_limits_and_step_validation():
+    """Test that BaseCamera permits off-center Y bounds and enforces hardware steps."""
     cam = MockPcoCamera()
     cam.connect()
 
@@ -22,14 +22,12 @@ def test_base_camera_roi_symmetry_and_step_validation():
     cam.set_roi((0, 0, 2560, 2160))
     assert cam.get_roi() == (0, 0, 2560, 2160)
 
-    # Valid symmetric ROI centered at 1080: Y in [540, 1620] (540 + 1620 = 2160)
-    # X in [100, 1100] (both multiples of 4)
-    cam.set_roi((100, 540, 1100, 1620))
-    assert cam.get_roi() == (100, 540, 1100, 1620)
+    # Off-center ROI is supported: no sensor-center constraint on either axis.
+    cam.set_roi((100, 100, 500, 500))
+    assert cam.get_roi() == (100, 100, 500, 500)
 
-    # Invalid: Asymmetric vertical bounds (e.g. y0=100, y1=500 -> 100 + 500 = 600 != 2160)
-    with pytest.raises(ValueError, match="symmetric about sensor center"):
-        cam.set_roi((100, 100, 500, 500))
+    with pytest.raises(ValueError, match="smaller than minimum"):
+        cam.set_roi((100, 100, 500, 115))
 
     # Invalid: Horizontal bound not multiple of 4 (e.g. x0=101)
     with pytest.raises(ValueError, match="multiples of 4"):
@@ -47,7 +45,7 @@ def test_mock_camera_roi_cropping_and_timestamps():
     cam = MockPcoCamera()
     cam.connect()
 
-    # Apply centered ROI: 800 x 540 pixels (Y centered at 1080 -> [810, 1350])
+    # Apply an off-center ROI: 800 x 540 pixels.
     x0, y0, x1, y1 = 400, 810, 1200, 1350
     cam.set_roi((x0, y0, x1, y1))
 
@@ -78,7 +76,7 @@ def test_scan_manager_preview_and_step_saving_with_roi(tmp_path: Path):
     scan_mgr = CameraScanManager(camera=cam, storage_dir=tmp_path)
 
     # Apply hardware ROI
-    roi = (200, 580, 1000, 1580)  # 580 + 1580 = 2160 (symmetric), width=800, height=1000
+    roi = (200, 580, 1000, 1580)  # width=800, height=1000, deliberately off-center
     scan_mgr.set_roi(roi)
     assert scan_mgr.get_roi() == roi
 

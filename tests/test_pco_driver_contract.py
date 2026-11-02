@@ -110,6 +110,21 @@ def test_profiled_fake_sdk_through_production_writer(monkeypatch, tmp_path):
         camera.close()
 
 
+def test_pco_roi_defaults_allow_off_center_y_when_sdk_omits_symmetry_flag(monkeypatch):
+    """The known off-center ROI capability remains enabled if the SDK omits its flag."""
+    fake = FakePcoCamera("USB 3.0")
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface, serial: fake))
+    monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
+    camera = pco_edge.PcoEdgeCamera(serial="12345")
+    camera.connect()
+    try:
+        assert camera.get_roi_limits()["symmetric"] == (False, False)
+        camera.set_roi((100, 100, 500, 500))
+        assert camera.get_roi() == (100, 100, 500, 500)
+    finally:
+        camera.close()
+
+
 class FakeSdk:
     def __init__(self):
         self.setup = 1

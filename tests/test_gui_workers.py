@@ -40,7 +40,7 @@ def test_typing_defers_preview_without_blocking_camera_delivery(qtbot, monkeypat
         assert len(acknowledged) == 3
         qtbot.keyPress(window.spn_roi_y0.lineEdit(), Qt.Key.Key_Return)
         assert window.spn_roi_y0.value() == 1016
-        assert window.spn_roi_y1.value() == 1144
+        assert window.spn_roi_y1.value() == 2160
     finally:
         window._is_live_active = False
         window.active_live_task = None
@@ -69,6 +69,7 @@ def test_measurement_log_reports_complete_scan_duration(qtbot, tmp_path):
     window.scan_manager.camera = camera
     window.txt_storage_dir.setText(str(tmp_path))
     window.spn_roi_y0.setValue(1052)
+    window.spn_roi_y1.setValue(1108)
     window.spn_frames.setValue(1)
     window.spn_num_steps.setValue(2)
 
@@ -101,6 +102,7 @@ def test_one_point_scan_keeps_endpoints_equal_and_saves_one_mock_step(qtbot, tmp
     window.spn_roi_x0.setValue(800)
     window.spn_roi_x1.setValue(1056)
     window.spn_roi_y0.setValue(1052)
+    window.spn_roi_y1.setValue(1108)
     window.spn_frames.setValue(1)
     window.spn_start_val.setValue(1.25)
     window.spn_step_size.setValue(0.5)
@@ -477,8 +479,8 @@ def test_bright_scale_endpoints_are_directly_editable_and_axis_labels_fit(qtbot)
     assert window._image_artist.get_clim() == (0, 5000)
 
 
-def test_typing_upper_y_edge_in_start_field_keeps_centered_mock_roi(qtbot):
-    """A typed Y=1116 must resolve to valid centered sensor-pixel bounds."""
+def test_typing_y_start_keeps_off_center_mock_roi(qtbot):
+    """A typed Y start remains independent of the ROI's other edge."""
     window = CameraMainWindow()
     qtbot.addWidget(window)
     window.spn_roi_y0.lineEdit().selectAll()
@@ -488,8 +490,8 @@ def test_typing_upper_y_edge_in_start_field_keeps_centered_mock_roi(qtbot):
     assert window.spn_roi_y1.value() == 2160
     qtbot.keyPress(window.spn_roi_y0, Qt.Key.Key_Return)
 
-    assert (window.spn_roi_y0.value(), window.spn_roi_y1.value()) == (1044, 1116)
-    window.camera.validate_roi((0, 1044, 2560, 1116))
+    assert (window.spn_roi_y0.value(), window.spn_roi_y1.value()) == (1116, 2160)
+    window.camera.validate_roi((0, 1116, 2560, 2160))
 
 
 def test_x_end_edit_updates_start_only_after_complete_number(qtbot):
@@ -524,6 +526,26 @@ def test_mock_gui_live_start_stop_keeps_camera_idle(qtbot, tmp_path):
     window._on_stop_clicked()
     qtbot.waitUntil(lambda: window.active_live_task is None, timeout=3000)
     assert window.scan_manager.state == "IDLE"
+    window.close()
+
+
+def test_applying_roi_preserves_off_center_y_bounds(qtbot, monkeypatch):
+    """Applying an entered ROI does not recenter its Y bounds."""
+    window = CameraMainWindow()
+    qtbot.addWidget(window)
+    selected = []
+    monkeypatch.setattr(
+        window, "_request_roi_change",
+        lambda roi, *, full_sensor: selected.append((roi, full_sensor)),
+    )
+    window.spn_roi_x0.setValue(800)
+    window.spn_roi_x1.setValue(1056)
+    window.spn_roi_y0.setValue(800)
+    window.spn_roi_y1.setValue(1100)
+
+    window._apply_roi()
+
+    assert selected == [((800, 800, 1056, 1100), False)]
     window.close()
 
 
@@ -578,6 +600,8 @@ def test_draw_roi_keeps_image_visible_and_draws_outline(qtbot):
     assert window._image_artist is image
     assert window.spn_roi_x0.value() == 800
     assert window.spn_roi_x1.value() == 1200
+    assert window.spn_roi_y0.value() == 800
+    assert window.spn_roi_y1.value() == 1300
     edge_x, edge_y = window.axis.transData.transform((1000, window.spn_roi_y0.value()))
     pixels = np.asarray(window.canvas.buffer_rgba())
     row = pixels.shape[0] - int(edge_y)
