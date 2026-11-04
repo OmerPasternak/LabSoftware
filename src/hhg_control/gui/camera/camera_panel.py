@@ -17,7 +17,7 @@ from datetime import datetime
 import numpy as np
 
 from PyQt6 import sip
-from PyQt6.QtCore import Qt, QPointF, QEvent, QProcess
+from PyQt6.QtCore import Qt, QPointF, QEvent
 from PyQt6.QtGui import QColor, QPainter
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -34,10 +34,8 @@ import matplotlib.patches as mpatches
 
 from hhg_control.camera.drivers.base_camera import BaseCamera, ReadoutMode, TriggerMode
 from hhg_control.camera.drivers.camera_defaults import DEFAULT_CAMERA_SERIAL
-from hhg_control.camera.analysis.spectral import default_harmonic_map_path
 from hhg_control.camera.drivers.mock_camera import MockPcoCamera
 from hhg_control.camera.sequencer.scan_manager import CameraScanManager
-from hhg_control.project_paths import project_root
 from .workers import (
     CameraConnectTask,
     CameraDisconnectTask,
@@ -203,6 +201,7 @@ class CameraMainWindow(QMainWindow):
         self._current_executing_step: int = 0
         self._frame_count: int = 0
         self._closing: bool = False
+        self._fundamental_analysis_window = None
         self._after_live_stopped: Optional[Callable[[], None]] = None
         self._after_connect: Optional[Callable[[], None]] = None
         self._resume_live_after_mode: bool = False
@@ -217,7 +216,7 @@ class CameraMainWindow(QMainWindow):
         self._colorbar = None
         self._timestamp_artist = None
         self._plot_background = None
-        self._roi_patch = None           # persistent Rectangle patch drawn when ROI is applied or edited
+        self._roi_patch = None           # always None; only the in-progress drag is painted
         self._roi_drag_patch = None
         self._roi_drag_start: Optional[tuple[float, float]] = None
         self._roi_change_pending = False
@@ -232,7 +231,6 @@ class CameraMainWindow(QMainWindow):
         self._is_dragging_roi: bool = False
         self._preview_edit_until = 0.0
         self._numeric_editors = set()
-        self._analysis_processes: list[QProcess] = []
 
         self._build_ui()
         # Block competing edits without greying out the entire settings area.
@@ -694,30 +692,16 @@ class CameraMainWindow(QMainWindow):
         self.btn_open_folder = QPushButton("Open")
         self.btn_open_folder.clicked.connect(self._open_storage_folder)
 
-        self.btn_spectral_covariance = QPushButton("X Pearson")
-        self.btn_spectral_covariance.setToolTip(
-            "Show the Pearson correlation matrix (-1 to +1) between x pixels across saved frames."
-        )
-        self.btn_spectral_covariance.clicked.connect(self._launch_spectral_covariance)
-        self.btn_mark_harmonics = QPushButton("Mark Harmonics")
-        self.btn_mark_harmonics.setToolTip(
-            "Detect harmonic windows in saved data, review them, and replace the remembered map."
-        )
-        self.btn_mark_harmonics.clicked.connect(self._launch_harmonic_marker)
-        self.btn_harmonic_g2 = QPushButton("Harmonic g²")
-        self.btn_harmonic_g2.setToolTip(
-            "Use remembered windows and saved ON/OFF/BACKGROUND files for SI MCP-corrected g²."
-        )
-        self.btn_harmonic_g2.clicked.connect(self._launch_harmonic_g2)
+        self.btn_fundamental_analysis = QPushButton("Fundamental Analysis")
+        self.btn_fundamental_analysis.setToolTip("Open the dedicated data-analysis window.")
+        self.btn_fundamental_analysis.clicked.connect(self._open_fundamental_analysis)
 
         folder_buttons = QHBoxLayout()
         folder_buttons.setSpacing(4)
         folder_buttons.addWidget(self.btn_browse)
         folder_buttons.addWidget(self.btn_open_folder)
         folder_buttons.addStretch(1)
-        folder_buttons.addWidget(self.btn_spectral_covariance)
-        folder_buttons.addWidget(self.btn_mark_harmonics)
-        folder_buttons.addWidget(self.btn_harmonic_g2)
+        folder_buttons.addWidget(self.btn_fundamental_analysis)
         store_grid.addLayout(folder_buttons, 1, 0, 1, 2)
 
         store_grid.addWidget(QLabel("Header:"), 2, 0)
@@ -745,99 +729,18 @@ class CameraMainWindow(QMainWindow):
 
         self._update_progress_display()
 
-    def _launch_spectral_covariance(self) -> None:
-        """Launch offline Pearson correlation analysis for one completed scan step."""
-        filepath, _ = QFileDialog.getOpenFileName(
-            self,
-            "Choose one completed scan-step HDF5 file",
-            self.txt_storage_dir.text().strip(),
-            "HDF5 camera scans (*.h5 *.hdf5)",
-        )
-        if filepath:
-            self._launch_analysis_script("analyze_spectral_covariance.py", Path(filepath))
+    def _open_fundamental_analysis(self) -> None:
+        """Show the separate analysis window without coupling it to acquisition state."""
+        from hhg_control.gui.fundamental_analysis import FundamentalAnalysisWindow
 
-    def _launch_harmonic_marker(self) -> None:
-        """Open a completed HDF5 step's mean snapshot in the harmonic marker."""
-        filepath, _ = QFileDialog.getOpenFileName(
-            self,
-            "Choose a completed scan-step HDF5 file",
-            self.txt_storage_dir.text().strip(),
-            "HDF5 camera scans (*.h5 *.hdf5)",
-        )
-        if filepath:
-            self._launch_analysis_script("mark_harmonic_limits.py", Path(filepath))
-
-    def _launch_harmonic_g2(self) -> None:
-        """Analyze saved ON/OFF/background files using the persistent reference map."""
-        map_path = default_harmonic_map_path()
-        if not map_path.is_file():
-            QMessageBox.warning(self, "Harmonic Map Missing", "Run Mark Harmonics and confirm the windows first.")
-            return
-        selected = []
-        for name in ("BSV ON", "BSV OFF (coherent only)", "BACKGROUND (no XUV)"):
-            path, _ = QFileDialog.getOpenFileName(
-                self, f"Choose {name} saved HDF5 file", self.txt_storage_dir.text().strip(),
-                "HDF5 camera scans (*.h5 *.hdf5)",
+        if self._fundamental_analysis_window is None:
+            self._fundamental_analysis_window = FundamentalAnalysisWindow()
+            self._fundamental_analysis_window.destroyed.connect(
+                lambda: setattr(self, "_fundamental_analysis_window", None)
             )
-            if not path:
-                return
-            selected.append(path)
-        self._launch_analysis_script(
-            "analyze_harmonic_g2.py", Path(selected[0]),
-            extra_args=["--bsv-off", selected[1], "--background", selected[2]],
-        )
-
-    def _launch_analysis_script(
-        self, script_name: str, input_path: Path, extra_args: Optional[list[str]] = None
-    ) -> None:
-        """Run a GUI analysis script asynchronously, leaving the acquisition UI responsive."""
-        script_path = project_root() / "scripts" / script_name
-        if not script_path.is_file():
-            QMessageBox.warning(self, "Analysis Tool Missing", f"Could not find analysis script:\n{script_path}")
-            return
-
-        process = QProcess(self)
-        process.setProgram(sys.executable)
-        process.setArguments([str(script_path), str(input_path), *(extra_args or [])])
-        process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
-        process.readyReadStandardOutput.connect(
-            lambda proc=process: self._read_analysis_output(proc)
-        )
-        process.finished.connect(
-            lambda exit_code, _status, proc=process, name=script_name:
-                self._on_analysis_finished(proc, name, exit_code)
-        )
-        process.errorOccurred.connect(
-            lambda error, proc=process, name=script_name:
-                self._on_analysis_process_error(proc, name, error)
-        )
-        self._analysis_processes.append(process)
-        self._append_log(f"[ANALYSIS] Starting {script_name} for {input_path}.")
-        process.start()
-
-    def _read_analysis_output(self, process: QProcess) -> None:
-        """Forward child-process output into the existing activity log."""
-        output = bytes(process.readAllStandardOutput()).decode("utf-8", errors="replace").strip()
-        if output:
-            for line in output.splitlines():
-                self._append_log(f"[ANALYSIS] {line}")
-
-    def _on_analysis_finished(self, process: QProcess, script_name: str, exit_code: int) -> None:
-        """Record the completion status and release the process wrapper."""
-        self._read_analysis_output(process)
-        status = "completed" if exit_code == 0 else f"failed (exit code {exit_code})"
-        self._append_log(f"[ANALYSIS] {script_name} {status}.")
-        if process in self._analysis_processes:
-            self._analysis_processes.remove(process)
-        process.deleteLater()
-
-    def _on_analysis_process_error(self, process: QProcess, script_name: str, error) -> None:
-        """Report failed script startup or an unexpected child-process error."""
-        self._append_log(f"[ANALYSIS ERROR] {script_name}: {process.errorString()} ({error}).")
-        if error == QProcess.ProcessError.FailedToStart:
-            if process in self._analysis_processes:
-                self._analysis_processes.remove(process)
-            process.deleteLater()
+        self._fundamental_analysis_window.show()
+        self._fundamental_analysis_window.raise_()
+        self._fundamental_analysis_window.activateWindow()
 
     # =========================================================================
     # GO and STOP Controls (Top-Left Docked)
@@ -1552,8 +1455,6 @@ class CameraMainWindow(QMainWindow):
         self.canvas.restore_region(self._plot_background)
         if self._image_artist is not None:
             self.axis.draw_artist(self._image_artist)
-        if self._roi_patch is not None:
-            self.axis.draw_artist(self._roi_patch)
         if self._roi_drag_patch is not None:
             self.axis.draw_artist(self._roi_drag_patch)
         if self._timestamp_artist is not None:
@@ -1679,12 +1580,14 @@ class CameraMainWindow(QMainWindow):
     # Hardware ROI Constraints & Dynamic Redraw
     # =========================================================================
     def _sync_roi_patch_from_spinboxes(self) -> None:
-        """Redraw the persistent ROI rectangle patch directly from current spinbox values."""
-        x0 = self.spn_roi_x0.value()
-        x1 = self.spn_roi_x1.value()
-        y0 = self.spn_roi_y0.value()
-        y1 = self.spn_roi_y1.value()
-        self._draw_roi_patch(x0, y0, x1, y1)
+        """Clear the transient selection outline; ROI bounds remain in the controls."""
+        if self._roi_patch is None:
+            return
+        patch = self._roi_patch
+        self._roi_patch = None
+        if patch.axes is not None:
+            patch.remove()
+        self._blit_frame()
 
     def _on_roi_x0_changed(self) -> None:
         """Ensure minimum span of 64 px (push X End up if needed) and redraw ROI."""
@@ -1860,8 +1763,8 @@ class CameraMainWindow(QMainWindow):
         finally:
             self._is_updating_roi = False
 
-        # Display the persistent outline at the exact selected sensor bounds.
-        self._draw_roi_patch(x0, y0, x1, y1)
+        # Keep the selected coordinates in the controls; do not leave an outline.
+        self._sync_roi_patch_from_spinboxes()
 
         self._append_log(
             f"[ROI SELECTED] X:[{x0}, {x1}], Y:[{y0}, {y1}] ({x1-x0}x{y1-y0} px).\n"
@@ -1881,28 +1784,6 @@ class CameraMainWindow(QMainWindow):
         was_blocked = self.btn_draw_roi.blockSignals(True)
         self.btn_draw_roi.setChecked(False)
         self.btn_draw_roi.blockSignals(was_blocked)
-
-    def _draw_roi_patch(self, x0: int, y0: int, x1: int, y1: int) -> None:
-        """Stamp a persistent thin red outline rectangle onto the axis."""
-        width = x1 - x0
-        height = y1 - y0
-        if self._roi_patch is None:
-            self._roi_patch = mpatches.Rectangle(
-                (x0, y0), width, height,
-                linewidth=1.5, edgecolor="red", facecolor="none",
-                linestyle="-", zorder=5, fill=False
-            )
-            self._roi_patch.set_animated(True)
-            self.axis.add_patch(self._roi_patch)
-        else:
-            self._roi_patch.set_bounds(x0, y0, width, height)
-        if self._image_artist is None:
-            self.axis.set_xlim(0, 2560)
-            self.axis.set_ylim(2160, 0)
-            self.axis.set_aspect("auto")
-            self.canvas.draw_idle()
-        else:
-            self._blit_frame()
 
     def _apply_roi(self) -> None:
         """Queue a valid sensor-pixel ROI change after live acquisition stops."""
@@ -1991,7 +1872,7 @@ class CameraMainWindow(QMainWindow):
                 f"Y:[{y0}, {y1}] ({x1-x0}x{y1-y0} px)."
             )
             self._deactivate_draw_roi()
-            self._draw_roi_patch(x0, y0, x1, y1)
+            self._sync_roi_patch_from_spinboxes()
             self._clear_paused_scan("Hardware ROI modified")
 
     def _on_roi_task_error(self, error: str) -> None:

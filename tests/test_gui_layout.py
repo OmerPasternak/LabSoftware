@@ -51,7 +51,7 @@ def test_live_metrics_do_not_repaint_right_control_panel(qtbot):
 
 
 def test_roi_draw_mode_ends_after_one_completed_rectangle():
-    """A completed selection leaves its outline and unchecks Draw ROI."""
+    """A completed selection keeps its coordinates and removes the outline."""
     app = QApplication.instance() or QApplication([])
     window = CameraMainWindow()
     try:
@@ -65,12 +65,32 @@ def test_roi_draw_mode_ends_after_one_completed_rectangle():
             inaxes=window.axis, xdata=800, ydata=800, button=1))
         window._on_canvas_button_release(SimpleNamespace(xdata=1200, ydata=1300))
         assert not window.btn_draw_roi.isChecked()
-        assert window._roi_patch is not None
+        assert window._roi_patch is None
+        assert window._roi_drag_patch is None
+        assert (window.spn_roi_x0.value(), window.spn_roi_x1.value()) == (800, 1200)
+        assert (window.spn_roi_y0.value(), window.spn_roi_y1.value()) == (800, 1300)
         window._on_canvas_button_press(SimpleNamespace(
             inaxes=window.axis, xdata=900, ydata=900, button=1))
         assert window._roi_drag_patch is None
     finally:
         window.close()
+
+
+def test_acquisition_gui_opens_dedicated_analysis_window(qtbot):
+    """Analysis tools live in their own window, separate from acquisition controls."""
+    window = CameraMainWindow()
+    qtbot.addWidget(window)
+    assert not hasattr(window, "btn_spectral_covariance")
+    assert not hasattr(window, "btn_mark_harmonics")
+    assert not hasattr(window, "btn_harmonic_g2")
+
+    window.btn_fundamental_analysis.click()
+    analysis_window = window._fundamental_analysis_window
+    assert analysis_window is not None
+    assert analysis_window.isVisible()
+    assert analysis_window.windowTitle() == "Fundamental Data Analysis"
+    analysis_window.close()
+    window.close()
 
 
 def test_full_frame_and_color_scale_fit_when_window_resizes():
@@ -215,30 +235,6 @@ def test_gui_applies_mode_explicitly_selected_before_connection(monkeypatch):
     finally:
         camera.close()
         window.close()
-
-
-def test_gui_g2_uses_persistent_map_and_never_asks_for_map_file(qtbot, tmp_path, monkeypatch):
-    """Saved-data analysis has no camera dependency or manual map picker."""
-    from hhg_control.ui.camera import camera_panel
-    target = tmp_path / "harmonics.json"
-    target.write_text("{}")
-    monkeypatch.setenv("HHG_HARMONIC_MAP", str(target))
-    window = CameraMainWindow()
-    qtbot.addWidget(window)
-    choices = iter(["on.h5", "off.h5", "background.h5"])
-    titles = []
-    def choose(parent, title, *args):
-        titles.append(title)
-        return next(choices), ""
-    monkeypatch.setattr(camera_panel.QFileDialog, "getOpenFileName", choose)
-    calls = []
-    monkeypatch.setattr(window, "_launch_analysis_script", lambda *a, **k: calls.append((a, k)))
-    window._launch_harmonic_g2()
-    assert len(titles) == 3
-    assert all("saved harmonic map" not in title.lower() for title in titles)
-    assert calls[0][1]["extra_args"] == ["--bsv-off", "off.h5", "--background", "background.h5"]
-    assert isinstance(window.camera, MockPcoCamera)
-    window.close()
 
 
 def test_simulated_writer_memory_fits_8gb_and_physical_budget_is_preserved(qtbot, monkeypatch):

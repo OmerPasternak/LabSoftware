@@ -573,8 +573,8 @@ def test_roi_drag_pauses_live_frame_acknowledgements(qtbot):
     window._is_live_active = False
 
 
-def test_draw_roi_keeps_image_visible_and_draws_outline(qtbot):
-    """Entering draw mode and dragging must preserve the image and paint the ROI."""
+def test_draw_roi_keeps_image_visible_and_clears_outline_after_selection(qtbot):
+    """The outline is visible during dragging and disappears after selection."""
     window = CameraMainWindow()
     qtbot.addWidget(window)
     window._update_display(
@@ -594,20 +594,12 @@ def test_draw_roi_keeps_image_visible_and_draws_outline(qtbot):
     window._on_canvas_button_release(SimpleNamespace(xdata=1200, ydata=1300))
     assert not window.btn_draw_roi.isChecked()
     assert window._roi_drag_patch is None
-    assert window._roi_patch is not None
-    assert window._roi_patch.get_animated()
-    assert window._roi_patch.axes is window.axis
+    assert window._roi_patch is None
     assert window._image_artist is image
     assert window.spn_roi_x0.value() == 800
     assert window.spn_roi_x1.value() == 1200
     assert window.spn_roi_y0.value() == 800
     assert window.spn_roi_y1.value() == 1300
-    edge_x, edge_y = window.axis.transData.transform((1000, window.spn_roi_y0.value()))
-    pixels = np.asarray(window.canvas.buffer_rgba())
-    row = pixels.shape[0] - int(edge_y)
-    col = int(edge_x)
-    edge = pixels[row - 3:row + 4, col - 3:col + 4, :3]
-    assert np.any((edge[:, :, 0] > 150) & (edge[:, :, 1] < 100) & (edge[:, :, 2] < 100))
 
 
 def test_repeated_roi_and_full_sensor_during_live_stays_open(qtbot, tmp_path):
