@@ -24,7 +24,7 @@ def test_fundamental_analysis_window_has_separate_analysis_actions(qtbot):
     window.close()
 
 
-def test_x_pearson_button_chooses_a_saved_file_and_launches_script(qtbot, monkeypatch):
+def test_x_pearson_button_uses_authoritative_matlab_workflow(qtbot, monkeypatch):
     window = FundamentalAnalysisWindow()
     qtbot.addWidget(window)
     calls = []
@@ -33,11 +33,11 @@ def test_x_pearson_button_chooses_a_saved_file_and_launches_script(qtbot, monkey
         "getOpenFileName",
         lambda *args: ("capture.h5", "HDF5 camera scans (*.h5 *.hdf5)"),
     )
-    monkeypatch.setattr(window, "_launch_analysis_script", lambda *args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setattr(window, "_launch_matlab_companion", lambda *args, **kwargs: calls.append((args, kwargs)))
 
     window.btn_x_pearson.click()
 
-    assert calls == [(("analyze_spectral_covariance.py", Path("capture.h5")), {})]
+    assert calls == [((), {"input_path": Path("capture.h5"), "action": "pearson"})]
     window.close()
 
 

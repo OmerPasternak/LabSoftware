@@ -46,6 +46,16 @@ Command Prompt window. It uses this checkout's `.venv` and `src` directory and
 shows a setup message if `.venv` is missing. Keep `run_camera_gui.bat` for
 troubleshooting: it leaves a console open when startup fails.
 
+## HHG analysis
+
+Double-click `run_hhg_analysis.vbs` (or `.bat`) to open the independent analysis
+window. The camera GUI's **Fundamental Analysis** button opens the same window.
+The self-contained feature lives in [`src/HHG analysis`](src/HHG%20analysis/).
+It includes the selected original MATLAB scan analyzer, parameterized lab
+workflows, preserved source variants and independent launchers. See the
+[feature guide](src/HHG%20analysis/docs/feature_guide.md) and the durable
+[inactive-feature checklist](src/HHG%20analysis/INACTIVE_FEATURES.txt).
+
 ## TC motor
 
 Launch `src/hhg_control/tc_motor/run_TC_motor.bat` or `python -m hhg_control.tc_motor.gui` for the independent

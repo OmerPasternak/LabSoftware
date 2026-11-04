@@ -731,7 +731,7 @@ class CameraMainWindow(QMainWindow):
 
     def _open_fundamental_analysis(self) -> None:
         """Show the separate analysis window without coupling it to acquisition state."""
-        from hhg_control.gui.fundamental_analysis import FundamentalAnalysisWindow
+        from hhg_control.hhg_analysis import FundamentalAnalysisWindow
 
         if self._fundamental_analysis_window is None:
             self._fundamental_analysis_window = FundamentalAnalysisWindow()

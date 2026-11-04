@@ -24,6 +24,16 @@ src/hhg_control/
   project_paths.py         checkout-resource discovery, independent of cwd
 ```
 
+The independent offline analysis application is in **`src/HHG analysis/`**,
+as requested for the lab analysis integration. Its Python import name is
+`hhg_control.hhg_analysis`: a small source bridge and setuptools package mapping
+support the folder name containing a space without renaming it. It contains the
+Qt launcher, MATLAB implementation, source archive, launchers, feature guide and
+`INACTIVE_FEATURES.txt`. Existing `hhg_control.gui.fundamental_analysis` imports
+remain aliases. The camera button imports the new module; camera acquisition,
+drivers and sequencing remain in their established packages. The installed
+`hhg-analysis` entry point and `run_hhg_analysis.vbs/.bat` open it independently.
+
 No acquisition logic, numerical processing, hardware settings, data format or
 GUI appearance changes are part of this reorganization. The raw-data integrity
 policy still applies to every instrument.

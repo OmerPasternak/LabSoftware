@@ -30,12 +30,18 @@ test = [
 [project.scripts]
 hhg-camera = "hhg_control.gui.camera.camera_panel:main"
 hhg-tc-motor = "hhg_control.tc_motor.gui.motor_panel:main"
+hhg-analysis = "hhg_control.hhg_analysis.window:main"
+
+[tool.setuptools.package-dir]
+"hhg_control.hhg_analysis" = "src/HHG analysis"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["hhg_control*"]
 
 [tool.setuptools.package-data]
 "hhg_control.tc_motor" = ["docs/*.md", "docs/*.json", "run_TC_motor.bat", "*.vbs"]
+"hhg_control.hhg_analysis" = ["*.bat", "*.vbs", "*.txt", "docs/*.md", "matlab/*.m", "matlab/*.json", "matlab/active/*", "matlab/reference/*", "matlab/colourmaps/*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

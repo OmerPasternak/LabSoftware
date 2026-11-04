@@ -1,0 +1,79 @@
+HHG ANALYSIS - INACTIVE FEATURES AND RESTORATION NOTES
+Updated: 2026-11-04
+
+This file is the durable checklist for asking what is missing later.
+See docs/feature_guide.md for the full active-feature inventory and methods.
+Original supplied files are preserved byte-for-byte in matlab/reference/.
+
+INACTIVE BY USER DECISION (purpose or scientific convention is unknown)
+
+IA-001  Integrated ROI / pixel / harmonic Fourier aggregation
+        The absent ShowScanROIFFTGUI, ShowScanPxFFTGUI and ShowScanHHFFTGUI
+        do not establish whether to Fourier-transform the summed signal or
+        average the separate pixel magnitudes. These differ with phase.
+        User answered: "I don't know; leave the ambiguous Fourier
+        aggregation inactive."
+        Recreated individual-pixel Fourier views ARE active; they do not
+        compute or present an ambiguous integrated Fourier curve.
+        Restore after choosing aggregation, FFT normalization, DC treatment,
+        and frequency-axis convention, or obtaining the original helpers.
+
+IA-002  Original TC normalized / spatially averaged Fourier heatmap
+        TConlyAnalysisFromGUIdata.m calls missing fftPerCell, averages its
+        magnitude over space, then divides by the DC bin. The missing helper
+        leaves its transform length, positive-half selection and frequency
+        convention uncertain (the caller uses N-1 for its frequency grid).
+        This is covered by IA-001; no guessed replacement is shown.
+        Devon colors ARE bundled and available without crameri; its absence
+        is no longer a color-palette blocker.
+
+IA-003  "Convert to spectrum" button
+        pushbutton18_Callback is empty in the supplied GUIDE source.
+        User does not know its intended behavior. Button remains disabled.
+        Existing integrated spectrum, harmonic axis calibration and mask
+        export are separate active functions.
+
+IA-004  Secondary slider (slider2)
+        The supplied callback is empty and no controlled quantity is given.
+        User does not know its intended behavior. Slider remains disabled.
+        The frame/delay navigation slider IS active.
+
+IA-005  Exact historical helper-based FWHM calibration route
+        General wAxis_Calibration.m calls missing wAxis_fromLocs. Its exact
+        fit implementation is unavailable. This entry remains inactive.
+        The COMPLETE direct grating-fit variants, including FWHM-center
+        fitting, are consolidated into three separate calibration presets.
+        They do not claim equivalence to the missing helper.
+
+DEPENDENCY-LIMITED ON THIS COMPUTER (purpose known; implementation retained)
+
+DL-001  Automatic grating-calibration presets
+        Require MATLAB Signal Processing Toolbox findpeaks and Curve Fitting
+        Toolbox fit/fittype/fitoptions. The R2026b installation inspected on
+        2026-11-04 did not provide these functions. Controls report this.
+        Presets: smoothed maxima (rows 40:70), old unsmoothed maxima
+        (60:80), FWHM centers + direct fit (40:100).
+        Restore with those licensed toolboxes; do not substitute an untested
+        optimizer or use an unrelated calibration silently.
+        Importing a saved, verified xW vector works without those toolboxes.
+
+ARCHIVED DUPLICATES (not missing functionality)
+
+AD-001  ShowScanGUI_edited and App Designer migration variants
+        ShowScanGUI is the active reference selected by the user. Edited
+        GUIDE changes concern radio controls/slider steps, not new analysis.
+        App_1 has converted source but refers to absent radiobutton
+        properties; other migration files are placeholders or incomplete.
+        All originals, including calibration duplicates, remain archived;
+        matlab/source_manifest.json records sizes and SHA-256 checksums.
+
+VALIDATION STILL NEEDED
+
+VA-001  Real-data parity and lab acceptance
+        No representative measurements/backgrounds/masks were available.
+        Current schema-2.0 HDF5 is the primary supported input. Bounded raw
+        reads, metadata step grouping, vectorized reductions, source hashes,
+        mask and MAT exports are tested on synthetic current-format files.
+        Synthetic equation, orientation, HDF5, Fourier and GUI checks do not
+        establish scientific equivalence on the lab's real measurements.
+        No physical camera or motor was contacted.
