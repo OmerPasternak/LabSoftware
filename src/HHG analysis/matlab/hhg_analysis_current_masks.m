@@ -24,6 +24,10 @@ if strcmp(action,'pushbutton26'), result=[]; return; end
 exportPixels=ismember(action,{'pushbutton25','pushbutton27'});
 result=struct('orders',mask(:,1),'mask',mask,'mask_path',path,'traces',zeros(h.flength,size(mask,1)), ...
     'delay',h.delay,'axis_label',getappdata(fig,'hhg_delay_label'),'source',getappdata(fig,'hhg_hdf5_source'));
+result.processing=hhg_analysis_processing(fig);
+if strcmp(action,'pushbutton27')
+    hhg_analysis_validate_fft_axis(h.delay,h.flength);
+end
 pixels=cell(size(mask,1),1);
 if exportPixels
     assert(8*sum(rects(:,3).*rects(:,4))*h.flength<=256*1024^2,'HHG:Memory','Harmonic pixel export exceeds 256 MiB. Select smaller explicit masks.');
@@ -51,20 +55,25 @@ if strcmp(action,'pushbutton21')
     folder=uigetdir(fileparts(path),'Choose derived CSV output directory');
     if isequal(folder,0), return; end
     result.coordinate_multiplier=factor;
+    provenance=result.processing; provenance.mask=mask; provenance.mask_path=path;
+    provenance.coordinate_multiplier=factor; provenance.reduction='sum over each selected mask; source bottom-origin orientation';
     for j=1:size(mask,1)
-        hhg_analysis_write_csv(fullfile(folder,sprintf('H%s_trace.csv',num2str(mask(j,1)))),[h.delay(:)*factor result.traces(:,j)]);
+        hhg_analysis_write_csv(fullfile(folder,sprintf('H%s_trace.csv',num2str(mask(j,1)))),[h.delay(:)*factor result.traces(:,j)],provenance);
     end
-    hhg_analysis_write_csv(fullfile(folder,'harmonic_mean_yield.csv'),[mask(:,1) result.mean_yield(:)]);
+    hhg_analysis_write_csv(fullfile(folder,'harmonic_mean_yield.csv'),[mask(:,1) result.mean_yield(:)],provenance);
 end
 if exportPixels
     prefix=get(h.edit2,'String'); assert(isvarname(prefix),'HHG:Prefix','Use a valid MATLAB variable prefix.');
+    names=cell(size(mask,1),1); fourier=cell(size(mask,1),1);
     for j=1:size(mask,1)
-        name=matlab.lang.makeValidName([prefix '_H' num2str(mask(j,1)) 'data']);
-        assignin('base',name,pixels{j});
+        names{j}=matlab.lang.makeValidName([prefix '_H' num2str(mask(j,1)) 'data']);
         if strcmp(action,'pushbutton27')
-            hhg_analysis_pixel_fft(permute(pixels{j},[2 1 3]),h.delay,name,makePlots);
+            fourier{j}=hhg_analysis_pixel_fft(permute(pixels{j},[2 1 3]),h.delay,names{j},makePlots);
         end
     end
+    % Publish only after every read and FFT validation/computation succeeded.
+    for j=1:size(mask,1), assignin('base',names{j},pixels{j}); end
+    assignin('base',[prefix '_processing'],result.processing);
     assignin('base',[prefix '_piezoaxis'],h.delay); assignin('base',[prefix '_Hnumbase'],mask(:,1));
     assignin('base',[prefix '_filename'],h.filename); assignin('base','loadname',prefix);
 end

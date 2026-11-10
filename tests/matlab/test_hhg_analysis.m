@@ -88,6 +88,67 @@ maskResult=hhg_analysis_current_masks(fig,'pushbutton25',fullfile(out,'harmonics
 assert(isequal(maskResult.traces(:,1),reshape(sum(sum(roi,1),2),[],1)));
 hhg_analysis_export_mat(fig,fullfile(out,'raw_export.mat'));
 saved=load(fullfile(out,'raw_export.mat')); assert(saved.complete&&isequal(saved.data,original));
+% Diagonal-only requests do not allocate a quadratic covariance or Pearson.
+hhg_analysis_invalidate_derived(fig);
+r=hhg_analysis_workflow(fig,'covariance_diagonal',opts,false);
+cache=getappdata(fig,'hhg_reduced'); assert(~isfield(cache,'covariance')&&~isfield(cache,'pearson'));
+assert(max(abs(r.values-diag(expectedCov)))<1e-9);
+hhg_analysis_invalidate_derived(fig);
+r=hhg_analysis_workflow(fig,'pearson_slice',opts,false);
+cache=getappdata(fig,'hhg_reduced'); assert(~isfield(cache,'covariance')&&isfield(cache,'covariance_slice'));
+assert(max(abs(r.values-expectedPearson(4,:)))<1e-10);
+cache.spectra=[]; setappdata(fig,'hhg_reduced',cache);
+r=hhg_analysis_workflow(fig,'pca_space',opts,false); assert(~isempty(r.values));
+expect_error(@()hhg_analysis_workflow(fig,'pca_frequency',opts,false),'HHG:Memory');
+% Replacing an enabled reference invalidates all derived caches, preserving axis.
+h=guidata(fig); h.nsel=1; guidata(fig,h);
+hhg_analysis_current_action(fig,h.pushbutton19,[]); setappdata(fig,'hhg_apply_background',true);
+setappdata(fig,'hhg_xW',1:10); setappdata(fig,'hhg_axis_source','synthetic calibration');
+hhg_analysis_workflow(fig,'covariance',opts,false); hhg_analysis_workflow(fig,'dc',opts,false);
+h=guidata(fig); h.nsel=2; guidata(fig,h);
+hhg_analysis_current_action(fig,h.pushbutton19,[]);
+assert(~isappdata(fig,'hhg_reduced')&&~isappdata(fig,'hhg_image_reduced')&&~isappdata(fig,'hhg_last_result'));
+assert(isequal(getappdata(fig,'hhg_xW'),1:10));
+corrected=original-original(:,:,2)*.95;
+r=hhg_analysis_workflow(fig,'dc',opts,false);
+assert(max(abs(r.values-mean(corrected,3)'),[],'all')<1e-10);
+r=hhg_analysis_workflow(fig,'covariance',opts,false);
+expectedCorrected=reshape(mean(corrected(:,2:4,:),2),10,frameCount)';
+assert(max(abs(r.values-cov(expectedCorrected)),[],'all')<1e-9);
+hhg_analysis_export_mat(fig,fullfile(out,'corrected_export.mat'));
+correctedSaved=load(fullfile(out,'corrected_export.mat'));
+maskCorrected=hhg_analysis_current_masks(fig,'pushbutton25',fullfile(out,'harmonics.msk'),false);
+assert(maskCorrected.processing.background_enabled);
+fftCorrected=hhg_analysis_current_fourier(fig,'full',false);
+assert(fftCorrected.processing.background_enabled&&fftCorrected.processing.bin_size==1);
+provenanceCsv=hhg_analysis_write_csv(fullfile(out,'corrected_trace.csv'),[1 2;3 4],maskCorrected.processing);
+provenance=jsondecode(fileread([provenanceCsv '.processing.json'])); assert(provenance.background_enabled);
+assert(correctedSaved.processing.background_enabled&&correctedSaved.processing.background.scale==.95);
+assert(isequal(correctedSaved.data,corrected)&&~saved.processing.background_enabled);
+% Failed source loading leaves the entire prior source/navigation/context intact.
+priorH=guidata(fig); priorSource=getappdata(fig,'hhg_hdf5_source'); priorCache=getappdata(fig,'hhg_reduced');
+priorLabel=get(priorH.text2,'String'); priorSlider=get(priorH.slider1,'Max');
+expect_error(@()hhg_analysis_load_hdf5(fig,fullfile(out,'other_exposure.h5')),'HHG:Reference');
+assert(isequal(guidata(fig),priorH)&&isequal(getappdata(fig,'hhg_hdf5_source'),priorSource));
+assert(isequal(getappdata(fig,'hhg_reduced'),priorCache)&&isequal(getappdata(fig,'hhg_xW'),1:10));
+assert(isequal(get(priorH.text2,'String'),priorLabel)&&get(priorH.slider1,'Max')==priorSlider);
+setappdata(fig,'hhg_apply_background',false);
+% A failed harmonic FFT export leaves the complete prior workspace bundle.
+hhg_analysis_load_hdf5(fig,{fullfile(out,'nonuniform0.h5'),fullfile(out,'nonuniform1.h5'),fullfile(out,'nonuniform2.h5')},'step_means');
+h=guidata(fig); set(h.edit2,'String','transaction');
+assignin('base','transaction_H13data',123); assignin('base','transaction_piezoaxis',456);
+assignin('base','transaction_filename','prior'); assignin('base','transaction_processing','prior');
+expect_error(@()hhg_analysis_current_masks(fig,'pushbutton27',fullfile(out,'harmonics.msk'),false),'HHG:FFT');
+assert(evalin('base','transaction_H13data')==123&&evalin('base','transaction_piezoaxis')==456);
+assert(strcmp(evalin('base','transaction_filename'),'prior')&&strcmp(evalin('base','transaction_processing'),'prior'));
+% Legacy complete input preserves arithmetic/orientation; truncated reads fail/close.
+handlesBefore=openedFiles();
+for count=[0 1 6 15]
+    expect_error(@()hhg_analysis_read_legacy_bin(fullfile(out,sprintf('legacy_%d.bin',count)),4,4),'HHG:LegacyBIN');
+    assert(isequal(openedFiles(),handlesBefore));
+end
+legacy=hhg_analysis_read_legacy_bin(fullfile(out,'legacy_16.bin'),4,4);
+assert(isequal(legacy,reshape(uint16(0:15),4,4)));
 hhg_analysis_load_hdf5(fig,{fullfile(out,'step1.h5'),fullfile(out,'step0.h5')},'step_means');
 scanSource=getappdata(fig,'hhg_hdf5_source'); assert(isequal(scanSource.step_indices,[0 1]));
 mean0=mean(h5read(fullfile(out,'step0.h5'),'/images'),3);

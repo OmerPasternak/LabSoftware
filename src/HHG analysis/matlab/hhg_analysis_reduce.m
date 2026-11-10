@@ -1,13 +1,23 @@
-function reduced = hhg_analysis_reduce(fig,opts,imageMoments,needCovariance)
+function reduced = hhg_analysis_reduce(fig,opts,imageMoments,needCovariance,covarianceRows)
 %HHG_ANALYSIS_REDUCE Cache vectorized reductions, not raw camera stacks.
 % Batchwise centered covariance uses the parallel/Welford merge equations.
 % All frames contribute; source order and pixels are never altered.
+% Corrections are part of cache identity, including externally toggled appdata.
+enabled=isappdata(fig,'hhg_apply_background')&&getappdata(fig,'hhg_apply_background');
+key=struct('enabled',enabled);
+if enabled, key.reference=getappdata(fig,'hhg_background'); end
+if ~isappdata(fig,'hhg_correction_key')||~isequal(getappdata(fig,'hhg_correction_key'),key)
+    hhg_analysis_invalidate_derived(fig); setappdata(fig,'hhg_correction_key',key);
+end
 if nargin<3, imageMoments=false; end
 if nargin<4, needCovariance=true; end
+if nargin<5, covarianceRows=[]; end
 if imageMoments, reduced=image_moments(fig); return; end
 if isappdata(fig,'hhg_reduced')
     cached=getappdata(fig,'hhg_reduced');
-    if isequal(cached.rows,opts.rows)&&isequal(cached.columns,opts.columns)&&(~needCovariance||isfield(cached,'covariance'))
+    sliceAvailable=isempty(covarianceRows)||isfield(cached,'covariance')|| ...
+        (isfield(cached,'slice_rows')&&isequal(cached.slice_rows,covarianceRows));
+    if isequal(cached.rows,opts.rows)&&isequal(cached.columns,opts.columns)&&(~needCovariance||isfield(cached,'covariance'))&&sliceAvailable
         reduced=cached; return;
     end
 end
@@ -19,6 +29,9 @@ if needCovariance
     reduced.M2=zeros(h.width);
 else
     reduced.M2=zeros(1,h.width);
+end
+if ~isempty(covarianceRows)
+    reduced.slice_rows=covarianceRows; reduced.cross_M2=zeros(numel(covarianceRows),h.width);
 end
 % Reduced spectra are retained for repeats/PCA when at most 256 MiB.
 if 8*double(h.flength)*h.width<=256*1024^2, reduced.spectra=zeros(h.flength,h.width); end
@@ -44,6 +57,9 @@ for first=1:batch:h.flength
         else
             reduced.M2=reduced.M2+sum(centered.^2,1)+delta.^2*weight;
         end
+        if ~isempty(covarianceRows)
+            reduced.cross_M2=reduced.cross_M2+centered(:,covarianceRows)'*centered+delta(covarianceRows)'*delta*weight;
+        end
         reduced.mean_spectrum=reduced.mean_spectrum+delta*(pendingCount/total);
         reduced.count=total; reduced.matrix_updates=reduced.matrix_updates+1; pendingCount=0;
     end
@@ -52,12 +68,13 @@ end
 if needCovariance
     reduced.covariance=reduced.M2/max(1,reduced.count-1);
     reduced.variance_spectrum=diag(reduced.covariance)';
-    stdev=sqrt(diag(reduced.covariance));
-    reduced.pearson=reduced.covariance./(stdev*stdev');
-    reduced.pearson=min(1,max(-1,reduced.pearson));
-    reduced.pearson(stdev==0,:)=NaN; reduced.pearson(:,stdev==0)=NaN;
+
 else
     reduced.variance_spectrum=reduced.M2/max(1,reduced.count-1);
+end
+if ~isempty(covarianceRows)
+    reduced.covariance_slice=reduced.cross_M2/max(1,reduced.count-1);
+    reduced=rmfield(reduced,'cross_M2');
 end
 reduced=rmfield(reduced,'M2');
 setappdata(fig,'hhg_reduced',reduced);

@@ -256,14 +256,8 @@ for n2 = 1:flength
     %disp(f(size(filenamestart,2)+1:end-4));
     delay(n2) = str2double(f(size(filenamestart,2)+2:end-4));
     disp(['Loading ' f ', delay ' num2str(delay(n2)) 'um']);
-    fileID = fopen([PathName f]);
-    if fileID ~= -1
-        O = fread(fileID, [width height], 'uint32=>uint16', 0, 'b');
-        O(1,1) = min(min(O));
-        fclose(fileID);
-    else
-        disp('fopen failed');
-    end
+    O = hhg_analysis_read_legacy_bin([PathName f],width,height);
+    O(1,1) = min(min(O));
     O = O - handles.bg;  %background subtraction
     O(O < 0) = 0;
     data(:,:,n2) = O;
@@ -1122,14 +1116,8 @@ for n2 = 1:flength
     %disp(f(size(filenamestart,2)+1:end-4));
     delay(n2) = str2double(f(size(filenamestart,2)+2:end-4-mx));
     disp(['Loading ' f ', delay ' num2str(delay(n2)) 'mm']);
-    fileID = fopen([PathName f]);
-    if fileID ~= -1
-        O = fread(fileID, [width height], 'uint32=>uint16', 0, 'b');
-        O(1,1) = min(min(O));
-        fclose(fileID);
-    else
-        disp('fopen failed');
-    end
+    O = hhg_analysis_read_legacy_bin([PathName f],width,height);
+    O(1,1) = min(min(O));
     O = O - handles.bg;  %background subtraction
     O(O < 0) = 0;
     data(:,:,n2) = O;

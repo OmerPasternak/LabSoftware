@@ -14,20 +14,30 @@ switch tag
         hhg_analysis_render(fig);
     case 'pushbutton14'
         [f,p]=uiputfile('*.png','Export current analysis figure');
-        if ~isequal(f,0), assert(~isfile(fullfile(p,f)),'HHG:Exists','Choose a new output filename.'); exportapp(fig,fullfile(p,f)); end
+        if ~isequal(f,0), assert(~isfile(fullfile(p,f)),'HHG:Exists','Choose a new output filename.'); exportapp(fig,fullfile(p,f)); hhg_analysis_write_processing(fullfile(p,f),hhg_analysis_processing(fig)); end
     case 'pushbutton15'
         source=getappdata(fig,'hhg_hdf5_source');
+        frame=hhg_analysis_read(fig,h.nsel,1); processing=hhg_analysis_processing(fig);
         assignin('base','hhg_source',source);
-        assignin('base','hhg_current_frame',hhg_analysis_read(fig,h.nsel,1));
+        assignin('base','hhg_current_frame',frame);
+        assignin('base','hhg_processing',processing);
         assignin('base','filename',h.filename); assignin('base','delay',h.delay);
         fprintf('Exported hhg_source and hhg_current_frame. Full pixels remain on disk; use batched MAT export for the entire source.\n');
     case 'pushbutton19'
         source=getappdata(fig,'hhg_hdf5_source');
         % Capture the underlying raw frame, never a recursively corrected one.
         enabled=isappdata(fig,'hhg_apply_background')&&getappdata(fig,'hhg_apply_background');
+        restore=onCleanup(@()setappdata(fig,'hhg_apply_background',enabled));
         setappdata(fig,'hhg_apply_background',false);
-        reference=struct('pixels',hhg_analysis_read(fig,h.nsel,1),'source',source.paths{1},'frame',h.nsel,'scale',.95);
-        setappdata(fig,'hhg_background',reference); setappdata(fig,'hhg_apply_background',enabled);
+        index=1; if strcmp(source.mode,'step_means'), index=h.nsel; end
+        reference=struct('pixels',hhg_analysis_read(fig,h.nsel,1),'source',source.paths{index}, ...
+            'frame',h.nsel,'scale',.95,'sample_mode',source.mode,'aggregation','single raw frame');
+        if strcmp(source.mode,'step_means')
+            reference.aggregation='mean of all raw frames in the selected step';
+            reference.frame_range=[1 source.frame_counts(index)];
+        end
+        clear restore;
+        setappdata(fig,'hhg_background',reference); hhg_analysis_invalidate_derived(fig);
         fprintf('Background captured. Enable the explicit 0.95x background menu option to use it for derived reads.\n');
     case 'pushbutton20'
         if isappdata(fig,'hhg_background'), rmappdata(fig,'hhg_background'); end

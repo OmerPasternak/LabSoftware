@@ -25,5 +25,7 @@ end
 result=hhg_analysis_pixel_fft(binned,h.delay,h.filename,makePlots);
 result.bin_size=bin; result.bounds=bounds; result.binning='source uint16 saturation; incomplete edge bins omitted';
 if isappdata(fig,'hhg_hdf5_source'), result.source=getappdata(fig,'hhg_hdf5_source'); end
+result.processing=hhg_analysis_processing(fig); result.processing.binning=result.binning;
+result.processing.bin_size=bin; result.processing.bounds=bounds;
 setappdata(fig,'hhg_last_result',result);
 end

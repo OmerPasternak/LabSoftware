@@ -12,6 +12,7 @@ h=guidata(fig); source=[];
 if isappdata(fig,'hhg_hdf5_source'), source=getappdata(fig,'hhg_hdf5_source'); end
 partial=[path '.partial.mat']; output=matfile(partial,'Writable',true);
 output.complete=false; output.source=source; output.delay=h.delay;
+output.processing=hhg_analysis_processing(fig);
 example=hhg_analysis_read(fig,1,1); output.data(h.width,h.height,h.flength)=cast(0,'like',example);
 batch=hhg_analysis_batch_size(h.width,h.height);
 for first=1:batch:h.flength

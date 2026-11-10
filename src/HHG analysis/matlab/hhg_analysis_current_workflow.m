@@ -9,14 +9,27 @@ if isappdata(fig,'hhg_apply_background')&&getappdata(fig,'hhg_apply_background')
     bg=getappdata(fig,'hhg_background'); r.background=rmfield(bg,'pixels');
 end
 images=ismember(action,{'dc','variance_image','grating_calibration'});
-covariance=ismember(action,{'pearson','covariance','flipped_pearson','calibrated_pearson','covariance_diagonal','pearson_slice'});
+covariance=ismember(action,{'pearson','covariance','flipped_pearson','calibrated_pearson'});
 if images
     reduced=hhg_analysis_reduce(fig,opts,true,false);
 elseif ~ismember(action,{'single_image','tc','tc_fft','calibration'})
     if strcmp(action,'legacy_space'), opts.rows=[1 h.height]; r.settings=opts; end
     assert(h.flength>=2||strcmp(action,'repeats'),'HHG:Frames','Sample statistics need at least two observations.');
-    reduced=hhg_analysis_reduce(fig,opts,false,covariance);
+    if strcmp(action,'pearson_slice')
+        reduced=hhg_analysis_reduce(fig,opts,false,false,opts.slice);
+    else
+        reduced=hhg_analysis_reduce(fig,opts,false,covariance);
+    end
     r.mean_spectrum=reduced.mean_spectrum;
+    if ismember(action,{'pearson','flipped_pearson','calibrated_pearson','pearson_slice'})
+        stdev=sqrt(reduced.variance_spectrum(:));
+        rows=1:numel(stdev); if strcmp(action,'pearson_slice'), rows=opts.slice; end
+        if isfield(reduced,'covariance'), cross=reduced.covariance(rows,:);
+        else, cross=reduced.covariance_slice; end
+        pearson=cross./(stdev(rows)*stdev');
+        pearson=min(1,max(-1,pearson));
+        pearson(stdev(rows)==0,:)=NaN; pearson(:,stdev==0)=NaN;
+    end
 end
 switch action
     case 'dc', r.values=reduced.mean_image';
@@ -25,14 +38,16 @@ switch action
         r.values=reduced.variance_image';
         r.estimator='batched centered N-1 variance, returned single precision; rounding may differ from whole-stack var(single)';
     case {'pearson','flipped_pearson','calibrated_pearson'}
-        r.values=reduced.pearson;
+        r.values=pearson;
         if strcmp(action,'calibrated_pearson'), assert(~isempty(xW),'HHG:Calibration','Import a validated xW axis first.'); end
     case 'covariance', r.values=reduced.covariance;
     case 'covariance_diagonal', r.values=reduced.variance_spectrum(:);
-    case 'pearson_slice', r.values=reduced.pearson(opts.slice,:);
+    case 'pearson_slice', r.values=pearson;
     case 'variance_line', r.values=reduced.variance_spectrum;
     case {'repeats','legacy_space','pca_frequency','pca_space'}
-        assert(~isempty(reduced.spectra),'HHG:Memory','This view exceeds the reduced-spectrum memory budget; select a smaller source. No frames were omitted.');
+        if ~strcmp(action,'pca_space')
+            assert(~isempty(reduced.spectra),'HHG:Memory','This view exceeds the reduced-spectrum memory budget; select a smaller source. No frames were omitted.');
+        end
         switch action
             case 'repeats', r.values=reduced.spectra';
             case 'legacy_space'
@@ -79,6 +94,7 @@ switch action
     otherwise
         error('HHG:Inactive','This historical helper-dependent workflow is inactive. See INACTIVE_FEATURES.txt.');
 end
+r.processing=hhg_analysis_processing(fig);
 r.reduction='source MATLAB spatial MEAN; batched current-camera samples';
 setappdata(fig,'hhg_last_result',r);
 if makePlots&&~strcmp(action,'grating_calibration'), hhg_analysis_plot(fig,r); end

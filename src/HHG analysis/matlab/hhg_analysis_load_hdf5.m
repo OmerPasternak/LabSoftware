@@ -15,9 +15,17 @@ h.data=[]; h.nsel=1; h.loaded=2; h.filename=strjoin(source.paths,'; ');
 h.x=(1:h.width)'; h.y=h.height:-1:1;
 h.roi=0; h.roix=1; h.roiy=1; h.roiwidth=min(50,h.width); h.roiheight=min(50,h.height);
 h.bg=0; h.minval=0.1; h.maxval=1;
+% Validate the first candidate read under the actual correction policy before
+% publishing any source, controls, ROI, calibration or cache changes.
+candidate=figure('Visible','off','HandleVisibility','off');
+cleanup=onCleanup(@()close(candidate));
+guidata(candidate,h); setappdata(candidate,'hhg_hdf5_source',source);
+if isappdata(fig,'hhg_apply_background'), setappdata(candidate,'hhg_apply_background',getappdata(fig,'hhg_apply_background')); end
+if isappdata(fig,'hhg_background'), setappdata(candidate,'hhg_background',getappdata(fig,'hhg_background')); end
+frame=hhg_analysis_read(candidate,1,1);
+clear cleanup;
 guidata(fig,h); setappdata(fig,'hhg_hdf5_source',source);
 hhg_analysis_reset_context(fig,axisLabel);
-frame=hhg_analysis_read(fig,1,1);
 h.minval=double(min(frame,[],'all'))+31; h.maxval=double(max(frame,[],'all')); guidata(fig,h);
 set(h.slider1,'Min',1,'Max',max(2,h.flength),'Value',1, ...
     'SliderStep',[1/max(1,h.flength) 1/max(1,h.flength)]);

@@ -37,6 +37,12 @@ def test_current_hdf5_matlab_analysis_preserves_sources(tmp_path):
     write_current_file(tmp_path / "incomplete.h5", frames, complete=False)
     write_current_file(tmp_path / "count_mismatch.h5", frames, count=262)
     write_current_file(tmp_path / "single.h5", frames[:1])
+    write_current_file(tmp_path / "other_exposure.h5", frames[:1])
+    with h5py.File(tmp_path / "other_exposure.h5", "r+") as f: f.attrs["exposure_time_s"] = .02
+    for index, value in enumerate((0., .001, .003)):
+        write_current_file(tmp_path / f"nonuniform{index}.h5", frames[index:index+1], step=index, value=value)
+    for count in (0, 1, 6, 15, 16):
+        (tmp_path / f"legacy_{count}.bin").write_bytes(np.arange(count,dtype=">u4").tobytes())
     write_current_file(tmp_path / "step0.h5", frames[:2], step=0)
     write_current_file(tmp_path / "step1.h5", frames[2:5], step=1, value=26.701)
     write_current_file(tmp_path / "wrong_camera.h5", frames[5:], step=2, value=26.702, camera="other")

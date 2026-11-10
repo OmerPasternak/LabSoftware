@@ -7,10 +7,7 @@ function result = hhg_analysis_pixel_fft(data,delay,label,makePlots)
 % intentionally inactive at the user's request; only a selected pixel is shown.
 if nargin<4, makePlots=true; end
 n=size(data,3);
-assert(n>=2&&numel(delay)==n&&all(isfinite(delay)),'HHG:FFT','Fourier analysis requires one finite delay per frame and at least two frames.');
-steps=diff(double(delay));
-assert(steps(1)~=0&&all(abs(steps-steps(1))<=max(1e-10,abs(steps(1))*1e-6)), ...
-    'HHG:FFT','Fourier analysis requires uniform nonzero delay spacing; input frames are never reordered or interpolated.');
+hhg_analysis_validate_fft_axis(delay,n); steps=diff(double(delay));
 assert(numel(data)*8*4<=1024^3,'HHG:Memory','Per-pixel Fourier workspace exceeds 1 GiB. Select a smaller ROI or explicit bin size.');
 spectrum=fft(double(data),[],3);
 amplitude=abs(spectrum(:,:,1:floor(n/2)+1));
