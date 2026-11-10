@@ -1,37 +1,28 @@
-Current interaction (2026-11-10): choose CovarianceFromGUIdata or
-TConlyAnalysisFromGUIdata in the launcher. Only the analysis interface and
-its plots open; MATLAB runs without its desktop behind the scenes. Original
-Scan Analyzer button captions are retained, including Load Scan ..., Load
-Image ..., Load Two Color Scan ..., and Export data to workspace. These
-controls continue to read current HDF5 data. Source-editor actions are hidden
-in the application session. The developer entrypoint hhg_analysis_start remains
-available for interactive MATLAB development.
+# ShowScanGUI analysis
 
-# HHG analysis
+Double-click run_hhg_analysis.vbs at the repository root or in this feature
+folder, or press Fundamental Analysis in the camera GUI. These open the SAME
+ShowScanGUI-based analyzer directly. There is no Python analysis window and
+no TCS/statistics launcher panel. MATLAB starts minimized in the background.
 
-Double-click `run_hhg_analysis.vbs` in this folder or at the repository root.
-The `.bat` versions retain a console for diagnostics. The camera GUI's
-**Fundamental Analysis** button opens the same application. It does not
-connect to a camera. Module entry point: `python -m hhg_control.hhg_analysis`;
-installed command: `hhg-analysis`.
+Use the original Load Scan ..., Load Image ..., Load Two Color Scan ...,
+and Export data to workspace controls. Current HDF5 input is adapted internally.
+Load Image selects one recorded frame; Load Scan retains repetitions; Load
+Two Color Scan uses metadata-ordered step means. Trace plots update on load
+and ROI selection as in the original viewer.
 
-**The supplied MATLAB code is authoritative for overlapping methods and
-appearance.** The GUI's X Pearson action imports the chosen camera file into
-MATLAB and uses the supplied spatial-mean method. The former Python Pearson
-CLI remains a compatibility API; it is not the GUI's default implementation.
-Harmonic marking and corrected harmonic g² retain the existing Python tools,
-because the supplied package contains no equivalent corrected g² method.
+Export data to workspace publishes the full [x,y,sample] data array, delay,
+filename, ROI variables when selected, and the single-image lineout. Reads
+are batched, but normal MATLAB workspace arrays require enough RAM; export
+fails clearly rather than substituting a source reference for data.
 
-The primary input is the **current camera schema 2.0**, with raw
-`/images uint16 [frame,y,x]`, root acquisition settings and one
-`/frame_metadata/json` record per frame. The old lab binary format is secondary.
-
-Choose **CovarianceFromGUIdata** or **TConlyAnalysisFromGUIdata** to open the preserved
-`ShowScanGUI` and its new **HHG Analysis** menu. Each launch opens an independent
-analysis process; perform related steps in one desktop so the loaded scan,
-references and settings stay together. Closing the Python launcher does not
-terminate that MATLAB session. The startup log location appears in the Python
-activity log. A MATLAB executable picker supports another installed release.
+The Analysis scripts menu opens active editable copies of
+CovarianceFromGUIdata.m and TConlyAnalysisFromGUIdata.m. Run sections and
+functions in the same MATLAB workspace as in the original lab workflow.
+The MATLAB workspace menu opens the desktop only on explicit request.
+The supplied originals remain unchanged in matlab/reference. Calibration and
+FFT sections depending on missing helpers remain documented in
+INACTIVE_FEATURES.txt; making scripts active does not invent those helpers.
 
 ## Active functions
 
@@ -48,7 +39,7 @@ activity log. A MATLAB executable picker supports another installed release.
 | ROI selection, clearing, preview, integrated trace and counts | Original controls; bounded selection and consistent `width*height` pixels |
 | Zoom and data cursor | Original controls |
 | Figure PNG | Original PNG button; current MATLAB `exportapp` replaces unsupported legacy `print` |
-| Workspace / disk exports | HDF5 source reference and current frame in workspace; full data exported to v7.3 MAT in bounded batches; original legacy workspace exporter retained |
+| Workspace / disk exports | Full original data/delay/filename/ROI contract in workspace; separate batched MAT export also available; original legacy workspace exporter retained |
 | Use / discard background | Original controls and legacy semantics; frozen TC reference is a separate explicitly selected reference |
 | Harmonic masks, yields, delay traces | Original `.msk` controls and CSV export; mask `[H,x,y,width,height]`, bottom-origin, one-based |
 | Harmonic pixel arrays / prefixes / stored masks | Original exports; fractional harmonic variable names are made valid consistently |

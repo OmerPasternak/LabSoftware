@@ -6,7 +6,8 @@ assert(first>=1&&count>=1&&first+count-1<=h.flength,'HHG:Frames','Requested fram
 if isappdata(fig,'hhg_hdf5_source')
     source=getappdata(fig,'hhg_hdf5_source');
     if strcmp(source.mode,'frames')
-        data=h5read(source.paths{1},'/images',[1 1 first],[h.width h.height count]);
+        offset=0; if isfield(source,'frame_offset'), offset=source.frame_offset; end
+        data=h5read(source.paths{1},'/images',[1 1 first+offset],[h.width h.height count]);
     else
         % One derived sample per scan step, never one artificial delay per
         % camera frame. All repetitions in each step enter its mean equally.

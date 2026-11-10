@@ -20,5 +20,6 @@ h.roiwidth=max(1,min(h.width-h.roix+1,rect(3)));
 h.roiheight=max(1,min(h.height-h.roiy+1,rect(4))); h.roi=1;
 guidata(fig,h);
 if isappdata(fig,'hhg_trace'), rmappdata(fig,'hhg_trace'); end
-hhg_analysis_render(fig);
+if isappdata(fig,'hhg_hdf5_source'), hhg_analysis_trace(fig);
+else, hhg_analysis_render(fig); end
 end

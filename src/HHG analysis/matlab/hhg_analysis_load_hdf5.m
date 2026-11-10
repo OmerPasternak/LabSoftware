@@ -1,4 +1,4 @@
-function hhg_analysis_load_hdf5(fig,paths,mode)
+function hhg_analysis_load_hdf5(fig,paths,mode,imageFrame)
 %HHG_ANALYSIS_LOAD_HDF5 Attach current camera HDF5 without loading its stack.
 % Frame mode is one fixed scan step. Explicit step_means mode keeps steps
 % separate and represents each by the mean of all its recorded repetitions.
@@ -15,6 +15,11 @@ h.data=[]; h.nsel=1; h.loaded=2; h.filename=strjoin(source.paths,'; ');
 h.x=(1:h.width)'; h.y=h.height:-1:1;
 h.roi=0; h.roix=1; h.roiy=1; h.roiwidth=min(50,h.width); h.roiheight=min(50,h.height);
 h.bg=0; h.minval=0.1; h.maxval=1;
+if nargin>=4
+    assert(strcmp(mode,'frames')&&isscalar(imageFrame)&&imageFrame==fix(imageFrame)&&imageFrame>=1&&imageFrame<=h.flength, ...
+        'HHG:Frame','Select a recorded frame within this file.');
+    source.frame_offset=imageFrame-1; h.flength=1; h.delay=0; h.loaded=1;
+end
 guidata(fig,h); setappdata(fig,'hhg_hdf5_source',source);
 hhg_analysis_reset_context(fig,axisLabel);
 frame=hhg_analysis_read(fig,1,1);
@@ -28,5 +33,5 @@ set(h.pushbutton15,'String','Export data to workspace');
 if strcmp(mode,'frames'), label=[name extension]; else, label=sprintf('%d HDF5 scan steps',h.flength); end
 set(h.text2,'String',label,'TooltipString',h.filename);
 set(h.text15,'String','HDF5 v2.0','TooltipString','Raw pixels stay on disk; completed schema-2.0 input, read in bounded batches.');
-hhg_analysis_render(fig);
+hhg_analysis_trace(fig);
 end

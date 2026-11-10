@@ -731,20 +731,9 @@ class CameraMainWindow(QMainWindow):
 
     def _open_fundamental_analysis(self) -> None:
         """Show the separate analysis window without coupling it to acquisition state."""
-        from hhg_control.hhg_analysis import FundamentalAnalysisWindow
+        from hhg_control.hhg_analysis.window import main
+        main()
 
-        if self._fundamental_analysis_window is None:
-            self._fundamental_analysis_window = FundamentalAnalysisWindow()
-            self._fundamental_analysis_window.destroyed.connect(
-                lambda: setattr(self, "_fundamental_analysis_window", None)
-            )
-        self._fundamental_analysis_window.show()
-        self._fundamental_analysis_window.raise_()
-        self._fundamental_analysis_window.activateWindow()
-
-    # =========================================================================
-    # GO and STOP Controls (Top-Left Docked)
-    # =========================================================================
     def _set_go_button_style(self, active: bool) -> None:
         if self._go_visual_active == active:
             return

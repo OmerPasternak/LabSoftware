@@ -2,8 +2,8 @@ function hhg_analysis_app(inputPath,workflow)
 %HHG_ANALYSIS_APP Run an interactive analysis interface without the desktop.
 % -batch owns the process lifetime; closing all analysis figures exits MATLAB.
 if nargin<1, inputPath=''; end
-if nargin<2, workflow='statistical'; end
-assert(ismember(workflow,{'statistical','tcs','pearson'}),'HHG:Workflow','Unknown workflow.');
+if nargin<2, workflow='show_scan'; end
+assert(ismember(workflow,{'show_scan','statistical','tcs','pearson'}),'HHG:Workflow','Unknown workflow.');
 set(groot,'DefaultFigureVisible','on');
 try
     fig=hhg_analysis_start();

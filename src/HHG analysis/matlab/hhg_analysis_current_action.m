@@ -16,20 +16,18 @@ switch tag
         [f,p]=uiputfile('*.png','Export current analysis figure');
         if ~isequal(f,0), assert(~isfile(fullfile(p,f)),'HHG:Exists','Choose a new output filename.'); exportapp(fig,fullfile(p,f)); end
     case 'pushbutton15'
-        source=getappdata(fig,'hhg_hdf5_source');
-        assignin('base','hhg_source',source);
-        assignin('base','hhg_current_frame',hhg_analysis_read(fig,h.nsel,1));
-        assignin('base','filename',h.filename); assignin('base','delay',h.delay);
-        fprintf('Exported hhg_source and hhg_current_frame. Full pixels remain on disk; use batched MAT export for the entire source.\n');
+        hhg_analysis_export_workspace(fig);
     case 'pushbutton19'
         source=getappdata(fig,'hhg_hdf5_source');
         % Capture the underlying raw frame, never a recursively corrected one.
         enabled=isappdata(fig,'hhg_apply_background')&&getappdata(fig,'hhg_apply_background');
         setappdata(fig,'hhg_apply_background',false);
         reference=struct('pixels',hhg_analysis_read(fig,h.nsel,1),'source',source.paths{1},'frame',h.nsel,'scale',.95);
+        assignin('base','bg',reference.pixels);
         setappdata(fig,'hhg_background',reference); setappdata(fig,'hhg_apply_background',enabled);
         fprintf('Background captured. Enable the explicit 0.95x background menu option to use it for derived reads.\n');
     case 'pushbutton20'
+        assignin('base','bg',0);
         if isappdata(fig,'hhg_background'), rmappdata(fig,'hhg_background'); end
         setappdata(fig,'hhg_apply_background',false);
         hhg_analysis_reset_context(fig,getappdata(fig,'hhg_delay_label')); hhg_analysis_render(fig);

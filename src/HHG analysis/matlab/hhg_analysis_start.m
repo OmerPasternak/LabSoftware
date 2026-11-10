@@ -13,7 +13,11 @@ if isappdata(fig,'hhg_analysis_initialized')
 end
 setappdata(fig,'hhg_analysis_initialized',true);
 setappdata(fig,'hhg_reference_colormap',colormap(fig));
-set(fig,'Name','ShowScanGUI — HHG Analysis');
+set(fig,'Name','ShowScanGUI');
+scripts=uimenu(fig,'Label','Analysis scripts');
+uimenu(scripts,'Label','CovarianceFromGUIdata','Callback',@(~,~)edit(fullfile(root,'active','CovarianceFromGUIdata.m')));
+uimenu(scripts,'Label','TConlyAnalysisFromGUIdata','Callback',@(~,~)edit(fullfile(root,'active','TConlyAnalysisFromGUIdata.m')));
+uimenu(scripts,'Label','MATLAB workspace','Callback',@(~,~)desktop);
 menu = uimenu(fig,'Label','HHG Analysis');
 uimenu(menu,'Label','Load completed camera HDF5 (raw pixels)...','Callback',@(~,~)safe(@()load_hdf5(fig)));
 uimenu(menu,'Label','Load current HDF5 scan (one mean per metadata step)...','Callback',@(~,~)safe(@()load_scan(fig)));
@@ -91,7 +95,7 @@ set(findall(fig,'Tag','pushbutton1'),'String','Load Scan ...', ...
     'Callback',@(~,~)safe(@()load_hdf5(fig)));
 set(findall(fig,'Tag','pushbutton13'),'String','Load Image ...', ...
     'TooltipString','Open a current HDF5 reference file, then choose the desired reference frame.', ...
-    'Callback',@(~,~)safe(@()load_hdf5(fig)));
+    'Callback',@(~,~)safe(@()load_image(fig)));
 set(findall(fig,'Tag','pushbutton22'),'String','Load Two Color Scan ...', ...
     'Callback',@(~,~)safe(@()load_scan(fig)));
 compatibility=uimenu(menu,'Label','Legacy binary inputs (compatibility)');
@@ -161,6 +165,18 @@ function load_hdf5(fig)
 [f,p]=uigetfile({'*.h5;*.hdf5','Completed camera files'},'Read raw saved camera data');
 if isequal(f,0), return; end
 hhg_analysis_load_hdf5(fig,fullfile(p,f));
+end
+
+function load_image(fig)
+[f,p]=uigetfile({'*.h5;*.hdf5','Completed camera files'},'Select image');
+if isequal(f,0), return; end
+path=fullfile(p,f); source=hhg_analysis_inspect_hdf5(path,'frames'); index=1;
+if source.frame_counts(1)>1
+    answer=inputdlg(sprintf('Recorded frame (1 to %d)',source.frame_counts(1)),'Load Image',1,{'1'});
+    if isempty(answer), return; end
+    index=str2double(answer{1});
+end
+hhg_analysis_load_hdf5(fig,path,'frames',index);
 end
 
 function import_axis(fig)

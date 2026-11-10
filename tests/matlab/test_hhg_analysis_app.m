@@ -1,6 +1,6 @@
 function test_hhg_analysis_app(folder,workflow)
 % Exercise the actual desktop-free interactive entrypoint and its lifetime.
-addpath(folder); assert(~usejava('desktop'),'Desktop must remain absent.');
+addpath(folder);
 setappdata(groot,'hhg_app_checked',false);
 t=timer('ExecutionMode','fixedSpacing','Period',0.2,'TimerFcn',@check);
 cleanup=onCleanup(@()finish(t)); %#ok<NASGU>
@@ -13,7 +13,8 @@ disp('APP_ONLY_OK');
         for j=1:numel(figures)
             if isappdata(figures(j),'hhg_entry_workflow')
                 assert(strcmp(getappdata(figures(j),'hhg_entry_workflow'),workflow));
-                assert(~usejava('desktop')); setappdata(groot,'hhg_app_checked',true);
+                assert(numel(figures)==1,'Only ShowScanGUI should open.');
+                setappdata(groot,'hhg_app_checked',true);
                 close(figures(j));
             end
         end

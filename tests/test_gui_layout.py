@@ -76,20 +76,15 @@ def test_roi_draw_mode_ends_after_one_completed_rectangle():
         window.close()
 
 
-def test_acquisition_gui_opens_dedicated_analysis_window(qtbot):
-    """Analysis tools live in their own window, separate from acquisition controls."""
+def test_acquisition_gui_opens_only_original_analyzer(qtbot, monkeypatch):
+    from hhg_control.hhg_analysis import window as analysis
+    calls = []
+    monkeypatch.setattr(analysis, "main", lambda: calls.append("ShowScanGUI"))
     window = CameraMainWindow()
     qtbot.addWidget(window)
-    assert not hasattr(window, "btn_spectral_covariance")
-    assert not hasattr(window, "btn_mark_harmonics")
-    assert not hasattr(window, "btn_harmonic_g2")
-
     window.btn_fundamental_analysis.click()
-    analysis_window = window._fundamental_analysis_window
-    assert analysis_window is not None
-    assert analysis_window.isVisible()
-    assert analysis_window.windowTitle() == "Fundamental Data Analysis"
-    analysis_window.close()
+    assert calls == ["ShowScanGUI"]
+    assert window._fundamental_analysis_window is None
     window.close()
 
 

@@ -28,5 +28,5 @@ def matlab_arguments(log_path: Path, input_path: Path | None = None, action: str
     if action not in {None, "pearson", "statistical", "tcs"}:
         raise ValueError("Unsupported startup workflow.")
     literal = "" if input_path is None else str(input_path.resolve()).replace("'", "''")
-    command = f"addpath('{folder}'); hhg_analysis_app('{literal}','{action or 'statistical'}')"
-    return ["-logfile", str(log_path), "-batch", command]
+    command = f"addpath('{folder}'); hhg_analysis_app('{literal}','{action or 'show_scan'}')"
+    return ["-automation", "-logfile", str(log_path), "-r", "try, " + command + "; exit; catch e, disp(getReport(e)); exit(1); end"]
