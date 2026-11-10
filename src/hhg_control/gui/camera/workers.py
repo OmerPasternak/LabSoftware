@@ -3,6 +3,11 @@
 from pathlib import Path
 from threading import Event
 import time
+import shutil
+import os
+import sys
+import subprocess
+from hhg_control.safe_io import filesystem_path
 
 import numpy as np
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -11,6 +16,25 @@ from hhg_control.camera.sequencer.scan_manager import CameraScanManager
 from hhg_control.camera.drivers.base_camera import BaseCamera, ReadoutMode, TriggerMode
 from hhg_control.camera.drivers.camera_defaults import DEFAULT_CAMERA_SERIAL
 from hhg_control.camera.drivers.mock_camera import MockPcoCamera
+
+
+class StorageDirectoryTask(QThread):
+    """Resolve/create/open a user-selected folder away from the Qt event loop."""
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self, folder):
+        super().__init__()
+        self.folder = folder
+
+    def run(self):
+        """Report all filesystem/open failures through the normal GUI error path."""
+        try:
+            folder = Path(self.folder).expanduser().resolve()
+            filesystem_path(folder).mkdir(parents=True, exist_ok=True)
+            if sys.platform == "win32": os.startfile(str(folder))
+            else: subprocess.Popen(["xdg-open", str(folder)])
+        except Exception as exc:
+            self.error_occurred.emit(str(exc))
 
 
 class CameraConnectTask(QThread):
@@ -263,6 +287,7 @@ class ScanSequenceTask(QThread):
         run_id: str | None = None,
         expected_roi=None,
         expected_trigger=None,
+        target_dir=None,
     ) -> None:
         super().__init__()
         self.scan_mgr = scan_mgr
@@ -277,6 +302,9 @@ class ScanSequenceTask(QThread):
         self.expected_roi, self.expected_trigger = expected_roi, expected_trigger
         self._abort_requested = False
         self._current_step = start_step
+        self._next_step = start_step
+        self.target_dir = target_dir
+        self.acquisition_started = False
 
     def request_abort(self) -> None:
         """Request a stop at the next safe frame-batch boundary."""
@@ -288,10 +316,20 @@ class ScanSequenceTask(QThread):
 
     def run(self) -> None:
         try:
+            if self.target_dir is not None:
+                target = Path(self.target_dir).expanduser().resolve()
+                filesystem_path(target).mkdir(parents=True, exist_ok=True)
+                roi = self.scan_mgr.get_roi()
+                required = int((roi[2]-roi[0]) * (roi[3]-roi[1]) * 2 * self.num_frames * (self.num_steps-self.start_step) * 1.1) + 100_000_000
+                free = shutil.disk_usage(filesystem_path(target)).free
+                if required > free:
+                    raise OSError(f"Insufficient storage: need {required} bytes; {free} bytes free in {target}.")
+                self.scan_mgr.set_storage_dir(target)
             if self.expected_roi is not None and self.scan_mgr.get_roi() != self.expected_roi:
                 raise RuntimeError("Camera ROI changed since the GUI configuration was verified.")
             if self.expected_trigger is not None and self.scan_mgr.get_trigger_mode() != self.expected_trigger:
                 raise RuntimeError("Camera trigger changed since the GUI configuration was verified.")
+            self.acquisition_started = True
             def on_start(step: int, value: float) -> None:
                 self._current_step = step
                 self.step_started.emit(step, self.num_steps, value, self.param_name)
@@ -311,13 +349,14 @@ class ScanSequenceTask(QThread):
                 # across files. Actuator scans must use the gated default.
                 continuous=True,
             ):
+                self._next_step = step + 1
                 self.step_completed.emit(
                     step, self.num_steps, value, self.param_name, latest_frame, filepath
                 )
-            if self._abort_requested:
-                value = self.start_val + self._current_step * self.step_size
+            if self._abort_requested and self._next_step < self.num_steps:
+                value = self.start_val + self._next_step * self.step_size
                 self.scan_aborted.emit(
-                    self._current_step, self.num_steps, value, self.param_name
+                    self._next_step, self.num_steps, value, self.param_name
                 )
             else:
                 self.scan_finished.emit(self.num_steps)

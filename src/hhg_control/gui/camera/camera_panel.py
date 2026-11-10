@@ -46,6 +46,7 @@ from .workers import (
     LiveStreamTask,
     PreviewTask,
     ScanSequenceTask,
+    StorageDirectoryTask,
 )
 
 IMAGE_AXIS_RECT = (0.12, 0.08, 0.83, 0.86)
@@ -204,6 +205,10 @@ class CameraMainWindow(QMainWindow):
         self._fundamental_analysis_window = None
         self._after_live_stopped: Optional[Callable[[], None]] = None
         self._after_connect: Optional[Callable[[], None]] = None
+        self.active_storage_task = None
+        self._scan_preflight_failed = False
+        self._stop_generation = 0
+        self._run_fingerprint = None
         self._resume_live_after_mode: bool = False
         self._resume_live_after_trigger: bool = False
         self._trigger_change_succeeded: bool = False
@@ -717,6 +722,7 @@ class CameraMainWindow(QMainWindow):
 
         # Greatly reduced height for activity log so it doesn't take over vertical space
         self.txt_activity_log = QTextEdit()
+        self.txt_activity_log.document().setMaximumBlockCount(2000)
         self.txt_activity_log.setReadOnly(True)
         self.txt_activity_log.setStyleSheet("font-family: Consolas, monospace; font-size: 10px;")
         self.txt_activity_log.setFixedHeight(60)
@@ -872,6 +878,7 @@ class CameraMainWindow(QMainWindow):
     def _on_stop_clicked(self) -> None:
         """Global Stop: halts live view or gracefully aborts in-progress scan."""
         self._append_log("[STOP] Stop button pressed.")
+        self._stop_generation += 1
         if self._configuration_display_preserved:
             self._configuration_display_preserved = False
             self._set_go_button_style(active=False)
@@ -1123,7 +1130,7 @@ class CameraMainWindow(QMainWindow):
         if was_live:
             self._mode_change_pending = True
             self._configuration_controls(True)
-            self._stop_live(after_stop=lambda: self._start_mode_change(mode, resume_live=True))
+            self._stop_live(after_stop=lambda generation=self._stop_generation: self._start_mode_change(mode, resume_live=generation == self._stop_generation))
             return
         self._start_mode_change(mode, resume_live=False)
 
@@ -1228,7 +1235,7 @@ class CameraMainWindow(QMainWindow):
         if self._is_live_active:
             self._trigger_change_pending = True
             self._configuration_controls(True)
-            self._stop_live(after_stop=lambda: self._start_trigger_change(mode, resume_live=True))
+            self._stop_live(after_stop=lambda generation=self._stop_generation: self._start_trigger_change(mode, resume_live=generation == self._stop_generation))
             return
         self._start_trigger_change(mode, resume_live=False)
 
@@ -1350,8 +1357,8 @@ class CameraMainWindow(QMainWindow):
             low:  Lower intensity bound in ADU (0–65534).
             high: Upper intensity bound in ADU (1–65535, must be > low).
         """
-        self._clim_low = max(0, low)
-        self._clim_high = min(65535, max(low + 1, high))
+        self._clim_low = min(65534, max(0, int(low)))
+        self._clim_high = min(65535, max(self._clim_low + 1, int(high)))
         # Sync spinboxes without triggering extra redraws
         self.spn_clim_low.blockSignals(True)
         self.spn_clim_high.blockSignals(True)
@@ -1360,29 +1367,16 @@ class CameraMainWindow(QMainWindow):
         self.spn_clim_low.blockSignals(False)
         self.spn_clim_high.blockSignals(False)
         if self._image_artist is not None:
-            self._image_artist.set_clim(self._clim_low, self._clim_high)
+            with self._image_artist.norm.callbacks.blocked():
+                self._image_artist.set_clim(self._clim_low, self._clim_high)
+            self._image_artist.changed()
             self._colorbar.set_ticks([])
             self._plot_background = None
             self.canvas.draw_idle()
 
     def _on_clim_changed(self) -> None:
         """Apply color limits immediately whenever spinbox values change."""
-        low = self.spn_clim_low.value()
-        high = self.spn_clim_high.value()
-        if high <= low:
-            high = min(65535, low + 1)
-            self.spn_clim_high.blockSignals(True)
-            self.spn_clim_high.setValue(high)
-            self.spn_clim_high.blockSignals(False)
-        if low == self._clim_low and high == self._clim_high:
-            return
-        self._clim_low = low
-        self._clim_high = high
-        if self._image_artist is not None:
-            self._image_artist.set_clim(self._clim_low, self._clim_high)
-            self._colorbar.set_ticks([])
-            self._plot_background = None
-            self.canvas.draw_idle()
+        self._set_clim(self.spn_clim_low.value(), self.spn_clim_high.value())
 
     def _on_clim_apply_clicked(self) -> None:
         self._on_clim_changed()
@@ -1485,7 +1479,7 @@ class CameraMainWindow(QMainWindow):
             if self.lbl_intensity_metrics.styleSheet() != metrics_style:
                 self.lbl_intensity_metrics.setStyleSheet(metrics_style)
             self.lbl_intensity_metrics.setText(
-                f"Pixel Intensity Metrics | Minimum: {c_min:,} ADU | Maximum: {c_max:,} ADU | Mean: {c_mean:,.1f} ADU{sat_warning}"
+                f"Pixel Intensity Metrics | Minimum{' (sampled)' if sample is not frame else ''}: {c_min:,} ADU | Maximum: {c_max:,} ADU | Mean{' (sampled)' if sample is not frame else ''}: {c_mean:,.1f} ADU{sat_warning}"
             )
 
         # Downsample to the current image axes so display work tracks the viewer size.
@@ -2062,28 +2056,34 @@ class CameraMainWindow(QMainWindow):
     # Storage Directory Handlers
     # =========================================================================
     def _on_storage_dir_edited(self) -> None:
-        folder = Path(self.txt_storage_dir.text().strip()).expanduser()
-        self.scan_manager.set_storage_dir(folder)
+        # The text is a pending destination; filesystem validation belongs to the scan worker.
+        if self.active_scan_task is not None:
+            self.txt_storage_dir.setText(str(self.scan_manager.storage_dir))
 
     def _browse_directory(self) -> None:
+        if self.active_scan_task is not None:
+            return
         chosen_dir = QFileDialog.getExistingDirectory(
             self, "Select Destination Folder for HDF5 Datasets", self.txt_storage_dir.text()
         )
         if chosen_dir:
             self.txt_storage_dir.setText(chosen_dir)
-            self.scan_manager.set_storage_dir(chosen_dir)
             self._append_log(f"[STORAGE] Destination folder set to: {chosen_dir}")
 
     def _open_storage_folder(self) -> None:
-        folder = Path(self.txt_storage_dir.text().strip()).expanduser().resolve()
-        folder.mkdir(parents=True, exist_ok=True)
-        try:
-            if sys.platform == "win32":
-                os.startfile(str(folder))
-            else:
-                subprocess.Popen(["xdg-open", str(folder)])
-        except Exception as err:
-            QMessageBox.warning(self, "Unable to Open Folder", f"Could not open directory:\n{err}")
+        if self.active_storage_task is not None:
+            return
+        task = StorageDirectoryTask(self.txt_storage_dir.text().strip())
+        self.active_storage_task = task
+        task.error_occurred.connect(lambda error: QMessageBox.warning(self, "Unable to Open Folder", error))
+        task.finished.connect(self._on_storage_task_finished)
+        task.start()
+
+    def _on_storage_task_finished(self):
+        """Release folder-worker ownership and complete a pending cooperative close."""
+        task, self.active_storage_task = self.active_storage_task, None
+        if task is not None: task.deleteLater()
+        if self._closing: self.close()
 
     # =========================================================================
     # Automated Scan Execution & Pause / Resume Coordination
@@ -2113,6 +2113,14 @@ class CameraMainWindow(QMainWindow):
             return "PHYSICAL"
         return "CAMERA"
 
+    def _measurement_fingerprint(self):
+        """Identify a paused run's scientific settings and frozen output selection."""
+        return (self._connected_source, self.camera._exposure_time_s, self.camera._readout_mode,
+                self.camera._trigger_mode, self._cached_roi(), self.spn_frames.value(),
+                self.spn_start_val.value(), self.spn_step_size.value(), self.spn_num_steps.value(),
+                self.txt_scan_param.text(), self.txt_file_header.text(),
+                os.path.normcase(os.path.abspath(os.path.expanduser(self.txt_storage_dir.text().strip()))))
+
     def _toggle_measurement_scan(self) -> None:
         """Start scan, stop in-progress scan, or continue paused scan."""
         if not self.camera.is_connected:
@@ -2134,8 +2142,8 @@ class CameraMainWindow(QMainWindow):
             return
 
         # Stop live stream cleanly before starting multi-step scan
-        if self._is_live_active:
-            self._resume_live_after_scan = True
+        if self.active_live_task is not None:
+            self._resume_live_after_scan = self._is_live_active
             self._stop_live(after_stop=self._toggle_measurement_scan)
             return
 
@@ -2183,43 +2191,21 @@ class CameraMainWindow(QMainWindow):
             self._resume_live_if_scan_not_started()
             return
 
+        fingerprint = self._measurement_fingerprint()
+        if self._paused_step is not None and fingerprint != self._run_fingerprint:
+            self._clear_paused_scan("Acquisition settings or destination changed; starting a new run.")
         start_step = self._paused_step if self._paused_step is not None else 0
-        if start_step == 0:
+        if self._paused_step is None:
             self._current_run_id = datetime.now().strftime("%Y%m%dT%H%M%S_%f")
             self._scan_active_elapsed_s = 0.0
+            self._run_fingerprint = fingerprint
         else:
             self._current_run_id = self._paused_run_id
-
-        target_dir = Path(self.txt_storage_dir.text().strip()).expanduser().resolve()
-        target_dir.mkdir(parents=True, exist_ok=True)
-        remaining_steps = self.spn_num_steps.value() - start_step
-        raw_bytes = (
-            (active_roi[2] - active_roi[0]) * (active_roi[3] - active_roi[1])
-            * 2 * self.spn_frames.value() * remaining_steps
-        )
-        required_bytes = int(raw_bytes * 1.1) + 100_000_000
-        try:
-            free_bytes = shutil.disk_usage(target_dir).free
-        except OSError as exc:
-            message = f"Cannot check free space in {target_dir}: {exc}"
-            self._append_log(f"[SCAN BLOCKED] {message}")
-            QMessageBox.warning(self, "Storage Check Failed", message)
-            self._resume_live_if_scan_not_started()
-            return
-        if required_bytes > free_bytes:
-            message = (
-                f"This measurement needs about {required_bytes / 1024**3:.1f} GiB "
-                f"for {remaining_steps} remaining steps; only {free_bytes / 1024**3:.1f} GiB "
-                "is free. Reduce ROI, frames, or steps, or choose a drive with more space."
-            )
-            self._append_log(f"[SCAN BLOCKED] {message}")
-            QMessageBox.warning(self, "Insufficient Storage", message)
-            self._resume_live_if_scan_not_started()
-            return
-        self.scan_manager.set_storage_dir(target_dir)
+        target_dir = self.txt_storage_dir.text().strip()
         self._configure_writer_memory()
 
         self._scan_completed_successfully = False
+        self._scan_preflight_failed = False
         self._set_ui_scanning_state(is_scanning=True)
 
         exp_name = self.txt_file_header.text().strip() or "HHG_Scan"
@@ -2260,7 +2246,7 @@ class CameraMainWindow(QMainWindow):
             num_frames=num_frames,
             start_step=start_step,
             run_id=self._current_run_id,
-            expected_roi=active_roi, expected_trigger=requested_trigger,
+            expected_roi=active_roi, expected_trigger=requested_trigger, target_dir=target_dir,
         )
         self.active_scan_task.step_started.connect(self._on_scan_step_started)
         self.active_scan_task.step_completed.connect(self._on_scan_step_completed)
@@ -2285,6 +2271,9 @@ class CameraMainWindow(QMainWindow):
         return self._scan_active_elapsed_s
 
     def _set_ui_scanning_state(self, is_scanning: bool) -> None:
+        self.txt_storage_dir.setEnabled(not is_scanning)
+        self.txt_file_header.setEnabled(not is_scanning)
+        self.txt_scan_param.setEnabled(not is_scanning)
         if is_scanning:
             self.btn_take_measurement.setText("Stop Measurement")
             self.btn_take_measurement.setStyleSheet(
@@ -2423,6 +2412,8 @@ class CameraMainWindow(QMainWindow):
         self._append_log(f"[SCAN FINALIZED] Scan cut at Step {stopped}. Next scan will start from Step 1.")
 
     def _on_scan_error(self, err_msg: str) -> None:
+        self._scan_preflight_failed = self.active_scan_task is not None and not self.active_scan_task.acquisition_started
+        self._hardware_state_unknown = self._hardware_state_unknown or getattr(self.camera, "state_unknown", False)
         self._scan_completed_successfully = False
         elapsed_s = self._finish_scan_segment()
         self._append_log(
@@ -2433,6 +2424,8 @@ class CameraMainWindow(QMainWindow):
         QMessageBox.warning(self, "Scan Execution Error", f"Scan error occurred:\n\n{err_msg}")
 
     def _on_scan_task_finished(self) -> None:
+        # A cancelled reader can discover a failed stop during final cleanup.
+        self._hardware_state_unknown = self._hardware_state_unknown or getattr(self.camera, "state_unknown", False)
         if self.active_scan_task is not None:
             self.active_scan_task.deleteLater()
             self.active_scan_task = None
@@ -2454,11 +2447,13 @@ class CameraMainWindow(QMainWindow):
             self.btn_cut_measurement.setVisible(False)
 
         self._set_ui_scanning_state(is_scanning=False)
+        if self._hardware_state_unknown:
+            self._configuration_controls(False)
 
         # If user closed window while scan was aborting, finish close now
         if self._closing:
             self.close()
-        elif self._resume_live_after_scan and self._scan_completed_successfully:
+        elif self._resume_live_after_scan and (self._scan_completed_successfully or self._scan_preflight_failed):
             self._resume_live_after_scan = False
             self._append_log("[LIVE] Resuming live view after measurement.")
             self._start_live()
@@ -2474,6 +2469,11 @@ class CameraMainWindow(QMainWindow):
         self._is_live_active = False
         self._resume_live_after_scan = False
         self._after_live_stopped = None
+        self._stop_generation += 1
+        self._exposure_change_pending = self._mode_change_pending = False
+        self._roi_change_pending = self._trigger_change_pending = False
+        self._resume_live_after_exposure = self._resume_live_after_mode = False
+        self._resume_live_after_roi = self._resume_live_after_trigger = False
 
         if self.active_scan_task is not None and self.active_scan_task.isRunning():
             self._closing = True
@@ -2517,7 +2517,11 @@ class CameraMainWindow(QMainWindow):
             event.ignore()
             return
 
-        if self.active_exposure_task is not None or self._exposure_change_pending:
+        if self.active_storage_task is not None:
+            self._closing = True
+            event.ignore()
+            return
+        if self.active_exposure_task is not None and self.active_exposure_task.isRunning():
             self._closing = True
             event.ignore()
             return

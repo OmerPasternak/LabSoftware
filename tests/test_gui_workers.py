@@ -357,8 +357,8 @@ def test_measurement_rejects_run_larger_than_free_space(qtbot, tmp_path, monkeyp
 
     window._toggle_measurement_scan()
 
-    assert window.active_scan_task is None
-    assert "only 0.9 GiB is free" in warnings[0]
+    qtbot.waitUntil(lambda: window.active_scan_task is None, timeout=5000)
+    assert "Insufficient storage" in warnings[0]
     assert not list(tmp_path.glob("*.h5"))
     camera.close()
 
@@ -708,3 +708,162 @@ def test_source_can_switch_after_stop_without_touching_real_hardware(qtbot, monk
     window.btn_stop.click()
     qtbot.waitUntil(lambda: window.active_live_task is None, timeout=4000)
     window.close()
+
+
+@pytest.mark.parametrize("value", [0, 65535, 1234])
+def test_constant_display_limits_share_one_ordered_interval(qtbot, value):
+    window = CameraMainWindow(); qtbot.addWidget(window)
+    pixels = np.full((16,64), value, dtype=np.uint16); before = pixels.copy()
+    try:
+        window._update_display(pixels); window._on_clim_auto_clicked()
+        expected = (window._clim_low, window._clim_high)
+        assert 0 <= expected[0] < expected[1] <= 65535
+        assert expected == (window.spn_clim_low.value(), window.spn_clim_high.value())
+        assert expected == window._image_artist.get_clim()
+        np.testing.assert_array_equal(pixels, before)
+    finally: window.close()
+
+
+def test_stop_invalidates_delayed_mode_resume(qtbot, monkeypatch):
+    from hhg_control.drivers.base_camera import ReadoutMode
+    window = CameraMainWindow(); qtbot.addWidget(window)
+    camera = MockPcoCamera(); camera.connect(); window.camera = camera; window.scan_manager.camera = camera
+    window._is_live_active = True
+    callbacks, intentions = [], []
+    monkeypatch.setattr(window, "_stop_live", lambda after_stop=None: callbacks.append(after_stop))
+    monkeypatch.setattr(window, "_start_mode_change", lambda mode, resume_live: intentions.append(resume_live))
+    try:
+        window._on_readout_mode_changed(window.cmb_readout_mode.findData(ReadoutMode.GLOBAL_SHUTTER))
+        window._on_stop_clicked()
+        callbacks[0]()
+        assert intentions == [False]
+    finally:
+        window._is_live_active = False; window._mode_change_pending = False; camera.close(); window.close()
+
+
+def test_saved_step_is_not_reported_unfinished_after_stop(qtbot, tmp_path):
+    from hhg_control.ui.camera.workers import ScanSequenceTask
+    manager = SimpleNamespace(get_roi=lambda: (0,0,64,16))
+    task = ScanSequenceTask(manager, "test", "delay", 0, 1, 2, 1)
+    def scan(**kwargs):
+        kwargs["on_step_start"](0,0)
+        yield 0, 0, tmp_path / "saved.h5", np.zeros((16,64), dtype=np.uint16)
+        task.request_abort()
+    manager.execute_scan = scan
+    aborted = []; task.scan_aborted.connect(lambda *args: aborted.append(args))
+    task.run()
+    assert aborted[0][0] == 1
+
+
+def test_activity_log_is_bounded(qtbot):
+    window = CameraMainWindow(); qtbot.addWidget(window)
+    try:
+        for index in range(2200): window._append_log(str(index))
+        assert window.txt_activity_log.document().blockCount() <= 2000
+        assert "2199" in window.txt_activity_log.toPlainText()
+    finally: window.close()
+
+
+@pytest.mark.parametrize('transition',['exposure_close','stop_measurement'])
+def test_event_gated_live_handoff_releases_ownership(qtbot,tmp_path,monkeypatch,transition):
+    import threading
+    class TinyMock(MockPcoCamera): WIDTH,HEIGHT=64,32
+    camera=TinyMock(); camera.connect()
+    entered,release=threading.Event(),threading.Event()
+    original=camera.acquire_live_frame
+    def blocked(*args,**kwargs):
+        entered.set(); assert release.wait(5)
+        return original(*args,**kwargs)
+    camera.acquire_live_frame=blocked
+    window=CameraMainWindow();qtbot.addWidget(window)
+    window.camera=camera;window.scan_manager=CameraScanManager(camera,tmp_path)
+    window.txt_storage_dir.setText(str(tmp_path))
+    window.spn_roi_x0.setValue(0);window.spn_roi_y0.setValue(0)
+    window.spn_roi_x1.setValue(64);window.spn_roi_y1.setValue(32)
+    window.spn_frames.setValue(2);window.spn_num_steps.setValue(1)
+    warnings=[];monkeypatch.setattr(camera_panel.QMessageBox,'warning',lambda *args:warnings.append(args[-1]))
+    try:
+        window._start_live();qtbot.waitUntil(entered.is_set,timeout=3000)
+        if transition=='exposure_close':
+            window._on_exposure_changed(12)
+            assert window._exposure_change_pending
+            window.close();release.set()
+            qtbot.waitUntil(lambda:window._close_disconnect_done,timeout=5000)
+            assert not window._exposure_change_pending and not camera.is_connected
+        else:
+            window._on_stop_clicked();window._toggle_measurement_scan()
+            assert window.active_scan_task is None and window.scan_manager.state=='LIVE'
+            release.set()
+            qtbot.waitUntil(lambda:window.active_live_task is None and window.active_scan_task is None and bool(list(tmp_path.glob('*.h5'))),timeout=15000)
+            assert not warnings and not window._is_live_active
+    finally:
+        release.set()
+        if window.active_live_task is not None:
+            window.active_live_task.stop(); qtbot.waitUntil(lambda:window.active_live_task is None,timeout=5000)
+        if window.active_scan_task is not None:
+            window.active_scan_task.request_abort();qtbot.waitUntil(lambda:window.active_scan_task is None,timeout=15000)
+        window.close()
+        qtbot.waitUntil(lambda:not camera.is_connected,timeout=5000)
+
+
+def test_sampled_metrics_are_labeled_and_saturation_remains_exact(qtbot):
+    window=CameraMainWindow();qtbot.addWidget(window)
+    pixels=np.zeros((800,800),dtype=np.uint16);pixels[:,1::2]=1000;pixels[1,1]=65535
+    try:
+        window._update_display(pixels)
+        text=window.lbl_intensity_metrics.text()
+        assert 'Minimum (sampled)' in text and 'Mean (sampled)' in text
+        assert '65,535' in text and 'SATURATION' in text
+        assert pixels[1,1]==65535
+    finally:window.close()
+
+
+@pytest.mark.parametrize('changed',['unchanged','exposure','trigger','mode','roi','source','frames','grid','output'])
+def test_paused_run_identity_tracks_acquisition_contract(qtbot,tmp_path,monkeypatch,changed):
+    from hhg_control.drivers.base_camera import ReadoutMode
+    class Signal:
+        def connect(self,*args):pass
+    class Task:
+        def __init__(self,**kwargs):
+            self.arguments=kwargs
+            for name in ('step_started','step_completed','scan_finished','scan_aborted','error_occurred','finished'):
+                setattr(self,name,Signal())
+        def start(self):pass
+    camera=MockPcoCamera();camera.connect();camera.set_roi((0,0,64,16))
+    window=CameraMainWindow();qtbot.addWidget(window);window.camera=camera
+    window.scan_manager=CameraScanManager(camera,tmp_path);window._connected_source='simulated'
+    window.txt_storage_dir.setText(str(tmp_path));window.spn_num_steps.setValue(3)
+    for spin,value in ((window.spn_roi_x0,0),(window.spn_roi_y0,0),(window.spn_roi_x1,64),(window.spn_roi_y1,16)):
+        spin.setValue(value)
+    window._paused_step=1;window._paused_run_id='previous';window._run_fingerprint=window._measurement_fingerprint()
+    if changed=='exposure':camera._exposure_time_s=.02
+    if changed=='trigger':
+        camera._trigger_mode=TriggerMode.EXTERNAL_EXPOSURE_START
+        window.chk_external_trigger.blockSignals(True);window.chk_external_trigger.setChecked(True);window.chk_external_trigger.blockSignals(False)
+    if changed=='mode':camera._readout_mode=ReadoutMode.GLOBAL_SHUTTER
+    if changed=='roi':
+        camera.set_roi((0,16,64,32));window.spn_roi_y0.setValue(16);window.spn_roi_y1.setValue(32)
+    if changed=='source':window._connected_source='physical'
+    if changed=='frames':window.spn_frames.setValue(window.spn_frames.value()+1)
+    if changed=='grid':window.spn_start_val.setValue(window.spn_start_val.value()+1)
+    if changed=='output':window.txt_storage_dir.setText(str(tmp_path/'other'))
+    monkeypatch.setattr(camera_panel,'ScanSequenceTask',Task)
+    try:
+        window._toggle_measurement_scan();args=window.active_scan_task.arguments
+        assert args['start_step']==(1 if changed=='unchanged' else 0)
+        assert (args['run_id']=='previous')==(changed=='unchanged')
+        assert not window.txt_storage_dir.isEnabled()
+    finally:
+        window.active_scan_task=None;camera.close();window.close()
+
+
+
+def test_cancelled_scan_cleanup_also_locks_unknown_camera_controls(qtbot):
+    window=CameraMainWindow();qtbot.addWidget(window)
+    window.camera.state_unknown=True
+    try:
+        window._on_scan_task_finished()
+        assert window._hardware_state_unknown
+        assert not window.btn_go.isEnabled() and not window.btn_take_measurement.isEnabled()
+    finally:
+        window._hardware_state_unknown=False;window.camera.state_unknown=False;window.close()
