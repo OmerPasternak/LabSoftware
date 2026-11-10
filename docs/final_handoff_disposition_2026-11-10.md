@@ -1,6 +1,6 @@
 # Final handoff implementation disposition — 2026-11-10
 
-42 findings implemented; F02 confirmed and deferred for specialized recovery work. A passing suite is not a claim that F02 or physical/scientific acceptance is resolved.
+All 43 confirmed findings are implemented and validated offline. F02 recovery and the exact default clean-export validation are complete. Physical/scientific acceptance remains separate.
 
 ## Scope and preservation
 
@@ -15,7 +15,7 @@
 | ID | Disposition | Changed owning files | Resulting behavior | Regression evidence |
 |---|---|---|---|---|
 | F01 | Fixed | camera/drivers/pco_edge.py | Whole-stack and FIFO share strict pixel/shape/recorder-ID validation; no uint16 cast or replacement IDs. | test_whole_stack_preserves_sdk_payload_or_rejects; existing FIFO gap/overflow/shape tests |
-| F02 | Deferred (confirmed) | camera/drivers/pco_edge.py; camera/sequencer/capture_pipeline.py; camera/sequencer/scan_manager.py; scripts/complete_pipeline_trial.py | Terminal errors still can strand retrieved batches. No partial repair or success claim. Specialist recovery design is required. | f02_probe.json: retrieved=2, delivered=0, queued_batches=2, reader stopped |
+| F02 | Fixed | camera/payload.py; camera/drivers/base_camera.py and pco_edge.py; camera/sequencer/recovery.py, capture_pipeline.py, scan_manager.py; diagnostic wrappers | Stop/join SDK ownership, preserve every unhanded/queued/uncertain payload in incomplete lossless sidecars, retain malformed dtype/shape/metadata, preserve unassigned continuous tails, and retain failed recovery writes on the original manager for retry. | test_acquisition_recovery.py: terminal/hash/after-yield/abort/full-queue/writer-half-pair/SDK-local/malformed/tail/retry/final-flush/instrumentation cases with independent byte/ID oracles; diagnostic no-discard regression |
 | F03 | Fixed | camera/drivers/pco_edge.py; gui/camera/camera_panel.py | Failed recorder stop latches unknown state, retains acquisition/cleanup detail, and blocks every acquisition entrypoint until close/reconnect; GUI reflects lockout. | test_failed_stop_locks_all_acquisition_until_reconnect; GUI safety suite |
 | F04 | Fixed | gui/camera/camera_panel.py | STOP generations invalidate delayed mode/trigger resume intentions; running configurations lose their resume flags. | test_stop_invalidates_delayed_mode_resume; existing STOP handoff tests |
 | F05 | Fixed | gui/camera/workers.py | Next unfinished step advances before completed-step delivery; STOP after final capture finishes rather than resuming a saved step. | test_saved_step_is_not_reported_unfinished_after_stop; existing resume/continuous tests |
@@ -38,7 +38,7 @@
 | F22 | Fixed | scripts/external_trigger_trial.py | Convert trigger/exposure edge lists once before pairing; preserve eligibility, duplicate and censoring semantics. | test_scope_pairing_searches_one_converted_array; existing scope-boundary/pairing tests |
 | F23 | Fixed | scripts/capture_diagnostics.py | Queue diagnostic takes one final preview copy, matching production. | test_queue_diagnostic_copies_only_final_preview; existing reusable-buffer checks |
 | F24 | Fixed | scripts/pco_filemode_trial.py | Recorder supervision uses exposure/readout-aware total bound and explicit no-progress deadline, separate from throughput acceptance. Production caller supplies configured exposure. | test_native_recorder_supervision_accounts_for_exposure: 2000x0.1-s progression succeeds below reference FPS; hung recorder stops near 10 s |
-| F25 | Fixed, host I/O scope | scripts/lab_computer_acceptance.py; benchmark_capture_pipeline.py; storage_diagnostics.py; stress_camera_storage.py; pco_filemode_trial.py; rolling/complete trials; safe_io.py; diagnostic test helpers | Extended paths applied at host create/write/stat/sync/HDF5/rename/PNG/report boundaries; readable report paths retained. Vendor recorder path support remains separate. | short default suite plus dedicated long-path production/diagnostic suite; see validation results below |
+| F25 | Fixed, host I/O scope | scripts/lab_computer_acceptance.py; benchmark_capture_pipeline.py; storage_diagnostics.py; stress_camera_storage.py; pco_filemode_trial.py; rolling/complete/external trials; safe_io.py; diagnostic test helpers | Extended paths applied at host create/write/stat/sync/HDF5/rename/PNG/report boundaries; readable report paths retained. Vendor recorder path support remains separate. | short default suite plus dedicated long-path production/diagnostic suite; see validation results below |
 | F26 | Fixed | pyproject.toml | Explicit offline roots and generated-directory exclusions prevent old exported checkouts under data from being discovered. No unknown data removed. | default pytest in existing workspace containing generated exports; clean-export default validation |
 | F27 | Fixed | tc_motor/tests/test_motor_launcher.py | Detached result wait requires valid complete JSON or nonempty text and fails boundedly with last read/parse error. | test_detached_result_waits_for_complete_json (event-gated publication); real harmless BAT/VBS stub tests |
 | F28 | Fixed validation gap | scripts/validate_installed_package.py; pyproject.toml | Separate clean-export wheel build/install into isolated test-dependency venv; empty cwd, no PYTHONPATH, no SDK; aliases, resources and three entrypoints checked. Motor test packages excluded from distribution. | installed-wheel smoke: 77 resource hashes, three disconnected offscreen entrypoints, compatibility identities, no pco installed |
@@ -68,34 +68,46 @@
 - Serial `timeout_ms` now means receive budget after at most 60 ms of compatibility pacing. Motion deadlines still encompass status/preflight/pacing and reject late dispatch.
 - Native-file recorder supervision allows three times the exposure/readout period plus five seconds (minimum ten-second total/stall bounds). Throughput acceptance remains separate.
 
-## F02 specialist continuation
+## F02 completion
 
-The retained `f02_probe.py`/`f02_probe.json` confirms a reader that returns two valid frames and then fails its terminal check leaves `frames_retrieved=2`, `frames_delivered=0`, `queued_batches_after_failure=2`, with the reader stopped. The current eager error path remains. Driver-local FIFO partial lists, abort-before-queue batches, writer failure queues and diagnostic discard cleanup also need coordinated ownership/recovery treatment.
+The former two-frame reproduction is now covered by a deterministic regression:
+reader-queued/dequeued pixels survive a terminal check or source-hashing failure.
+Driver-local valid prefixes and malformed returns, writer queues and partial
+pairs, and diagnostic queues are also preserved. Normal acquisition files retain
+the existing schema; separate recovery files are permanently incomplete and do
+not attribute read-ahead to another setpoint. Unavailable recovery storage keeps
+payloads on the original manager and blocks new acquisition until explicit retry.
+See `docs/acquisition_recovery.md` for the file format and retry contract.
 
-Implement a single recovery contract across those boundaries: stop new SDK reads, drain/persist already returned valid payloads as incomplete evidence, retain malformed payloads separately with original dtype/shape/metadata, and report acquisition plus cleanup/write errors. Continuous-recording read-ahead must never be attributed to another setpoint. Recovery must remain byte-bounded, avoid deadlocking a full queue during stop, and never terminate a hardware-owning thread or mark a failed run complete. Use deterministic gates before/after yields and final checks, queue-full/writer-failure tests and byte/ID recovery oracles. This is intentionally left as one coupled change rather than a partial drain that can still lose evidence.
+## Final validation
 
-## Validation and limits
-
-Final results are listed below. Local checkpoint IDs are retained in `data/test_artifacts/final_handoff_baseline/commits.json`; the final review ref is `codex/final-handoff-fixes-20261110`. Detailed logs, source hashes, probe output, isolated installs and synthetic files are retained under `data/test_artifacts/`; they are excluded from source discovery and deployment artifacts.
-
-- Python 3.12 and MATLAB R2026b available. PATH refreshed from Machine/User before test runs. Python 3.10/3.11 were not installed and are unverified.
-- Focused batches passed before final refinements: raw/production/streaming/maps 104; scientific/motor 83; combined analysis/MATLAB/diagnostics 104 passes with two test-only follow-ups subsequently corrected; final focused scientific checks 21. Final whole-state results supersede these intermediate runs.
-- Installed-package validation is separate from source tests. It uses pip's isolated build environment, a new venv with only wheel/test dependencies, empty cwd, removed PYTHONPATH, missing optional SDK, 77 runtime-resource hashes and three automatic offscreen GUI exits. Source-control dotfiles are excluded from runtime-resource expectations.
-- Host long-path checks do not certify the vendor SDK recorder's own path support. Safe cancellation of an OS/HDF5 call that never returns remains an architectural limitation; workers are not forcibly terminated.
-- Event-gated tests cover identified transition windows, but do not exhaust every possible scheduler interleaving. Scientific acceptance on representative lab recordings, physical timing, trigger acceptance and camera/motor hardware recovery remain unverified.
-
-## Final checkpoint validation
-
-| Check | Observed result | Evidence |
+| Check | Result | Evidence under `data/test_artifacts/final_handoff_baseline/` |
 |---|---|---|
-| Working-tree default offline suite | 508 passed in 180.84 s before the final CLI/control-lock regressions | `data/test_artifacts/final_handoff_baseline/validated_full.log` |
-| Final independent/CLI focused suite | 22 passed in 0.91 s | `final_cli.log` in the same directory |
-| Final GUI/production/MATLAB acceptance batch | 88 passed in 85.93 s before the last control-lock assertion; that assertion is included in the 510-case final run | `final_acceptance.log` |
-| Final exported-source suite in isolated declared-dependency venv | 510 passed in 159.19 s; explicit test roots, `-c` exported pyproject and explicit short basetemp | `isolated_source_initial.log` |
-| Long Windows host paths | 143 passed in 51.21 s; longest generated file path 446 characters | `validated_long.log` and `validated_long.json` |
-| Final installed wheel | PASS; 77 runtime resource hashes, three entrypoint launches, aliases, no optional camera SDK, empty cwd/PYTHONPATH removed | `installed_verified.log`; `data/test_artifacts/package_verified/result.json` and `commands.log` |
-| Original user branch/index | HEAD remains `f4425b4...`; original index byte-for-byte preserved through alternate-index checkpoint creation | `initial.index`, `staged.patch`, final checkpoint check |
+| Working-tree default offline suite | **534 passed**, 236.08 s, Python 3.12 / MATLAB R2026b; before the last three long-path helper/boundary files, which are included in the final clean run below | `f02_full_default.log` |
+| Final clean-export default command | **534 passed**, 189.37 s; exact `python -m pytest -q` from the clean source export, default roots/cache/basetemp; isolated declared runtime/test dependencies; PYTHONPATH removed, optional SDK absent | `f02_clean_default_final.log` |
+| Core recovery/integrity regressions | **140 passed**; final instrumentation/context refinements included in both complete suites | `f02_final_focused.log` |
+| Long Windows paths | **167 passed**, 68.33 s; real filenames up to **444 characters**, plus **12 passed**, 2.12 s, for the final external-trigger/stress boundaries and helpers | `f02_long.log`, `f02_long.json`, `f02_external_long.log` |
+| Installed wheel | PASS: **77 resource hashes**, compatibility aliases and **three disconnected offscreen entrypoint launches**, empty cwd, no source PYTHONPATH or pco SDK | `f02_installed.log`; `data/test_artifacts/package_complete/result.json` and `commands.log` |
+| Final code/export identity | Every proposed Python/MATLAB/configuration file matched the clean export used for the final suite | final export/checkpoint verification |
+| Original work/index | Original branch and HEAD remain `codex/smc100-motor-control` / `f4425b4b1faeb131b2a9fdb002cf64209556119c`; original index and staged patch remain byte-for-byte unchanged | `initial.index`, `staged.patch`, `completion_verified.json` |
 
-At the user's wrap-up cutoff, **the unmodified default pytest command from the clean export has not been run**. The 510-case isolated run used explicit roots and a temporary-directory override. Do not relabel it as default clean-checkout/CI validation. The exact remaining command is in `docs/final_handoff_next_agent_2026-11-10.md`.
+The final clean run exposed two remaining long-path test-helper failures. Their
+integrity assertions were retained and routed through `filesystem_path`; the
+external-trigger diagnostic's remaining host boundaries were also covered.
+Nothing was skipped or deleted to obtain a passing default suite.
 
-No further code changes were made after the final 510-case exported-source run. F02 remains confirmed and unimplemented. No physical acceptance or remote CI result is claimed.
+All final fixes are stored in local review history on
+`codex/final-handoff-fixes-20261110`, above the preservation snapshot and six
+original fix batches. Exact commit IDs are in `commits.json`. The final runtime
+code matches the isolated installed wheel. The final source export additionally
+contains the last diagnostic/test-helper boundary corrections; only completion
+documentation changed afterwards.
+
+## Remaining validation limits
+
+- Python 3.10/3.11 were not installed; those workflow versions remain unverified.
+- No physical hardware was operated, no push was performed and no remote CI result is claimed.
+- Sensor cadence, external-trigger acceptance, vendor recorder path support and representative lab-data scientific acceptance still need physical/scientific review.
+- If storage cannot accept recovery writes, buffers remain in RAM with an explicit error and acquisition lockout; they cannot be made durable until storage is available. A stuck OS/HDF5 call is not forcibly terminated.
+
+These are explicit validation/operating limits. **No F01–F43 implementation remains deferred.**

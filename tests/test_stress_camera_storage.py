@@ -1,6 +1,7 @@
 from pathlib import Path
 """Check that the offline storage benchmark exercises and verifies each format."""
 
+from hhg_control.safe_io import filesystem_path
 from scripts.stress_camera_storage import CASES, ReplayCamera, run_case
 
 
@@ -16,6 +17,6 @@ def test_storage_stress_cases_write_expected_frames_and_retain_labelled_data(tmp
             assert result["elapsed_s"] >= result["acquire_s"] >= 0
             assert result["file_count"] == (5 if case == "raw_per_frame" else 0 if case == "discard" else 1)
             assert Path(result["data_directory"]).name.startswith("BENCHMARK_ONLY_")
-            assert all(Path(item).exists() and Path(item).name.startswith("BENCHMARK_ONLY_") for item in result["retained_files"])
+            assert all(filesystem_path(Path(item)).exists() and Path(item).name.startswith("BENCHMARK_ONLY_") for item in result["retained_files"])
     finally:
         camera.close()
