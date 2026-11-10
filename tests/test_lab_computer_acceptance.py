@@ -1,5 +1,6 @@
 """Exercise the section runner without hardware or large acquisition files."""
 
+from hhg_control.safe_io import filesystem_path
 from dataclasses import replace
 import json
 from pathlib import Path
@@ -49,14 +50,14 @@ def test_sections_use_production_writer_and_preserve_copy_hashes(config, capsys)
     short = lab.execute(3, config)
     output = capsys.readouterr().out
     assert output == ""
-    log = Path(short["log_file"]).read_text(encoding="utf-8")
+    log = filesystem_path(Path(short["log_file"])).read_text(encoding="utf-8")
     assert "Status: EXECUTED" in log
     assert short["important_metrics"]["decision"] == "AUTOMATED_CHECKS_PASS"
     assert len(short["important_metrics"]["runs"]) == 2
     first_timing = short["important_metrics"]["runs"][0]["pipeline_stage_timing_s"]
     assert first_timing["hdf5_batch_write_s"] > 0
     assert short["important_metrics"]["runs"][0]["final_os_fsync_s"] >= 0
-    saved_report = json.loads(Path(short["important_metrics"]["report_file"]).read_text())
+    saved_report = json.loads(filesystem_path(Path(short["important_metrics"]["report_file"])).read_text())
     assert saved_report["important_metrics"] == lab.compact_section_report(short)["important_metrics"]
     assert "result" not in saved_report
     assert len(json.dumps(saved_report)) < 0.6 * len(json.dumps(short, default=lab.json_default))
@@ -65,14 +66,14 @@ def test_sections_use_production_writer_and_preserve_copy_hashes(config, capsys)
     report = lab.section_7(config)
     source = report["files"][0]
     copy = config.output_dir / "copy.h5"
-    shutil.copyfile(source["file"], copy)
+    shutil.copyfile(filesystem_path(source["file"]), filesystem_path(copy))
     comparison = lab.section_7(replace(config, data_files=(source["file"], copy)))
     assert comparison["copy_comparison"]["byte_for_byte_match"]
     assert comparison["files"][0]["file_sha256"] == comparison["files"][1]["file_sha256"]
     copied = lab.inspect_file(copy, full_read=True)
     assert source["pixel_sha256"] == copied["pixel_sha256"]
     assert source["metadata_sha256"] == copied["metadata_sha256"]
-    with h5py.File(copy, "r+") as h5:
+    with h5py.File(filesystem_path(copy), "r+") as h5:
         item = json.loads(h5["frame_metadata/json"][1])
         item["frame_id"] += 1
         h5["frame_metadata/json"][1] = json.dumps(item)
@@ -92,8 +93,8 @@ def test_quiet_section_failure_is_saved_without_notebook_output(config, monkeypa
     assert report["status"] == "FAILED"
     assert "simulated section failure" in report["error"]
     report_file = Path(report["important_metrics"]["report_file"])
-    assert json.loads(report_file.read_text(encoding="utf-8"))["status"] == "FAILED"
-    assert "progress before failure" in Path(report["log_file"]).read_text(encoding="utf-8")
+    assert json.loads(filesystem_path(report_file).read_text(encoding="utf-8"))["status"] == "FAILED"
+    assert "progress before failure" in filesystem_path(Path(report["log_file"])).read_text(encoding="utf-8")
 
 
 def test_quiet_section_interrupt_still_propagates(config, monkeypatch):
@@ -135,7 +136,7 @@ def test_section_3_review_saves_first_middle_and_last_frames(config, monkeypatch
     try:
         image_axes = [axis for axis in figure.axes if axis.images]
         assert shown == []
-        assert Path(report["review_image"]).is_file()
+        assert filesystem_path(Path(report["review_image"])).is_file()
         assert len(image_axes) == 6
         assert "frame 1/3" in image_axes[0].get_title()
         assert "frame 2/3" in image_axes[1].get_title()
@@ -150,8 +151,8 @@ def test_section_3_review_saves_first_middle_and_last_frames(config, monkeypatch
 def test_copy_pixel_change_fails_even_with_valid_frame_ids(config):
     source = lab.section_3(config)["runs"][0]["file"]
     copy = config.output_dir / "copy.h5"
-    shutil.copyfile(source, copy)
-    with h5py.File(copy, "r+") as h5:
+    shutil.copyfile(filesystem_path(source), filesystem_path(copy))
+    with h5py.File(filesystem_path(copy), "r+") as h5:
         frame = h5["images"][0]
         frame[0, 0] += 1
         h5["images"][0] = frame
@@ -183,7 +184,7 @@ def test_offline_failure_is_recorded_and_storage_still_runs(config, monkeypatch)
     assert result["offline_tests"]["passed"] is False
     assert result["readiness_passed"] is False
     assert "unpaced_writer" in result and "paced_writer" in result
-    assert "1 failed" in (config.output_dir / Path(result["offline_tests"]["log"]).name).read_text()
+    assert "1 failed" in (filesystem_path(config.output_dir / Path(result["offline_tests"]["log"]).name)).read_text()
 
 
 def test_section_1_continues_when_git_is_not_on_path(config, monkeypatch):
@@ -222,7 +223,7 @@ def test_failure_reports_and_budget_gate(config):
         lab.execute(3, tiny_budget)
     reports = list(config.output_dir.glob("section_3_*.json"))
     assert len(reports) == 1
-    assert json.loads(reports[0].read_text())["status"] == "FAILED"
+    assert json.loads(filesystem_path(reports[0]).read_text())["status"] == "FAILED"
     assert not list(config.output_dir.glob("*.h5"))
 
 
@@ -260,7 +261,7 @@ def test_camera_exposure_readback_accepts_one_microsecond_quantization(config, m
 
 
 def test_notebook_setup_and_cells_are_executable():
-    notebook = json.loads((lab.ROOT / "application tests/lab_computer_acceptance.ipynb").read_text(encoding="utf-8"))
+    notebook = json.loads((filesystem_path(lab.ROOT / "application tests/lab_computer_acceptance.ipynb")).read_text(encoding="utf-8"))
     code_cells = ["".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "code"]
     assert len(code_cells) == 17  # Setup, sections 1-8, 4B-4H and optional 4H scope analysis.
     assert any("run_hdf5_pixel_verification_trial(" in source for source in code_cells)
@@ -322,7 +323,7 @@ def test_terminal_runs_only_requested_section_and_deferred_trigger(config):
     assert run.returncode == 0, run.stderr
     reports = list(config.output_dir.glob("section_*.json"))
     assert len(reports) == 1
-    assert json.loads(reports[0].read_text())["important_metrics"]["decision"] == "DEFERRED"
+    assert json.loads(filesystem_path(reports[0]).read_text())["important_metrics"]["decision"] == "DEFERRED"
     help_run = subprocess.run([sys.executable, script], capture_output=True, text=True)
     assert help_run.returncode == 0 and "--section" in help_run.stdout
 

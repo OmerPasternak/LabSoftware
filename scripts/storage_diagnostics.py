@@ -66,7 +66,7 @@ class _WindowManager(CameraScanManager):
     def _unique_filepath(self, *args, **kwargs):
         path = super()._unique_filepath(*args, **kwargs)
         path = path.with_name(f"{path.stem}_{self.window_tag}{path.suffix}")
-        if path.exists() or path.with_suffix(".h5.partial").exists():
+        if filesystem_path(path).exists() or filesystem_path(path.with_suffix(".h5.partial")).exists():
             raise FileExistsError(f"Tagged diagnostic output already exists: {path}")
         return path
 
@@ -200,7 +200,7 @@ def _report(section: str, cfg: lab.Settings, destinations: dict[str, Path], oper
     """Save results and a progress log silently, including ordinary failures."""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
     destination = next(iter(destinations.values()))
-    destination.mkdir(parents=True, exist_ok=True)
+    filesystem_path(destination).mkdir(parents=True, exist_ok=True)
     suffix = f"_{tag}" if tag else ""
     folder_name = f"BENCHMARK_ONLY_section_{section}_{stamp}{suffix}"
     report_path = destination / f"section_{section}_{stamp}{suffix}.json"
@@ -210,7 +210,7 @@ def _report(section: str, cfg: lab.Settings, destinations: dict[str, Path], oper
               "settings": asdict(cfg), "report_file": str(report_path),
               "execution_log": str(log_path), "drives": {}, "physical_acceptance": False}
     interrupted = None
-    with log_path.open("w", encoding="utf-8") as log, redirect_stdout(log):
+    with filesystem_path(log_path).open("w", encoding="utf-8") as log, redirect_stdout(log):
         try:
             operation(report, folder_name)
             report["status"] = "EXECUTED"
@@ -221,7 +221,7 @@ def _report(section: str, cfg: lab.Settings, destinations: dict[str, Path], oper
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 interrupted = exc
         finally:
-            report_path.write_text(json.dumps(_analysis_report(report), indent=1, default=lab.json_default),
+            filesystem_path(report_path).write_text(json.dumps(_analysis_report(report), indent=1, default=lab.json_default),
                                    encoding="utf-8")
     if interrupted is not None:
         raise interrupted
@@ -244,7 +244,7 @@ def _preflight(cfg, destinations, frames_per_drive, files_per_drive, cap_gb, *, 
         lab.prepare(replace(cfg, output_dir=destination,
                             max_section_raw_gb=max(cfg.max_section_raw_gb, cap_gb) if approved_stage else cfg.max_section_raw_gb),
                     frames_per_drive)
-        free[label] = shutil.disk_usage(destination).free
+        free[label] = shutil.disk_usage(filesystem_path(destination)).free
         if free[label] < 1.5 * (raw + reserve) + 100_000_000:
             raise OSError(f"Not enough free space for all retained outputs on {label}")
     return frame_bytes, raw, free
@@ -276,7 +276,7 @@ def stage_profile(drive, d_stage_gb=20):
 
 def _measure_output(drive_report, folder: Path, cap_gb: float):
     """Measure only this diagnostic's retained files, never existing research data."""
-    size = sum(path.stat().st_size for path in filesystem_path(folder).rglob("*") if path.is_file())
+    size = sum(filesystem_path(path).stat().st_size for path in filesystem_path(folder).rglob("*") if filesystem_path(path).is_file())
     drive_report.update(output_bytes=size, output_GB=size / 1e9,
                         within_output_cap=size <= cap_gb * 1e9)
     if not drive_report["within_output_cap"]:
@@ -345,7 +345,7 @@ def run_batch_size_trial(
                                    "Larger batches also change the time between the writer's 32-batch HDF5 flushes."])
         for label, destination in destinations.items():
             folder = destination / folder_name
-            folder.mkdir(parents=True, exist_ok=True)
+            filesystem_path(folder).mkdir(parents=True, exist_ok=True)
             drive = {"output_directory": str(folder), "free_GB_before": free[label] / 1e9,
                      "runs": [], "diagnostics": [], "stage_output_budget_GB": cap,
                      "planned_raw_GB": raw / 1e9}
@@ -484,8 +484,8 @@ class _PixelReferenceCamera:
 def _write_pixel_manifest(path: Path, manifest: dict) -> None:
     """Write and fsync pixel references even past Windows' legacy path limit."""
     target = filesystem_path(path)
-    target.write_text(json.dumps(manifest, separators=(",", ":")), encoding="utf-8")
-    with target.open("r+b", buffering=0) as handle:
+    filesystem_path(target).write_text(json.dumps(manifest, separators=(",", ":")), encoding="utf-8")
+    with filesystem_path(target).open("r+b", buffering=0) as handle:
         os.fsync(handle.fileno())
 
 
@@ -597,7 +597,7 @@ def run_hdf5_pixel_verification_trial(
         for label, destination in destinations.items():
             began = time.perf_counter()
             folder = destination / folder_name
-            folder.mkdir(parents=True, exist_ok=False)
+            filesystem_path(folder).mkdir(parents=True, exist_ok=False)
             drive = {"output_directory": str(folder), "free_GB_before": free[label] / 1e9}
             report["drives"][label] = drive
             run_cfg = replace(cfg, output_dir=folder)
@@ -652,7 +652,7 @@ def _sync_paths(paths):
     """Request OS durability for each closed or explicitly flushed diagnostic file."""
     started = time.perf_counter()
     for path in paths:
-        with path.open("r+b", buffering=0) as handle:
+        with filesystem_path(path).open("r+b", buffering=0) as handle:
             os.fsync(handle.fileno())
     return time.perf_counter() - started
 
@@ -662,7 +662,7 @@ def _verify_control(path, metadata_path, kind, bank, frames, expected_digest):
     started = time.perf_counter()
     digest = hashlib.sha256()
     if kind == "hdf5":
-        with h5py.File(path, "r") as h5:
+        with h5py.File(filesystem_path(path), "r") as h5:
             if (h5["images"].shape != (frames, *bank.shape[1:]) or
                     h5["images"].dtype != np.dtype("<u2") or not h5.attrs["complete"] or
                     int(h5.attrs["frames_written"]) != frames or
@@ -677,9 +677,9 @@ def _verify_control(path, metadata_path, kind, bank, frames, expected_digest):
                 if rows != _metadata(start, len(expected)):
                     raise AssertionError("HDF5 metadata differs")
     else:
-        if path.stat().st_size != frames * bank.shape[1] * bank.shape[2] * 2:
+        if filesystem_path(path).stat().st_size != frames * bank.shape[1] * bank.shape[2] * 2:
             raise AssertionError("BIN size differs from its manifest")
-        with path.open("rb") as handle, metadata_path.open(encoding="utf-8") as metadata:
+        with filesystem_path(path).open("rb") as handle, filesystem_path(metadata_path).open(encoding="utf-8") as metadata:
             for start, expected in _blocks(bank, frames):
                 data = handle.read(expected.nbytes)
                 actual = np.frombuffer(data, dtype="<u2").reshape(expected.shape)
@@ -704,7 +704,7 @@ def _write_control(folder, kind, bank, frames, expected_digest, sync_every_bytes
     carries identical JSON metadata in a sidecar. This isolates storage I/O,
     and does not reproduce the production asynchronous capture/queue pipeline.
     """
-    folder.mkdir(parents=True, exist_ok=False)
+    filesystem_path(folder).mkdir(parents=True, exist_ok=False)
     suffix = f"_{window_tag}" if window_tag else ""
     path = folder / f"BENCHMARK_ONLY_frames{suffix}.{'h5' if kind == 'hdf5' else 'bin'}"
     metadata_path = folder / f"frame_metadata{suffix}.jsonl"
@@ -727,7 +727,7 @@ def _write_control(folder, kind, bank, frames, expected_digest, sync_every_bytes
 
     if kind == "hdf5":
         writer = CameraScanManager(lab.MockPcoCamera(), folder)
-        with h5py.File(partial, "x") as h5:
+        with h5py.File(filesystem_path(partial), "x") as h5:
             h5.attrs.update(schema_version="diagnostic-1.0", source="synthetic",
                             complete=False, frames_written=0, storage_compression="none")
             if window_tag is not None:
@@ -750,7 +750,7 @@ def _write_control(folder, kind, bank, frames, expected_digest, sync_every_bytes
             h5.attrs.update(complete=True, frames_written=written)
             h5.flush()
     else:
-        with partial.open("xb", buffering=0) as binary, metadata_path.open("x", encoding="utf-8", newline="\n") as metadata:
+        with filesystem_path(partial).open("xb", buffering=0) as binary, filesystem_path(metadata_path).open("x", encoding="utf-8", newline="\n") as metadata:
             for number, (start, block) in enumerate(_blocks(bank, frames), 1):
                 data = memoryview(block).cast("B")
                 while data:
@@ -765,7 +765,7 @@ def _write_control(folder, kind, bank, frames, expected_digest, sync_every_bytes
                 checkpoint(metadata.flush)
                 progress.add(time.perf_counter() - started, written, written * frame_bytes)
             metadata.flush()
-    partial.rename(path)
+    filesystem_path(partial).rename(filesystem_path(path))
     close_s = time.perf_counter() - started
     final_sync_s = _sync_paths(paths)
     durable_s = time.perf_counter() - started
@@ -774,7 +774,7 @@ def _write_control(folder, kind, bank, frames, expected_digest, sync_every_bytes
     checked = _verify_control(path, metadata_path, kind, bank, frames, expected_digest)
     return {"format": kind, "file": str(path), "metadata_file": str(metadata_path) if kind == "bin" else None,
             "frames": frames, "raw_bytes": frames * frame_bytes,
-            "output_bytes": sum(item.stat().st_size for item in paths),
+            "output_bytes": sum(filesystem_path(item).stat().st_size for item in paths),
             "write_close_s": close_s, "durable_s": durable_s,
             "write_close_raw_MB_per_s": frames * frame_bytes / 1e6 / close_s,
             "durable_raw_MB_per_s": frames * frame_bytes / 1e6 / durable_s,
@@ -850,11 +850,11 @@ def run_bin_hdf5_trial(
         if reserved_total > cap * 1e9:
             raise ValueError("Combined windows plus metadata reserve exceed the total per-drive cap")
         for label, destination in destinations.items():
-            free = shutil.disk_usage(destination).free
+            free = shutil.disk_usage(filesystem_path(destination)).free
             if free < 1.5 * reserved_total + 100_000_000:
                 raise OSError(f"Not enough free space for all windows on {label}")
             folder = destination / folder_name
-            folder.mkdir(parents=True, exist_ok=False)
+            filesystem_path(folder).mkdir(parents=True, exist_ok=False)
             report["drives"][label] = {"output_directory": str(folder), "free_GB_before": free / 1e9,
                                         "runs": [], "stage_output_budget_GB": cap,
                                         "planned_raw_GB": raw_total / 1e9}

@@ -1,3 +1,4 @@
+from hhg_control.safe_io import filesystem_path
 from pathlib import Path
 import time
 from types import SimpleNamespace
@@ -24,7 +25,7 @@ def test_paced_pipeline_writes_consecutive_frames_and_retains_labelled_data(tmp_
     assert timing["hdf5_batch_write_max"] >= timing["hdf5_batch_write_p50"]
     assert result["writer_queue_max_batches_used"] <= result["writer_queue_capacity_batches"]
     assert result["bottleneck_diagnosis"]["dominant_stage"]
-    assert Path(result["data_path"]).exists()
+    assert filesystem_path(Path(result["data_path"])).exists()
     assert Path(result["data_path"]).name.startswith("BENCHMARK_ONLY_")
 
 

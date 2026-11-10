@@ -51,7 +51,7 @@ class _RollingFiles:
         if index not in self.live or self.live[index] is not None:
             raise ValueError("Rolling file has no unused reservation")
         paths = self._checked_paths(path, manifest)
-        size = sum(p.stat().st_size for p in paths)
+        size = sum(filesystem_path(p).stat().st_size for p in paths)
         if size > self.slot_bytes:
             raise OSError("Rolling file exceeded its reserved pixel/metadata slot")
         self.live[index] = paths
@@ -65,7 +65,7 @@ class _RollingFiles:
                 manifest != path.with_suffix(".pixels.sha256.json")):
             raise ValueError("Rolling cleanup target is not a registered 4G data/manifest pair")
         for item in (path, manifest):
-            if item.is_symlink() or item.resolve().parent != self.root or not item.is_file():
+            if item.is_symlink() or item.resolve().parent != self.root or not filesystem_path(item).is_file():
                 raise ValueError("Rolling cleanup target escapes its run folder or is not a regular file")
         return path, manifest
 
@@ -88,14 +88,14 @@ class _RollingFiles:
                   "pixels_equal_source": True, "synced_at": checked["synced_at"],
                   "verified_at": checked["verified_at"],
                   "manifest_sha256": hashlib.sha256(paths[1].read_bytes()).hexdigest()}
-        with self.journal.open("a", encoding="utf-8") as handle:
+        with filesystem_path(self.journal).open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, separators=(",", ":")) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
         # No enumeration, recursive deletion, user-supplied glob or directory removal.
         for item in paths:
-            size = item.stat().st_size
-            item.unlink()
+            size = filesystem_path(item).stat().st_size
+            filesystem_path(item).unlink()
             self.deleted_bytes += size
         self.live.pop(index)
         self.recycled.add(index)
@@ -105,7 +105,7 @@ class _RollingFiles:
 
     def measure(self):
         """Measure live data, partials and the retained verification journal."""
-        size = sum(p.stat().st_size for p in self.root.iterdir() if p.is_file())
+        size = sum(filesystem_path(p).stat().st_size for p in self.root.iterdir() if filesystem_path(p).is_file())
         self.peak_bytes = max(self.peak_bytes, size)
         if size > self.budget_bytes:
             raise OSError("Rolling benchmark exceeded its live-disk budget")

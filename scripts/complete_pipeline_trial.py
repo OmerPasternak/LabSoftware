@@ -604,7 +604,7 @@ def _run_pipeline_trial(
         for label, destination in destinations.items():
             whole_started = time.perf_counter()
             folder = destination / folder_name
-            folder.mkdir(parents=True, exist_ok=False)
+            filesystem_path(folder).mkdir(parents=True, exist_ok=False)
             drive = {"output_directory": str(folder), "files": [], "summary": {}}
             store = None
             recycled_cursor = 0

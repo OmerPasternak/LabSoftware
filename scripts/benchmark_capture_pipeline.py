@@ -6,6 +6,7 @@ The result measures software/storage headroom, not physical camera timing.
 """
 
 from __future__ import annotations
+from hhg_control.safe_io import filesystem_path
 
 import argparse
 from datetime import datetime, timezone
@@ -123,9 +124,9 @@ def run_benchmark(
     if not keep_data:
         raise ValueError("Benchmark data is retained; delete its BENCHMARK_ONLY run folder manually.")
     output_dir = benchmark_directory(output_dir.resolve(), "paced_pipeline")
-    output_dir.mkdir(parents=True, exist_ok=True)
+    filesystem_path(output_dir).mkdir(parents=True, exist_ok=True)
     raw_bytes = frames * width * height * 2
-    free_bytes = shutil.disk_usage(output_dir).free
+    free_bytes = shutil.disk_usage(filesystem_path(output_dir)).free
     if free_bytes < int(raw_bytes * 1.25) + 100_000_000:
         raise OSError("Not enough free space for the paced capture benchmark.")
 
@@ -144,14 +145,14 @@ def run_benchmark(
             batch_size=batch_size, run_id=datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ"),
         )
         pipeline_s = time.perf_counter() - started
-        file_bytes = path.stat().st_size
+        file_bytes = filesystem_path(path).stat().st_size
         fsync_started = time.perf_counter()
-        with path.open("r+b", buffering=0) as handle:
+        with filesystem_path(path).open("r+b", buffering=0) as handle:
             os.fsync(handle.fileno())
         fsync_s = time.perf_counter() - fsync_started
         durable_s = time.perf_counter() - started
         verification_started = time.perf_counter()
-        with h5py.File(path, "r") as h5f:
+        with h5py.File(filesystem_path(path), "r") as h5f:
             images = h5f["images"]
             if not bool(h5f.attrs["complete"]) or int(h5f.attrs["frames_written"]) != frames:
                 raise AssertionError("HDF5 scan did not complete with the requested frame count.")
@@ -252,7 +253,7 @@ def main() -> None:
         keep_data=True,
     )
     report = Path(result["data_path"]).parent / f"BENCHMARK_ONLY_paced_pipeline_{datetime.now(timezone.utc):%Y%m%dT%H%M%S_%fZ}.json"
-    report.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    filesystem_path(report).write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps(result, indent=2))
     print(f"Report: {report.name}")
 

@@ -71,9 +71,9 @@ def test_batch_control_uses_production_writer_and_keeps_config(cfg, capsys):
     assert [run["batch_size"] for run in runs] == [1, 4, 4, 1]
     assert all(run["saved"]["frames"] == 7 and run["saved"]["consecutive_ids"] for run in runs)
     assert all(run["queue_discard"]["frames"] == 7 for run in runs)
-    assert all(Path(run["saved"]["file"]).is_file() for run in runs)
+    assert all(filesystem_path(Path(run["saved"]["file"])).is_file() for run in runs)
     assert cfg.batch_size == 4 and cfg.speed_frames == 8
-    persisted = json.loads(Path(report["report_file"]).read_text(encoding="utf-8"))
+    persisted = json.loads(filesystem_path(Path(report["report_file"])).read_text(encoding="utf-8"))
     assert persisted["drives"]["selected"]["within_output_cap"]
     details = persisted["drives"]["selected"]["diagnostics"]
     assert all(item["pixel_integrity"]["status"] == "VERIFIED" for item in details)
@@ -134,7 +134,7 @@ def test_bin_control_rejects_pixel_corruption(cfg):
         digest.update(block.tobytes(order="C"))
     result = diagnostics._write_control(cfg.output_dir / "control", "bin", bank, 3, digest.hexdigest(), 0)
     path = Path(result["file"])
-    with path.open("r+b") as handle:
+    with filesystem_path(path).open("r+b") as handle:
         handle.seek(6)
         handle.write(b"\xff\xff")
     with pytest.raises(AssertionError, match="pixels differ"):
@@ -148,7 +148,7 @@ def test_hdf5_control_rejects_frame_metadata_corruption(cfg):
         digest.update(block.tobytes(order="C"))
     result = diagnostics._write_control(cfg.output_dir / "control", "hdf5", bank, 3, digest.hexdigest(), 0)
     path = Path(result["file"])
-    with h5py.File(path, "r+") as h5:
+    with h5py.File(filesystem_path(path), "r+") as h5:
         h5["frame_metadata/json"][1] = json.dumps({"frame_id": 99})
     with pytest.raises(AssertionError, match="metadata differs"):
         diagnostics._verify_control(path, Path("unused"), "hdf5", bank, 3, digest.hexdigest())
@@ -177,7 +177,7 @@ def test_compact_report_is_chart_ready_in_main_folder(cfg):
     )
     path = Path(report["report_file"])
     assert path.parent == cfg.output_dir
-    packet = json.loads(path.read_text(encoding="utf-8"))
+    packet = json.loads(filesystem_path(path).read_text(encoding="utf-8"))
     assert packet["compare_periodic_sync"] is True
     assert len(packet["rows"]) == 4
     assert all(len(row) == len(packet["columns"]) for row in packet["rows"])
@@ -188,7 +188,7 @@ def test_compact_report_is_chart_ready_in_main_folder(cfg):
 
 
 def test_notebook_contains_minimal_status_and_periodic_sync_default():
-    notebook = json.loads((lab.ROOT / "application tests/lab_computer_acceptance.ipynb").read_text(encoding="utf-8"))
+    notebook = json.loads((filesystem_path(lab.ROOT / "application tests/lab_computer_acceptance.ipynb")).read_text(encoding="utf-8"))
     cells = ["".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "code"]
     assert any("run_batch_size_trial(" in cell and "RUN_BATCH_SIZE_TEST = True" in cell for cell in cells)
     assert any("run_bin_hdf5_trial(" in cell and "COMPARE_PERIODIC_SYNC = True" in cell for cell in cells)
@@ -211,10 +211,10 @@ def test_pixel_trial_checks_source_and_reports_added_time(cfg, capsys):
         100 * (drive["verified_run"]["total_fps"] / drive["baseline"]["total_fps"] - 1))
     path = Path(report["report_file"])
     assert path.parent == cfg.output_dir
-    persisted = json.loads(path.read_text(encoding="utf-8"))
+    persisted = json.loads(filesystem_path(path).read_text(encoding="utf-8"))
     assert persisted["source"] == "mock"
     # A readable HDF5 file with the same shape/count must still fail if a pixel changes.
-    with h5py.File(drive["verified_run"]["file"], "r+") as h5:
+    with h5py.File(filesystem_path(drive["verified_run"]["file"]), "r+") as h5:
         h5["images"][3, 2, 2] = int(h5["images"][3, 2, 2]) ^ 1
     with pytest.raises(AssertionError, match="pixels differ"):
         diagnostics.verify_hdf5_pixels(Path(drive["verified_run"]["file"]), Path(drive["reference_manifest"]))
@@ -227,7 +227,7 @@ def test_pixel_trial_failure_is_saved_and_raised_by_notebook(cfg, monkeypatch):
     monkeypatch.setattr(diagnostics, "verify_hdf5_pixels", corrupt_check)
     with pytest.raises(RuntimeError, match="Injected pixel mismatch"):
         lab.run_notebook_cell("Section 4E", lambda: diagnostics.run_hdf5_pixel_verification_trial(cfg, frames=3))
-    report = json.loads(next(cfg.output_dir.glob("section_4e_*.json")).read_text(encoding="utf-8"))
+    report = json.loads(filesystem_path(next(cfg.output_dir.glob("section_4e_*.json"))).read_text(encoding="utf-8"))
     assert report["status"] == "FAILED"
     assert report["drives"]["selected"]["verification"]["pixels_equal_source"] is False
 
@@ -318,7 +318,7 @@ def test_batch_failure_retains_partial_profile_and_original_error(cfg, monkeypat
     report = diagnostics.run_batch_size_trial(cfg, batch_sizes=(2,), frames=3)
     assert report["status"] == "FAILED"
     assert "Injected disk failure" in report["error"]
-    packet = json.loads(Path(report["report_file"]).read_text(encoding="utf-8"))
+    packet = json.loads(filesystem_path(Path(report["report_file"])).read_text(encoding="utf-8"))
     details = packet["drives"]["selected"]["diagnostics"][0]
     assert details["saved"]["frames_returned"] == 3
     assert not details["interpretation"]["run_complete"]
@@ -365,7 +365,7 @@ def test_automatic_window_sweep_tags_every_output_and_never_opens_camera(cfg, mo
     report = diagnostics.run_bin_hdf5_trial(cfg, windows=("small", "medium", "large"), stage_output_gb=40)
     assert report["status"] == "EXECUTED", report.get("error")
     assert Path(report["report_file"]).stem.endswith("_all_windows")
-    packet = json.loads(Path(report["report_file"]).read_text(encoding="utf-8"))
+    packet = json.loads(filesystem_path(Path(report["report_file"])).read_text(encoding="utf-8"))
     assert packet["shape_y_x"] is None and packet["target_fps"] is None
     assert len(packet["rows"]) == 12
     assert set(packet["windows"]) == {"small", "medium", "large"}
@@ -399,7 +399,7 @@ def test_manual_window_selects_one_roi_and_tags_saved_file(cfg, monkeypatch):
     run = report["drives"]["selected"]["runs"][0]
     assert Path(run["saved"]["file"]).stem.endswith("_medium_64x24")
     assert run["saved"]["shape_frame_y_x"] == [7, 24, 64]
-    packet = json.loads(Path(report["report_file"]).read_text(encoding="utf-8"))
+    packet = json.loads(filesystem_path(Path(report["report_file"])).read_text(encoding="utf-8"))
     assert packet["target_fps"] is None
     assert packet["required_raw_MB_per_s"] is None
     assert cfg.roi == (0, 0, 64, 32)
@@ -422,7 +422,7 @@ def test_single_synthetic_window_reports_its_actual_shape(cfg, monkeypatch):
     monkeypatch.setattr(diagnostics, "stage_frames", lambda cfg, budget, files: 7)
     report = diagnostics.run_bin_hdf5_trial(cfg, windows=("large",), stage_output_gb=40)
     assert report["status"] == "EXECUTED", report.get("error")
-    packet = json.loads(Path(report["report_file"]).read_text(encoding="utf-8"))
+    packet = json.loads(filesystem_path(Path(report["report_file"])).read_text(encoding="utf-8"))
     assert packet["shape_y_x"] == [32, 64]
     assert packet["target_fps"] == 28
     assert Path(report["report_file"]).stem.endswith("_large_64x32")
