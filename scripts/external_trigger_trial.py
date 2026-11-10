@@ -123,7 +123,9 @@ def analyze_scope_edges(path, *, max_latency_s, window_start_s, window_end_s):
         raise ValueError("Scope evidence needs trigger and exposure edges; check output enable/polarity")
     if len(trigger) > 1 and max_latency_s >= min(np.diff(trigger)):
         raise ValueError("Latency bound overlaps adjacent trigger windows; pairing is ambiguous")
-    eligible = np.asarray(trigger) + max_latency_s <= window_end_s
+    trigger = np.asarray(trigger, dtype=float)
+    exposure = np.asarray(exposure, dtype=float)
+    eligible = trigger + max_latency_s <= window_end_s
     used, delays, unmatched_exposure = set(), [], 0
     for edge in exposure:
         index = int(np.searchsorted(trigger, edge, side="right")) - 1

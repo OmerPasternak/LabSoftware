@@ -108,3 +108,44 @@ def test_si_pairs_normal_acquisition_roi_and_rejects_coordinate_mismatch_before_
         harmonic_statistics.compute_si_harmonic_g2(*paths,map_path)
 
 
+def test_scope_pairing_searches_one_converted_array(tmp_path,monkeypatch):
+    from scripts import external_trigger_trial as scope
+    path=tmp_path/'edges.csv'
+    path.write_text('trigger_s,exposure_s\n'+''.join(f'{i*.01},{i*.01+.001}\n' for i in range(100)))
+    original=scope.np.searchsorted; observed=[]
+    def search(array,*args,**kwargs):
+        assert isinstance(array,np.ndarray); observed.append(id(array)); return original(array,*args,**kwargs)
+    monkeypatch.setattr(scope.np,'searchsorted',search)
+    result=scope.analyze_scope_edges(path,max_latency_s=.002,window_start_s=0,window_end_s=1)
+    assert result['matched_responses']==100 and len(set(observed))==1
+
+
+
+def test_queue_diagnostic_copies_only_final_preview():
+    from scripts.capture_diagnostics import queue_to_discard
+    copies=[]
+    class Pixels(np.ndarray):
+        def copy(self,*args,**kwargs):
+            copies.append(self.shape); return super().copy(*args,**kwargs)
+    def iterator(*args,**kwargs):
+        for _ in range(3):yield np.zeros((2,2,4),dtype=np.uint16).view(Pixels),[{},{}]
+    camera=SimpleNamespace(yields_owned_batches=True,can_pause_acquisition=True,iter_frames=iterator,
+        acquisition_diagnostics=SimpleNamespace(frames=6,queue_sample=lambda *_:None))
+    cfg=SimpleNamespace(roi=(0,0,4,2),batch_size=2,writer_queue_gib=.001)
+    row=queue_to_discard(camera,cfg,6)
+    assert row['consumed']==6 and copies==[(2,4)]
+
+
+
+def test_saved_g2_cli_exposes_pairing_policy_and_legacy_warnings(tmp_path,monkeypatch,capsys):
+    from scripts import analyze_saved_scan_g2 as script
+    import sys
+    monkeypatch.setattr(sys,'argv',['analysis','--data-dir',str(tmp_path),'--run-id','selected','--allow-repeats','--pool-steps'])
+    captured=[]
+    def compute(**kwargs):
+        captured.append(kwargs)
+        return np.ones((2,2)),dict(num_files=1,total_frames=2,peak_intensity=1,g2_center=1,g2_mean_active=1,validation_warnings=['legacy matching unverified'])
+    monkeypatch.setattr(script,'compute_g2_from_scan',compute)
+    assert script.main()==0
+    assert captured[0]['run_id']=='selected' and captured[0]['repeat_policy']=='allow' and captured[0]['pool_steps']
+    assert 'UNVERIFIED MATCHING' in capsys.readouterr().out

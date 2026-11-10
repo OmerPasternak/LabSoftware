@@ -295,6 +295,7 @@ def queue_to_discard(camera, cfg, frames):
     worker = threading.Thread(target=consume, name="diagnostic-discard")
     worker.start()
     iterator = camera.iter_frames(frames, batch_size=cfg.batch_size)
+    received = 0
     try:
         for images, metadata in iterator:
             began = time.perf_counter()
@@ -314,9 +315,11 @@ def queue_to_discard(camera, cfg, frames):
             camera.acquisition_diagnostics.queue_sample(camera.acquisition_diagnostics.frames,
                                                         counters["consumed"], queue.qsize(), capacity * cfg.batch_size,
                                                         capacity * cfg.batch_size * height * width * 2)
-            began = time.perf_counter()
-            latest_frame = images[-1].copy()  # Match the production manager's latest-frame copy.
-            counters["latest_frame_copy_s"] += time.perf_counter() - began
+            received += len(images)
+            if received == frames:
+                began = time.perf_counter()
+                latest_frame = images[-1].copy()  # One final production preview.
+                counters["latest_frame_copy_s"] += time.perf_counter() - began
     finally:
         try:
             iterator.close()

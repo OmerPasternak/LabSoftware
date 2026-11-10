@@ -6,6 +6,7 @@ external laser-trigger accounting remains a separate acceptance step.
 """
 
 from __future__ import annotations
+from hhg_control.safe_io import filesystem_path
 
 from contextlib import redirect_stdout
 from dataclasses import replace
@@ -173,12 +174,18 @@ def _readback_unavailable_error(exc: Exception) -> bool:
 
 
 def _record_one(cam, directory: Path, frames: int, shape: tuple[int, int],
-                reference_fps: float) -> dict:
+                reference_fps: float, *, exposure_s: float = 0.0) -> dict:
     """Record into a new SDK-owned directory and verify its generated PCO file."""
-    if directory.exists():
+    if filesystem_path(directory).exists():
         raise FileExistsError(f"Refusing to reuse an existing recorder directory: {directory}")
-    directory.mkdir()
-    timeout_s = max(10.0, 3.0 * frames / reference_fps + 5.0)
+    filesystem_path(directory).mkdir()
+    # Supervision allows 3x the exposure/readout period plus 5 s startup.
+    # Reference-FPS acceptance remains a reported throughput comparison.
+    period_s = max(exposure_s, 1.0 / reference_fps)
+    timeout_s = max(10.0, 3.0 * frames * period_s + 5.0)
+    stall_s = max(10.0, 3.0 * period_s + 5.0)
+    last_progress = time.perf_counter()
+    last_count = 0
     started = time.perf_counter()
     status = None
     try:
@@ -192,7 +199,13 @@ def _record_one(cam, directory: Path, frames: int, shape: tuple[int, int],
                 raise RuntimeError(f"PCO native recorder reported an error: {status}")
             if not status.get("is running", status.get("bIsRunning", True)):
                 break
-            if time.perf_counter() - started > timeout_s:
+            now = time.perf_counter()
+            processed = int(status.get("dwProcImgCount", 0))
+            if processed > last_count:
+                last_count, last_progress = processed, now
+            if now - last_progress > stall_s:
+                raise TimeoutError(f"PCO file-mode recorder made no progress for {stall_s:.1f} s: {status}")
+            if now - started > timeout_s:
                 raise TimeoutError(f"PCO file-mode recording exceeded {timeout_s:.1f} s: {status}")
             time.sleep(0.02)
         capture_s = time.perf_counter() - started
@@ -205,13 +218,13 @@ def _record_one(cam, directory: Path, frames: int, shape: tuple[int, int],
         raise RuntimeError(f"PCO recorded fewer or more frames than requested: {status}")
     generated = [
         candidate for candidate in directory.iterdir()
-        if candidate.is_file() and candidate.suffix.lower() == ".pcoraw"
+        if filesystem_path(candidate).is_file() and candidate.suffix.lower() == ".pcoraw"
     ]
-    nonempty = [candidate for candidate in generated if candidate.stat().st_size > 0]
+    nonempty = [candidate for candidate in generated if filesystem_path(candidate).stat().st_size > 0]
     if len(nonempty) != 1:
         contents = [
-            {"name": candidate.name, "bytes": candidate.stat().st_size}
-            for candidate in directory.iterdir() if candidate.is_file()
+            {"name": candidate.name, "bytes": filesystem_path(candidate).stat().st_size}
+            for candidate in directory.iterdir() if filesystem_path(candidate).is_file()
         ]
         raise RuntimeError(
             "PCO did not leave exactly one nonempty pcoraw file in "
@@ -220,7 +233,7 @@ def _record_one(cam, directory: Path, frames: int, shape: tuple[int, int],
     path = nonempty[0]
 
     sync_started = time.perf_counter()
-    with path.open("r+b", buffering=0) as handle:
+    with filesystem_path(path).open("r+b", buffering=0) as handle:
         os.fsync(handle.fileno())
     synced_s = time.perf_counter() - started
     verification_started = time.perf_counter()
@@ -251,7 +264,7 @@ def _record_one(cam, directory: Path, frames: int, shape: tuple[int, int],
         "capture_and_sync_fps": frames / synced_s,
         "capture_and_sync_raw_equivalent_MB_per_s": raw_bytes / 1e6 / synced_s,
         "final_os_fsync_s": synced_s - (sync_started - started),
-        "file_bytes": path.stat().st_size,
+        "file_bytes": filesystem_path(path).stat().st_size,
         "verification_s_after_capture": verification_s,
         **checked,
     }
@@ -285,11 +298,11 @@ def run(cfg: lab.Settings, *, reference_report: dict | None = None,
             raise ValueError("Section 4 reference serial, shutter or exposure differs.")
     destination = lab.prepare(cfg, sum(frames))
     run_dir = destination / f"PCO_FILEMODE_TRIAL_{datetime.now(timezone.utc):%Y%m%dT%H%M%S_%fZ}"
-    run_dir.mkdir(exist_ok=False)
+    filesystem_path(run_dir).mkdir(exist_ok=False)
     report_path = destination / f"pco_filemode_{run_dir.name.removeprefix('PCO_FILEMODE_TRIAL_')}.json"
     report = {"status": "FAILED", "source": cfg.source,
               "output_directory": str(run_dir), "serial_requested": cfg.expected_serial,
-              "free_GB_before_trial": shutil.disk_usage(destination).free / 1e9,
+              "free_GB_before_trial": shutil.disk_usage(filesystem_path(destination)).free / 1e9,
               "roi_requested": list(cfg.roi), "exposure_s_requested": cfg.exposure_s,
               "readout_requested": cfg.readout.name,
               "trigger_requested": lab.TriggerMode.AUTO_SEQUENCE.value,
@@ -302,7 +315,7 @@ def run(cfg: lab.Settings, *, reference_report: dict | None = None,
             shape = (cfg.roi[3] - cfg.roi[1], cfg.roi[2] - cfg.roi[0])
             for count in frames:
                 directory = run_dir / f"native_{count}"
-                result = _record_one(camera._cam, directory, count, shape, cfg.target_fps)
+                result = _record_one(camera._cam, directory, count, shape, cfg.target_fps, exposure_s=cfg.exposure_s)
                 report["runs"].append(result)
         long_run = report["runs"][-1]
         report["camware_reference_fps"] = cfg.camware_fps
@@ -358,7 +371,7 @@ def run(cfg: lab.Settings, *, reference_report: dict | None = None,
                                        if key in ("dwReqImgCount", "dwProcImgCount", "dwLastError", "bFIFOOverflow")}}
             for run in report.get("runs", [])
         ]
-        report_path.write_text(json.dumps(stored, indent=1, default=lab.json_default),
+        filesystem_path(report_path).write_text(json.dumps(stored, indent=1, default=lab.json_default),
                                encoding="utf-8")
         if emit_output:
             print("\n=== IMPORTANT METRICS — PCO DIRECT FILE TRIAL ===")
@@ -390,10 +403,10 @@ def run_hard_drive_decision_test(
         )
     report_path = Path(result["report_file"])
     log_path = report_path.with_suffix(".log")
-    log_path.write_text(progress.getvalue(), encoding="utf-8")
+    filesystem_path(log_path).write_text(progress.getvalue(), encoding="utf-8")
     result["paste_this"]["execution_log"] = str(log_path)
     result["paste_this"]["report_file"] = str(report_path)
-    report_path.write_text(
+    filesystem_path(report_path).write_text(
         json.dumps(result["comparison"], indent=1, default=lab.json_default),
         encoding="utf-8",
     )
@@ -563,15 +576,15 @@ def _run_hard_drive_decision_test(
             if drive_summary["pcoraw"] is None:
                 report_dirs = sorted(
                     set(drive_cfg.output_dir.glob("PCO_FILEMODE_TRIAL_*")) - before,
-                    key=lambda path: path.stat().st_mtime,
+                    key=lambda path: filesystem_path(path).stat().st_mtime,
                 )
                 saved_report = None
                 saved_report_path = (drive_cfg.output_dir /
                                      f"pco_filemode_{report_dirs[-1].name.removeprefix('PCO_FILEMODE_TRIAL_')}.json"
                                      if report_dirs else None)
-                if saved_report_path is not None and saved_report_path.is_file():
+                if saved_report_path is not None and filesystem_path(saved_report_path).is_file():
                     saved_report = json.loads(
-                        saved_report_path.read_text(encoding="utf-8")
+                        filesystem_path(saved_report_path).read_text(encoding="utf-8")
                     )
                 drive_summary["pcoraw"] = _drive_run_summary(saved_report, error=exc)
             drive_summary["status"] = "FAILED"
@@ -607,7 +620,7 @@ def _run_hard_drive_decision_test(
     report_path = c_output_dir.resolve() / (
         f"section_4b_{datetime.now(timezone.utc):%Y%m%dT%H%M%S_%fZ}.json"
     )
-    report_path.write_text(
+    filesystem_path(report_path).write_text(
         json.dumps(summary, indent=1, default=lab.json_default), encoding="utf-8"
     )
     return {"settings_used": common_cfg, "drives": drive_cfgs,
@@ -618,9 +631,9 @@ def _run_hard_drive_decision_test(
 def _destination_free_bytes(path: Path) -> int:
     """Read free bytes from an existing ancestor before creating a test folder."""
     probe = path.resolve()
-    while not probe.exists() and probe.parent != probe:
+    while not filesystem_path(probe).exists() and probe.parent != probe:
         probe = probe.parent
-    return shutil.disk_usage(probe).free
+    return shutil.disk_usage(filesystem_path(probe)).free
 
 
 def _drive_id(path: Path) -> str:
@@ -637,7 +650,7 @@ def _hdf5_run_summary(report: dict, *, frame_bytes: int) -> dict:
     capture = runs[0]["capture_only"]
     saved = runs[0]["saved"]
     path = Path(saved["file"])
-    file_bytes = path.stat().st_size
+    file_bytes = filesystem_path(path).stat().st_size
     return {
         "status": report.get("status"),
         "file": str(path.resolve()), "file_bytes": file_bytes,
