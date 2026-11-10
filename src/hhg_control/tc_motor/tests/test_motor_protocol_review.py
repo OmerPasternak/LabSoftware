@@ -135,7 +135,7 @@ def test_failed_calibration_with_uncertain_cleanup_never_labels_native_units_mm(
 
 
 
-@pytest.mark.parametrize('unexpected_state', ["1E"])
+@pytest.mark.parametrize('unexpected_state', ["1E", "0A"])
 def test_lost_reference_or_external_state_change_cannot_silently_rearm(unexpected_state):
     """Reset, configuration, homing or disable invalidates the reviewed reference."""
     peer = ReviewTransport()

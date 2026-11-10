@@ -222,3 +222,13 @@ def test_visa_setting_drift_is_reported_before_any_new_command(serial_peer):
         transport.query("1TS")
     assert not session.writes
     assert transport.last_exchange["host_after_failure"]["baud_rate"] == 9600
+
+
+
+def test_minimum_receive_timeout_survives_sequential_query_pacing(serial_peer):
+    transport, peer, clock = serial_peer([b"1TP2\r\n"])
+    transport.timeout_ms = 50
+    assert transport.query("1TP") == "1TP2"
+    assert transport.query("1TP") == "1TP2"
+    assert peer.write_times[1]-peer.write_times[0] >= .06-1e-12
+    assert clock.now < .12

@@ -362,3 +362,35 @@ def test_motion_guard_rejects_another_io_thread(rig):
         thread.join(2)
         assert not thread.is_alive()
     assert len(errors) == 1 and isinstance(errors[0], MotorSafetyError)
+
+
+
+def test_relative_initial_status_consumes_motion_deadline(rig, monkeypatch):
+    clock, motor, seq = rig
+    original = motor.get_status
+    def delayed():
+        clock.now += 2
+        return original()
+    monkeypatch.setattr(motor, "get_status", delayed)
+    with pytest.raises(MotionTimeout): seq.move_relative(.01, timeout_s=.5)
+    assert motor.moves == [] and seq.stop_requested and motor.stops == 1
+
+
+def test_slow_status_callback_prevents_measurement_and_retains_results(rig):
+    clock, motor, seq = rig
+    measured = []
+    calls = []
+    def callback(status):
+        calls.append(1)
+        if len(calls) == 2: clock.now += 2
+    with pytest.raises(MotionTimeout) as error:
+        seq.scan([1,1], lambda status: measured.append(status.position_mm), timeout_s=.5, on_status=callback)
+    assert measured == [1] and len(error.value.partial_results) == 1
+    assert seq.stop_requested and motor.stops == 1
+
+
+
+def test_invalid_target_at_sequencer_entrypoint_never_dispatches(rig):
+    _,motor,seq=rig
+    with pytest.raises(MotorSafetyError):seq.move_to(-1)
+    assert motor.moves==[]

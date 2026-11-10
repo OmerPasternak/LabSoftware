@@ -264,3 +264,10 @@ def test_missing_native_runtime_is_distinct_from_missing_python_package(monkeypa
 def test_explicit_serial_resource_and_address_only(resource, axis):
     with pytest.raises(MotorSafetyError):
         SMC100Motor(resource, axis=axis)
+
+
+
+def test_invalid_target_at_physical_dispatch_boundary_never_sends_pa():
+    driver,peer=make_driver();driver.connect();peer.commands.clear()
+    with pytest.raises(MotorSafetyError):driver.move_to(99)
+    assert not any(command.startswith('1PA') for command in peer.commands)

@@ -42,7 +42,7 @@ class FramedSerialTransport:
         raise NotImplementedError
 
     def query(self, command: str) -> str:
-        """Validate one complete ASCII CRLF reply within a single total deadline.
+        """Validate one ASCII CRLF reply within a receive deadline after bounded pacing.
 
         Queries are spaced at least 60 ms apart in send time, including after a
         preceding write. This is a conservative project compatibility guard,
@@ -53,16 +53,16 @@ class FramedSerialTransport:
             raise MotorError("Serial port is not open.")
         received = bytearray()
         started = time.monotonic()
-        deadline = started + self.timeout_ms / 1000
         failure = None
         before = {}
         try:
             if self._last_write_at is not None:
                 wait = self._last_write_at + self.QUERY_GAP_S - time.monotonic()
                 if wait > 0:
-                    time.sleep(min(wait, max(0, deadline - time.monotonic())))
-            if time.monotonic() >= deadline:
-                raise TimeoutError("Query deadline expired during command pacing.")
+                    time.sleep(wait)
+            # Pacing is at most QUERY_GAP_S; the configured receive budget
+            # starts afterwards, so supported 50-ms peers retain their full budget.
+            deadline = time.monotonic() + self.timeout_ms / 1000
             if self._expected_host is not None:
                 before = self._host_settings()
                 if before != self._expected_host:

@@ -301,11 +301,14 @@ class MotorSequencer:
         settle_s: float,
         cancel_event: threading.Event | None,
         on_status: Callable[[MotorStatus], None] | None,
+        *, deadline: float | None = None, initial: MotorStatus | None = None,
     ) -> MotorStatus:
         """Run one already-validated target while owning the operation lock."""
-        deadline = time.monotonic() + timeout_s
+        if deadline is None:
+            deadline = time.monotonic() + timeout_s
         self._check_motion_deadline(deadline, cancel_event)
-        initial = self._checked_status(require_ready=True)
+        if initial is None:
+            initial = self._checked_status(require_ready=True)
         assert self.limits is not None and initial.position_mm is not None
         self.limits.validate_move(initial.position_mm, target_mm)
         # Check once more immediately before dispatch so queued STOP is not lost.
@@ -321,7 +324,8 @@ class MotorSequencer:
                 raise MotionTimeout("Motion/settling timed out.")
             if on_status is not None:
                 on_status(status)
-            self._check_cancel(cancel_event)
+            self._check_motion_deadline(deadline, cancel_event)
+            now = time.monotonic()
             if not status.is_moving:
                 if not status.is_ready:
                     raise MotorError(f"Motor stopped without READY (state {status.state_code}: {status.state}).")
@@ -376,11 +380,12 @@ class MotorSequencer:
             if not self.motion_enabled or self.limits is None:
                 raise MotorSafetyError("Motion is locked; a reviewed safety profile is required.")
             try:
-                self._check_cancel(cancel_event)
+                deadline = time.monotonic() + timeout
+                self._check_motion_deadline(deadline, cancel_event)
                 current = self._checked_status(require_ready=True)
                 assert current.position_mm is not None
                 target = self.driver.validate_position(current.position_mm + delta)
-                return self._move(target, timeout, settle, cancel_event, on_status)
+                return self._move(target, timeout, settle, cancel_event, on_status, deadline=deadline, initial=current)
             except BaseException as error:
                 self._cleanup_after_error(error)
                 raise
@@ -421,8 +426,9 @@ class MotorSequencer:
                     self.limits.validate_move(current, target)
                     current = target
                 for target in targets:
-                    status = self._move(target, timeout, settle, cancel_event, on_status)
-                    self._check_cancel(cancel_event)
+                    deadline = time.monotonic() + timeout
+                    status = self._move(target, timeout, settle, cancel_event, on_status, deadline=deadline)
+                    self._check_motion_deadline(deadline, cancel_event)
                     measurement = measure(status)
                     results.append(ScanPoint(status, measurement))
                     self._check_cancel(cancel_event)

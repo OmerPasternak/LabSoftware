@@ -126,3 +126,10 @@ def test_mock_refuses_nonmonotonic_simulation_clock(limits):
     clock.now = -1
     with pytest.raises(MotorError, match="backwards"):
         motor.get_status()
+
+
+
+def test_invalid_target_at_mock_entrypoint_cannot_start_motion(limits):
+    motor=MockMotor(limits,initial_position_mm=1);motor.connect()
+    with pytest.raises(MotorSafetyError):motor.move_to(-1)
+    assert motor.get_position()==1 and not motor.is_moving()

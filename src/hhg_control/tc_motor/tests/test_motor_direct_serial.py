@@ -161,3 +161,13 @@ def test_direct_transport_uses_existing_inspection_driver_and_mm_lock(direct_pee
         assert status.is_ready and not driver.motion_enabled
     driver.close()
     assert peer.closed and not any(c.startswith(("1ST", "1PA", "1OR", "1RS", "1MM")) for c in peer.writes)
+
+
+
+def test_minimum_receive_timeout_survives_sequential_query_pacing(direct_peer):
+    transport, peer, clock = direct_peer([b"1TP2\r\n"])
+    transport.timeout_ms = 50
+    assert transport.query("1TP") == "1TP2"
+    assert transport.query("1TP") == "1TP2"
+    assert peer.write_times[1]-peer.write_times[0] >= .06-1e-12
+    assert clock.now < .12
