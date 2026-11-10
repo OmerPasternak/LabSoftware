@@ -14,6 +14,7 @@ from threading import RLock
 import time
 
 from .base import BaseMotor, MotorError, MotorInfo, MotorLimits, MotorSafetyError, MotorStatus, finite
+from .serial_framing import FramedSerialTransport
 
 
 # PyVISA ResourceManager instances can share a backend session. Keep one manager
@@ -72,7 +73,7 @@ class SafetyProfile:
             raise MotorSafetyError(f"Invalid physical safety profile: {exc}") from exc
 
 
-class VisaSerialTransport:
+class VisaSerialTransport(FramedSerialTransport):
     """Lazy PyVISA serial session: 57600 baud, 8N1, XON/XOFF, CRLF.
 
     A resource is opened only by ``open``. No discovery or auto-reconnection.
@@ -82,23 +83,9 @@ class VisaSerialTransport:
 
     def __init__(self, resource: str, *, backend: str = "", timeout_ms: int = 300):
         """Remember an explicit COM/ASRL resource and bounded I/O timeout in ms."""
-        if not isinstance(resource, str) or not re.fullmatch(r"(?:COM[1-9]\d*|ASRL[1-9]\d*::INSTR)", resource, re.I):
-            raise MotorSafetyError("Specify one serial resource, e.g. COM21 or ASRL21::INSTR.")
-        if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or not 50 <= timeout_ms <= 1000:
-            raise MotorSafetyError("Serial timeout must be 50–1000 ms.")
-        self.resource = f"ASRL{resource[3:]}::INSTR" if resource.upper().startswith("COM") else resource.upper()
+        super().__init__(resource, timeout_ms=timeout_ms)
         self.backend = backend
-        self.timeout_ms = timeout_ms
         self._manager = None
-        self._session = None
-        self.session_details: dict = {}
-        self.last_exchange: dict = {}
-
-    # The supplied LabVIEW read_write.vi waits 10 ms between checks of Bytes at
-    # Port and reads only the available count. Do the same instead of posting a
-    # large blocking VISA text read while the USB/RS-232 adapter is still filling.
-    POLL_INTERVAL_S = 0.01
-    MAX_REPLY_BYTES = 256
 
     def open(self) -> None:
         """Open and configure only the host serial port; discard stale input bytes."""
@@ -144,8 +131,14 @@ class VisaSerialTransport:
             self._session.end_output = constants.SerialTermination.none
             self._session.write_termination = "\r\n"
             self._session.encoding = "ascii"
+            self._expected_host = {"baud_rate": 57600, "data_bits": 8, "parity": 0,
+                                   "stop_bits": 10, "flow_control": 1}
+            if self._host_settings() != self._expected_host:
+                raise MotorError("VISA did not apply the requested serial settings.")
             self._session.flush(constants.BufferOperation.discard_read_buffer)
             self.session_details = {
+                "transport": "visa", "query_gap_s": self.QUERY_GAP_S,
+                "host_settings_source": "VISA serial attributes",
                 "resource": self.resource,
                 "driver_file": str(Path(__file__).resolve()),
                 "pyvisa_version": getattr(pyvisa, "__version__", "unknown"),
@@ -162,80 +155,33 @@ class VisaSerialTransport:
             self.close()
             raise
 
-    def query(self, command: str) -> str:
-        """Read one ASCII CRLF frame by available count, within timeout_ms.
+    def _host_settings(self) -> dict:
+        """Read live VISA serial attributes, never controller settings."""
+        return {"baud_rate": self._session.baud_rate, "data_bits": self._session.data_bits,
+                "parity": int(self._session.parity), "stop_bits": int(self._session.stop_bits),
+                "flow_control": int(self._session.flow_control)}
 
-        Match the legacy Bytes-at-Port receive pattern. Never issue a second
-        request, flush a bad reply, strip a high bit, or accept a partial frame.
-        The caller latches any failure until disconnect/reconnect. Replies are
-        bounded to 256 bytes; error messages retain the received hex bytes.
-        """
-        if self._session is None:
-            raise MotorError("Serial port is not open.")
-        received = bytearray()
+    def _available(self) -> int:
+        """Return VISA's serial input-buffer count without a read request."""
+        return self._session.bytes_in_buffer
+
+    def _read_count(self, count: int, remaining_ms: int) -> bytes:
+        """Perform one VISA read and restore its bounded timeout, without retries."""
         timeout = self._session.timeout
-        started = time.monotonic()
-        deadline = started + self.timeout_ms / 1000
-        failure = None
         try:
-            if self._session.bytes_in_buffer:
-                raise MotorError("Unexpected input before request; response stream is not synchronized.")
-            self.write(command)
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError(f"No complete CRLF reply within {self.timeout_ms} ms.")
-                # Sleeping also avoids a CPU spin when the device is silent.
-                time.sleep(min(self.POLL_INTERVAL_S, remaining))
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError(f"No complete CRLF reply within {self.timeout_ms} ms.")
-                count = self._session.bytes_in_buffer
-                if not count:
-                    continue
-                if count > self.MAX_REPLY_BYTES - len(received):
-                    raise MotorError(f"Reply exceeds {self.MAX_REPLY_BYTES} bytes.")
-                self._session.timeout = max(1, int(remaining * 1000))
-                # read_bytes() contains its own loop, with a new I/O timeout for
-                # each partial read. One low-level call keeps this deadline real
-                # even if a backend reports available bytes but returns short.
-                # VI_SUCCESS_MAX_CNT (0x3FFF0006) is expected when a counted
-                # read fills its request; suppress only that warning, per session.
-                with self._session.ignore_warning(0x3FFF0006):
-                    chunk, _ = self._session.visalib.read(self._session.session, count)
-                received.extend(chunk)
-                if time.monotonic() > deadline:
-                    raise TimeoutError(f"Reply arrived after the {self.timeout_ms} ms deadline.")
-                if len(chunk) != count:
-                    raise MotorError("VISA returned an incomplete counted read.")
-                if any(byte > 127 or (byte < 32 and byte not in (10, 13)) for byte in chunk):
-                    raise MotorError("Reply contains non-ASCII or unexpected control bytes.")
-                end = received.find(b"\r\n")
-                if end < 0:
-                    continue
-                if end != len(received) - 2 or b"\r" in received[:end] or b"\n" in received[:end]:
-                    raise MotorError("Unexpected extra frame or malformed CRLF reply.")
-                if self._session.bytes_in_buffer:
-                    raise MotorError("Unexpected trailing input after CRLF reply.")
-                return bytes(received[:-2]).decode("ascii")
-        except Exception as exc:
-            failure = str(exc)
-            raise MotorError(
-                f"Serial exchange {command!r} failed: {exc} "
-                f"[resource={self.resource}; RX hex={received.hex(' ') or '<none>'}]"
-            ) from exc
+            self._session.timeout = remaining_ms
+            with self._session.ignore_warning(0x3FFF0006):  # Normal full-count status.
+                chunk, _ = self._session.visalib.read(self._session.session, count)
+            return chunk
         finally:
-            self.last_exchange = {
-                "command": command,
-                "rx_hex": received.hex(" "),
-                "elapsed_s": time.monotonic() - started,
-                "error": failure,
-            }
             self._session.timeout = timeout
 
     def write(self, command: str) -> None:
         """Write one command with the configured CRLF terminator."""
-        self._session.write(command)
+        count = self._session.write(command)
+        self._last_write_at = time.monotonic()
+        if count != len((command + "\r\n").encode("ascii")):
+            raise MotorError("Incomplete VISA command write; delivery is uncertain.")
 
     def close(self) -> None:
         """Close only this serial session; never close a shared resource manager."""
@@ -259,7 +205,8 @@ class SMC100Motor(BaseMotor):
     MOVING = {"28", "1E", "1F", "46", "47"}
 
     def __init__(self, resource: str, axis: int = 1, profile: SafetyProfile | None = None,
-                 *, transport_factory=None, backend: str = "", timeout_ms: int = 300):
+                 *, transport_factory=None, backend: str = "", timeout_ms: int = 300,
+                 transport: str = "visa"):
         """Prepare one axis (1–31) without opening hardware; use reviewed mm limits."""
         if isinstance(axis, bool) or not isinstance(axis, int) or not 1 <= axis <= 31:
             raise MotorSafetyError("Axis must be an integer from 1 to 31; broadcasts are forbidden.")
@@ -267,7 +214,13 @@ class SMC100Motor(BaseMotor):
             raise MotorSafetyError("profile must be a SafetyProfile or None.")
         super().__init__(profile.limits if profile else None)
         # Validate the serial resource even with an injected offline transport.
-        template = VisaSerialTransport(resource, backend=backend, timeout_ms=timeout_ms)
+        if transport == "visa":
+            template = VisaSerialTransport(resource, backend=backend, timeout_ms=timeout_ms)
+        elif transport == "serial" and not backend:
+            from .direct_serial import DirectSerialTransport
+            template = DirectSerialTransport(resource, timeout_ms=timeout_ms)
+        else:
+            raise MotorSafetyError("Select transport='visa' or 'serial'; VISA backend applies only to VISA.")
         self._transport_factory = transport_factory or (lambda: template)
         self._transport = None
         self.axis = axis
@@ -281,6 +234,11 @@ class SMC100Motor(BaseMotor):
         self._last_status_moving = True
         self._stop_attempted = False
         self.inspection_settings: dict[str, float] = {}
+
+    @property
+    def transport_details(self) -> dict:
+        """Copy cached host connection diagnostics, without serial I/O."""
+        return dict(getattr(self._transport, "session_details", {}))
 
     @property
     def communication_uncertain(self) -> bool:

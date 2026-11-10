@@ -9,15 +9,29 @@ location; it does not depend on the directory from which it was double-clicked.
 ## First setup on the lab PC
 
 If replacing LabVIEW currently produces a serial decoding error, first close
-LabVIEW and TC motor, then double-click `check_serial_link.vbs` beside the motor
-launcher and enter **21**. It uses address 1 and the GUI's corrected transport
-for a bounded 30-second query-only check. The console stays visible and names
+LabVIEW and TC motor. Run `setup_physical_mode.vbs` once after pulling the update
+to install pySerial alongside PyVISA. Then double-click `check_serial_link.vbs`
+beside the motor launcher and enter **21**. It uses address 1 and explicitly
+checks VISA, closes its port, then checks Direct serial for up to 30 seconds each.
+The second check is cancelled if the first port cannot be released.
+The console stays visible and names
 the JSON file saved under `tc_motor/reports/`, including when communication fails.
 Send that report for diagnosis. No move, STOP, home, enable, reset, zero or
 configuration write is sent; this tool closes only its own COM handle. It cannot
 stop externally initiated motion or confirm holding. A passing result establishes
 only communication during the check, not calibration or motion safety. `TS`
 queries clear the controller's status error register; replies are saved verbatim.
+
+The comparison JSON lists `passing_transports` and each separate run. A PASS
+means that path worked during the observation. If Direct serial passes, select
+**Physical → Physical connection: Direct serial (pySerial)** in the GUI, COM 21,
+address 1, and leave the profile blank for inspection. VISA remains the default
+and is still available. Selecting a transport never falls back to another one.
+Both use the same driver, safety profile, STOP logic and mm calibration checks.
+Direct serial bypasses the system VISA DLL using exclusive native Windows COM
+access; it still uses the same ATEN adapter/driver/cable. It is an explicit
+compatibility alternative after the lab report showed VISA delivering corrupt
+raw bytes, not proof that VISA caused them. Physical acceptance is still open.
 
 1. **Identity:** confirm the controller label, actuator, and address. The app also
    reads the firmware version and stage reference.
@@ -119,23 +133,25 @@ so errors can be read. The equivalent command from the project root in PowerShel
 .\src\hhg_control\tc_motor\run_TC_motor.bat setup
 ```
 
-The setup command installs the PyVISA requirement (`pyvisa>=1.14,<2`, matching
+The setup command installs `pyvisa>=1.14,<2` and `pyserial>=3.5,<4` (matching
 the `hardware-smc100` extra) into this checkout's `.venv` without reinstalling the application,
-then loads the system VISA runtime in a separate diagnostic process. It does not
+then checks imports and the system VISA runtime in a separate process. It does not
 enumerate/open serial ports or command hardware. It requires internet access for
 any missing Python packages. Installation failure stops before the runtime check.
 PyVISA is a Python package; it does not include the native VISA runtime. If the
-check reports that the runtime is missing, install/repair NI-VISA on the lab PC
-and rerun setup. Installing `pyvisa-py` is not a substitute for this driver's
+check reports that the runtime is missing, VISA mode needs NI-VISA repair, while
+Direct serial remains available if pySerial imports. Installing `pyvisa-py` is not a substitute for VISA mode's
 reviewed exclusive-access requirement. A passed check proves library loading,
 not device availability or successful locking. Restart the GUI after setup.
 Mock mode does not require this setup or a VISA installation.
 
-A system VISA backend supporting exclusive serial-resource access is required
+A system VISA backend supporting exclusive serial-resource access is required in VISA mode
 (normally NI-VISA already used by LabVIEW). The driver requests an exclusive lock;
 it does not fall back to shared access if the backend cannot provide it. Close
 LabVIEW/Newport utility sessions controlling this port before Python connects.
 Do not run two controllers of the same axis concurrently.
+Direct serial instead uses pySerial's exclusive Windows COM handle and requires
+no VISA runtime. Other platforms are intentionally refused for this transport.
 
 Select **Physical**, enter the COM port **number only** (default 21) and axis,
 leave the profile blank, and click Connect only when authorized to query the physical controller.
@@ -171,6 +187,14 @@ accepted by stripping high bits. Errors include received hex bytes and resource.
 This corrects differences in Python's receive implementation; whether they
 caused the lab's invalid bytes needs a physical run of the updated code.
 
+The 2026-10-26 physical report disproved that the receive-only change alone
+resolved the issue: after two valid position reads, VISA returned corrupted raw
+bytes. Both transports now enforce a 60 ms gap between query sends (a conservative
+project guard, not Newport's stated minimum), while STOP writes remain immediate.
+Each query records host serial settings; detected drift blocks transmission and
+is recorded without automatically rewriting settings. The VISA report reads VISA
+attributes; the direct report labels pySerial's configured attributes explicitly.
+
 The connection checker saves VISA library/version, actual host serial attributes,
 each reply, raw receive bytes, durations and cleanup outcome. An alternative to
 the VBS launcher, from the checkout root, is:
@@ -179,6 +203,10 @@ the VBS launcher, from the checkout root, is:
 $env:PYTHONPATH = (Resolve-Path .\src).Path
 .\.venv\Scripts\python.exe -m hhg_control.tc_motor.check_serial_link --physical --port 21
 ```
+
+Add `--transport compare` to compare both, or `--transport serial` for an explicit
+Direct serial check. No argument selects VISA for command-line compatibility;
+the VBS launcher explicitly requests comparison.
 
 The tool never scans other ports and aborts after the first failure without a
 retry. Generated reports stay under the motor folder and are ignored by Git.
@@ -294,6 +322,8 @@ the measurement. Neither is a physical accuracy/settling claim. GUI refresh is
 - [PyMoDAQ Newport plugins](https://github.com/PyMoDAQ/pymodaq_plugins_newport): existing SMC100 plugin, documented tested with SMC100PP/URS150. Its individual implementation could not be retrieved in this review; no claim is made about its initialization behavior. Installing the full framework solely for this independent window would add unrelated orchestration; this adapter instead follows Newport's protocol with focused transport tests.
 - [PyMeasure Newport drivers](https://pymeasure.readthedocs.io/en/latest/api/instruments/newport/index.html): ESP300 support found; not a confirmed SMC100CC replacement. QCoDeS search did not establish a matching, validated CC/LTA-HS driver. Newport's utility/LabVIEW/.NET support exists; no official offline SMC100 simulator was located.
 - [PyVISA resource manager](https://pyvisa.readthedocs.io/en/stable/api/resourcemanager.html): backend managers can be shared; this driver closes only its own serial handle so other instruments remain connected.
+- [pySerial native-port API](https://pyserial.readthedocs.io/en/latest/pyserial_api.html) and [Windows implementation](https://github.com/pyserial/pyserial/blob/master/serial/serialwin32.py): nonblocking reads, bounded writes and Windows share-mode-zero COM ownership. This generic alternative removes VISA from the direct path without replacing the guarded instrument driver.
+- [Community pySMC100](https://github.com/freespace/pySMC100): reviewed for its direct pySerial use and explicit corruption detection. Its command delays, retry loops, homing and configuration routines are not adopted wholesale; our query gap is an independent compatibility guard.
 
 Tests use project mocks and synthetic serial peers. Passing them establishes
 software behavior only. Verify physical identity, units, short motion in both

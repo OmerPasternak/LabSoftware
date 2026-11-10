@@ -46,7 +46,7 @@ def test_setup_launcher_uses_project_python_and_checks_only_after_install(tmp_pa
     shutil.copyfile(Path(__file__).resolve().parents[1] / launcher.name, launcher)
     (checkout / "src" / "pip.py").write_text(
         "import json, sys\nfrom pathlib import Path\n"
-        "assert sys.argv[1:] == ['install', 'pyvisa>=1.14,<2']\n"
+        "assert sys.argv[1:] == ['install', 'pyvisa>=1.14,<2', 'pyserial>=3.5,<4']\n"
         "Path('installer.json').write_text(json.dumps({'python':sys.executable}))\n"
         f"raise SystemExit({pip_exit})\n", encoding="utf-8")
     (package / "check_environment.py").write_text(
@@ -141,5 +141,5 @@ def test_bat_link_check_uses_project_python_with_spaces(tmp_path):
                             cwd=tmp_path, capture_output=True, input="\n", text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     data = json.loads((checkout / "link-result.json").read_text())
-    assert data["args"] == ["--physical", "--port", "21"]
+    assert data["args"] == ["--physical", "--port", "21", "--transport", "compare"]
     assert Path(data["python"]).resolve() == (checkout / ".venv/Scripts/python.exe").resolve()

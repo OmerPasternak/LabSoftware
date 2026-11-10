@@ -11,7 +11,7 @@ If Not files.FileExists(launcher) Then
 End If
 
 If WScript.Arguments.Count = 0 Then
-    port = InputBox("Close LabVIEW and TC motor first. Enter the COM number for a 30-second query-only check (no motion).", "TC motor link check", "21")
+    port = InputBox("Close LabVIEW and TC motor first. Enter the COM number. VISA and Direct serial are checked separately for up to 30 seconds each (no motion).", "TC motor link check", "21")
 Else
     port = WScript.Arguments(0)
 End If

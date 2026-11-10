@@ -21,6 +21,7 @@ class ConnectionSettings:
     resource: str = ""
     axis: int = 1
     profile_path: str = ""
+    transport: str = "visa"
 
 
 @dataclass(frozen=True)
@@ -57,7 +58,8 @@ def create_sequencer(settings: ConnectionSettings):
         else None
     )
     return MotorSequencer(
-        SMC100Motor(settings.resource.strip(), axis=settings.axis, profile=profile)
+        SMC100Motor(settings.resource.strip(), axis=settings.axis, profile=profile,
+                    transport=settings.transport)
     )
 
 
@@ -188,6 +190,7 @@ class MotorWorker(QThread):
             self.status_ready.emit(seq.snapshot())
             self._poll_faulted = False
             if args[0].mode == "Physical":
+                self.activity.emit("Serial transport: " + args[0].transport)
                 settings = getattr(seq, "inspection_settings", {})
                 if settings:
                     self.activity.emit("Inspected native controller settings: " + repr(settings))

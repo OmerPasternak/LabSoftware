@@ -5,6 +5,99 @@ Feature branch: `codex/smc100-motor-control`; original base: `5188b6a`.
 At the original 2026-10-20 checkpoint, no hardware had been contacted or pushed.
 Later branch pushes and the lab-PC inspection are recorded below.
 
+## PAUSED CHECKPOINT — user requested immediate wrap-up, 2026-10-26
+
+Last pushed commit is `81ebe05` on `codex/smc100-motor-control`. Everything
+described below about direct serial/comparison and test reduction is currently
+UNCOMMITTED and NOT PUSHED. The index contains the pre-reduction feature; the
+working tree additionally contains reduced/consolidated tests. Review BOTH
+`git diff` and `git diff --cached`, then stage the final state deliberately.
+Do not discard either. No physical hardware was accessed by this agent.
+
+Completed locally: explicit Windows pySerial transport (VISA retained, no silent
+fallback), shared bounded framing, 60 ms query pacing, live VISA/configured
+pySerial host-settings diagnostics, GUI transport selector, sequential query-only
+comparison VBS, and setup installation of optional pySerial. The exact uploaded
+corrupt frame is retained as a regression. A real pySerial 3.5 port=None API
+smoke check passed with no port opened. Clean wheel/dependency checks passed;
+the isolated environment has neither pySerial nor PyVISA. **485 full offline
+tests passed** on the feature BEFORE the following test pruning, from clean
+export `C:\Temp\tcm26compare` (Python 3.12.10, test dependencies only).
+
+The user then explicitly requested a huge reduction in test inflation without
+compromising reliability. Baseline was 185 motor cases (183 mentioned earlier,
+then two final regressions). Removed 29 duplicate test functions, reduced repeated
+parameter examples and folded related connection/report lifecycle assertions
+into existing end-to-end tests. **Current reduced suite: 119 passing motor cases**
+(36% reduction); no final full-suite validation of this reduced state yet.
+Reduction is NOT FINISHED or accepted as reliability-equivalent: coverage audit
+lost 15 previously executed production lines and 5 branches. Restore those
+critical checks before further pruning/push. No mutation audit has run yet.
+
+Audit artifacts, outside Git:
+
+- `C:\Temp\tc_motor_before.json` / `tc_motor_before.coverage`: 185-case baseline,
+  1450/1688 production statements, 327/474 branches.
+- `C:\Temp\tc_motor_after.json` / `tc_motor_after.coverage`: 119-case first cut,
+  1435/1688 statements, 322/474 branches.
+- `C:\Temp\motor_coverage_contexts.json` / `tc_motor_contexts.coverage`: baseline
+  per-test line/arc attribution. Coverage-only greedy selection found 90 cases,
+  but this excludes assertion strength and some subprocess launcher tests; do
+  not blindly select by coverage. Preserve explicit safety/race regressions.
+- `C:\Temp\tcm26compare`: clean PRE-PRUNING source/tests, also a backup for
+  restoring individual tests. `C:\Temp\tcm26comparepkg` and
+  `C:\Temp\tcm26compare-wheel`: package export/wheel of that same feature.
+- coverage 7.17.0 is installed in the working .venv only, not a project dependency.
+
+Lost coverage in CURRENT production source: `drivers/smc100.py` lines
+261–266, 279, 297, 506–507; branches (277,279), (296,297), (505,506).
+`sequencer.py` lines 234–235, 238–239, 242; branches (233,234), (239,242).
+Inspect their meaning and restore focused behavior checks; do not just hide the
+coverage loss or combine unrelated scenarios to make the reported count smaller.
+
+Resume steps: finish measured test consolidation; compare production line/branch
+coverage and retain known STOP/cleanup/units/deadline/race protections; run a small
+offline mutation audit on a temporary copy for critical guards; run the full
+final suite from a new clean tracked export in the isolated test-only environment;
+review/stage/commit/push under the existing branch authorization; check the exact
+Actions SHA on Python 3.10/3.11/3.12. Only Python 3.12 is installed locally.
+Then the lab user should pull via GitHub Desktop, close LabVIEW/TC motor, run
+`setup_physical_mode.vbs` once and `check_serial_link.vbs` with COM 21. The new
+checker explicitly compares both transports for up to 30 s each, with no motion
+or configuration commands. Physical communication and motion acceptance remain
+unverified. Camera code/layout must remain untouched.
+
+## Physical report and explicit transport comparison — 2026-10-26
+
+`TC_motor_serial_check_20261026T140749759187Z.json` is a genuine physical report
+from the updated source under `C:\Users\lab\Documents\GitHub\LabSoftware\src`.
+It ran Python 3.12.15 (Anaconda), Windows build 17763, PyVISA 1.16.2 and
+`C:\windows\system32\visa32.dll`. Reported host settings were 57600/8N1/XON-XOFF.
+Identity/settings matched the earlier log. Two TP snapshots reported `29.99999`
+native units; TS `000033` reported no error and READY from MOVING. This establishes
+a controller-reported reference/readiness at that time, not actual mm calibration.
+The third TP received `4c 15 25 ca 72 ca ca ca ca ca 6a 0a`; the check aborted
+after about 1.062 s and released the port. Thus the earlier receive correction
+did NOT resolve the physical corruption. Raw bytes rule out a text-codec-only
+explanation but do not prove which host/runtime/adapter component produced them.
+
+Next implementation adds an explicit pySerial transport alongside VISA, retaining
+the same SMC100Motor, mock, sequencer, profile and STOP protections. This is a
+deliberate exception to the PyVISA preference to isolate the failing VISA path;
+there is no automatic fallback. Windows COM is opened exclusively by pySerial.
+Both transports share strict framing and a bounded 60 ms query-send guard, never
+applied to STOP writes. Host settings are captured around exchanges and drift
+refuses a new query without overwriting settings. Direct settings are pySerial
+configured attributes; VISA attributes are not a wire-level measurement.
+
+After pulling, run `setup_physical_mode.vbs` once, then `check_serial_link.vbs`
+with 21. It explicitly tests both paths for up to 30 seconds each, releasing one
+before the next. It never issues movement or controller configuration commands.
+It skips the second path after a cleanup failure. Reports preserve separate
+results; passing one never silently selects it in the GUI. If direct passes,
+select Physical / Direct serial (pySerial), COM21, address 1, blank profile.
+Motion remains locked. Physical communication acceptance is still outstanding.
+
 ## Python serial receive correction — 2026-10-26
 
 The user reports the existing LabVIEW program works through the lab setup.

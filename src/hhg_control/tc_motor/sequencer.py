@@ -135,6 +135,7 @@ class MotorSequencer:
                 "identity": asdict(info),
                 "status": asdict(status),
                 "native_settings": self.inspection_settings,
+                "transport": dict(getattr(self.driver, "transport_details", {})),
                 "settings_source": "Last connection/preflight readbacks; not re-queried for export.",
                 "units_note": (
                     "Mock values are synthetic mechanical mm."
