@@ -1,3 +1,12 @@
+Current interaction (2026-11-10): choose CovarianceFromGUIdata or
+TConlyAnalysisFromGUIdata in the launcher. Only the analysis interface and
+its plots open; MATLAB runs without its desktop behind the scenes. Original
+Scan Analyzer button captions are retained, including Load Scan ..., Load
+Image ..., Load Two Color Scan ..., and Export data to workspace. These
+controls continue to read current HDF5 data. Source-editor actions are hidden
+in the application session. The developer entrypoint hhg_analysis_start remains
+available for interactive MATLAB development.
+
 # HHG analysis
 
 Double-click `run_hhg_analysis.vbs` in this folder or at the repository root.
@@ -17,9 +26,9 @@ The primary input is the **current camera schema 2.0**, with raw
 `/images uint16 [frame,y,x]`, root acquisition settings and one
 `/frame_metadata/json` record per frame. The old lab binary format is secondary.
 
-Choose **Open MATLAB Scan Analyzer + Workflows** to open the preserved
+Choose **CovarianceFromGUIdata** or **TConlyAnalysisFromGUIdata** to open the preserved
 `ShowScanGUI` and its new **HHG Analysis** menu. Each launch opens an independent
-MATLAB desktop; perform related steps in one desktop so the loaded scan,
+analysis process; perform related steps in one desktop so the loaded scan,
 references and settings stay together. Closing the Python launcher does not
 terminate that MATLAB session. The startup log location appears in the Python
 activity log. A MATLAB executable picker supports another installed release.

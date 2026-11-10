@@ -7,14 +7,20 @@ fig=hhg_analysis_start();
 assert(contains(which('ShowScanGUI'),[filesep 'active' filesep]));
 assert(isequal(hhg_analysis_start(),fig));
 controls=guidata(fig);
-assert(contains(get(controls.pushbutton1,'String'),'HDF5'));
-assert(contains(get(controls.pushbutton22,'String'),'HDF5'));
+assert(strcmp(get(controls.pushbutton1,'String'),'Load Scan ...'));
+assert(strcmp(get(controls.pushbutton22,'String'),'Load Two Color Scan ...'));
 assert(isa(get(controls.pushbutton2,'Callback'),'function_handle'));
 assert(strcmp(get(controls.pushbutton18,'Enable'),'off'));
 set(fig,'Units','pixels'); bounds=get(fig,'Position'); screen=get(groot,'ScreenSize');
 assert(all(bounds(3:4)<=screen(3:4)));
 assert(strcmp(get(controls.axes1,'Units'),'normalized'));
 reference=openfig(fullfile(root,'src','HHG analysis','matlab','reference','ShowScanGUI.fig'),'invisible');
+buttons=findall(reference,'Style','pushbutton');
+for k=1:numel(buttons)
+    active=findall(fig,'Tag',get(buttons(k),'Tag'));
+    assert(isequal(get(active,'String'),get(buttons(k),'String')),'Original button label changed.');
+end
+
 assert(isequal(colormap(reference),colormap(fig))); close(reference);
 hhg_analysis_load_hdf5(fig,fullfile(out,'synthetic.h5'));
 h=guidata(fig); assert(isempty(h.data)); original=hhg_analysis_read(fig,1,h.flength);

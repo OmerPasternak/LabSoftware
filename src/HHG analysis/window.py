@@ -105,11 +105,11 @@ class FundamentalAnalysisWindow(QMainWindow):
         fundamental_layout.addWidget(self.lbl_fundamental_extension)
         root.addWidget(fundamental_group)
 
-        matlab_group = QGroupBox("Lab MATLAB analysis — ShowScanGUI reference")
+        matlab_group = QGroupBox("Analysis workflows")
         matlab_layout = QVBoxLayout(matlab_group)
         description = QLabel(
-            "Open the original scan analyzer with its existing controls, colors and orientation. "
-            "The HHG Analysis menu adds HDF5 import and parameterized covariance, Pearson, "
+            "Choose the statistical or TCS workflow. "
+            "The original analyzer controls provide saved-data covariance, Pearson, "
             "variance, PCA and two-color views in the same MATLAB session."
         )
         description.setWordWrap(True)
@@ -132,10 +132,16 @@ class FundamentalAnalysisWindow(QMainWindow):
         self.btn_browse_matlab = QPushButton("Browse…")
         self.btn_browse_matlab.clicked.connect(self._choose_matlab_executable)
         executable_row.addWidget(self.btn_browse_matlab)
-        matlab_layout.addLayout(executable_row)
+        settings_widget = QWidget()
+        settings_widget.setLayout(executable_row)
+        settings_widget.hide()
+        matlab_layout.addWidget(settings_widget)
         action_row = QHBoxLayout()
-        self.btn_matlab_analysis = QPushButton("Open MATLAB Scan Analyzer + Workflows")
-        self.btn_matlab_analysis.clicked.connect(self._launch_matlab_companion)
+        self.btn_matlab_analysis = QPushButton("CovarianceFromGUIdata")
+        self.btn_matlab_analysis.clicked.connect(lambda: self._launch_matlab_companion(action="statistical"))
+        self.btn_tcs_analysis = QPushButton("TConlyAnalysisFromGUIdata")
+        self.btn_tcs_analysis.clicked.connect(lambda: self._launch_matlab_companion(action="tcs"))
+        action_row.addWidget(self.btn_tcs_analysis)
         action_row.addWidget(self.btn_matlab_analysis)
         self.btn_feature_guide = QPushButton("Feature guide / limitations")
         self.btn_feature_guide.clicked.connect(self._open_feature_guide)
@@ -144,7 +150,7 @@ class FundamentalAnalysisWindow(QMainWindow):
         limitations = QLabel(
             "Integrated Fourier aggregation and the original helper-based calibration route are inactive. "
             "The guide lists required toolboxes and all remaining limitations. "
-            "The companion remains open independently of this window."
+            "Only the selected analysis interface and its plots open."
         )
         limitations.setWordWrap(True)
         limitations.setStyleSheet("color: #805b16;")

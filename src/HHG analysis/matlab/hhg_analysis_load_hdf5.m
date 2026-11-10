@@ -23,7 +23,7 @@ set(h.slider1,'Min',1,'Max',max(2,h.flength),'Value',1, ...
     'SliderStep',[1/max(1,h.flength) 1/max(1,h.flength)]);
 if h.flength>1, set(h.slider1,'Enable','on'); else, set(h.slider1,'Enable','off'); end
 set([h.pushbutton2 h.pushbutton3 h.radiobutton1 h.radiobutton2],'Enable','on');
-set(h.pushbutton15,'String','Export source + frame');
+set(h.pushbutton15,'String','Export data to workspace');
 [~,name,extension]=fileparts(source.paths{1});
 if strcmp(mode,'frames'), label=[name extension]; else, label=sprintf('%d HDF5 scan steps',h.flength); end
 set(h.text2,'String',label,'TooltipString',h.filename);

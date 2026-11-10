@@ -25,14 +25,8 @@ def companion_directory() -> Path:
 def matlab_arguments(log_path: Path, input_path: Path | None = None, action: str | None = None) -> list[str]:
     """Build literal MATLAB arguments; only a quoted resource path enters code."""
     folder = str(companion_directory()).replace("'", "''")
-    if action not in {None, "pearson"}:
+    if action not in {None, "pearson", "statistical", "tcs"}:
         raise ValueError("Unsupported startup workflow.")
-    startup = "hhg_analysis_start"
-    if input_path is not None:
-        literal = str(input_path.resolve()).replace("'", "''")
-        startup += f"('{literal}','{action or ''}')"
-    command = (
-        f"try, addpath('{folder}'); {startup}; "
-        "catch e, disp(getReport(e,'extended','hyperlinks','off')); end"
-    )
-    return ["-desktop", "-logfile", str(log_path), "-r", command]
+    literal = "" if input_path is None else str(input_path.resolve()).replace("'", "''")
+    command = f"addpath('{folder}'); hhg_analysis_app('{literal}','{action or 'statistical'}')"
+    return ["-logfile", str(log_path), "-batch", command]

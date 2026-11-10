@@ -66,7 +66,8 @@ def test_matlab_detaches_and_quotes_source_and_input_paths(qtbot, monkeypatch, t
     window._launch_matlab_companion(input_path=tmp_path / "O'Brien scan.h5", action="pearson")
     assert len(calls) == 1
     arguments = calls[0][1]
-    assert arguments[0] == "-desktop" and arguments[1] == "-logfile"
+    assert "-desktop" not in arguments and "-batch" in arguments
+    assert "-logfile" in arguments
     assert "O''Brien resources" in arguments[-1]
     assert "O''Brien scan.h5" in arguments[-1]
     assert "'pearson'" in arguments[-1]
