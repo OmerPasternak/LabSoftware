@@ -4,11 +4,11 @@ from pathlib import Path
 from datetime import datetime
 from PyQt6.QtCore import QProcess, QSettings, QStandardPaths
 from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox
-from .matlab_bridge import matlab_candidates, matlab_arguments
+from .matlab_bridge import matlab_candidates, hidden_matlab_launch
 
 
 def main(argv=None):
-    """Open ShowScanGUI directly; MATLAB stays minimized until workspace requested."""
+    """Open ShowScanGUI directly; MATLAB is invisible until its workspace is explicitly requested."""
     app = QApplication.instance() or QApplication([])
     settings = QSettings("HHGControl", "Analysis")
     saved = str(settings.value("matlab_executable", ""))
@@ -29,7 +29,8 @@ def main(argv=None):
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / f"analysis_{datetime.now():%Y%m%d_%H%M%S_%f}.log"
-        started, _pid = QProcess.startDetached(str(executable), matlab_arguments(log_path))
+        program, arguments = hidden_matlab_launch(log_path)
+        started, _pid = QProcess.startDetached(program, arguments)
         if not started:
             raise OSError("Could not start the analysis interface.")
     except OSError as exc:

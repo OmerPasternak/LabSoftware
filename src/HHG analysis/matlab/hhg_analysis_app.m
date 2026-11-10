@@ -1,10 +1,12 @@
-function hhg_analysis_app(inputPath,workflow)
+function fig = hhg_analysis_app(inputPath,workflow,waitForClose)
 %HHG_ANALYSIS_APP Run an interactive analysis interface without the desktop.
-% -batch owns the process lifetime; closing all analysis figures exits MATLAB.
+% The invisible COM host owns lifetime; CLI callers can wait for figures.
 if nargin<1, inputPath=''; end
 if nargin<2, workflow='show_scan'; end
+if nargin<3, waitForClose=true; end
 assert(ismember(workflow,{'show_scan','statistical','tcs','pearson'}),'HHG:Workflow','Unknown workflow.');
 set(groot,'DefaultFigureVisible','on');
+set(groot,'DefaultFigureWindowStyle','normal');
 try
     fig=hhg_analysis_start();
     set(findall(fig,'Type','uimenu','Label','Review original scripts (sections; do not run blindly)'),'Visible','off');
@@ -15,6 +17,7 @@ try
     if strcmp(workflow,'pearson')&&~isempty(inputPath)
         hhg_analysis_workflow(fig,'pearson');
     end
+    if ~waitForClose, return; end
     % Wait for every analysis window, including plots left open after the
     % analyzer closes. Never expose the desktop/editor as the application.
     while true

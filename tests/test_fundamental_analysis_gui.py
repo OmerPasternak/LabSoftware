@@ -2,7 +2,7 @@
 from pathlib import Path
 from PyQt6.QtCore import QProcess
 from hhg_control.hhg_analysis import window
-from hhg_control.hhg_analysis.matlab_bridge import matlab_arguments
+from hhg_control.hhg_analysis.matlab_bridge import hidden_matlab_launch
 
 
 def test_direct_launch_has_no_intermediate_widget(qtbot, monkeypatch, tmp_path):
@@ -20,11 +20,12 @@ def test_direct_launch_has_no_intermediate_widget(qtbot, monkeypatch, tmp_path):
     assert window.main()==0
     assert set(window.QApplication.topLevelWidgets())==before
     assert len(calls)==1
-    assert '-automation' in calls[0][1]
-    assert "'show_scan'" in calls[0][1][-1]
+    assert calls[0][0].endswith('wscript.exe')
+    assert any("'show_scan',false" in arg for arg in calls[0][1])
 
 
 def test_engine_supports_interactive_workspace_without_starting_desktop():
-    args=matlab_arguments(Path('test.log'))
-    assert '-desktop' not in args and '-batch' not in args
-    assert '-automation' in args and '-r' in args
+    program,args=hidden_matlab_launch(Path('test.log'))
+    assert program.endswith('wscript.exe')
+    assert args[0].endswith('launch_matlab_hidden.vbs')
+    assert '-automation' not in args

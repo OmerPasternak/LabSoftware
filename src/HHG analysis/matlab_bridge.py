@@ -22,6 +22,15 @@ def companion_directory() -> Path:
     return Path(__file__).resolve().parent / "matlab"
 
 
+def hidden_matlab_launch(log_path: Path) -> tuple[str, list[str]]:
+    """Launch a dedicated invisible COM backend and an undocked analyzer."""
+    folder = str(companion_directory()).replace("'", "''")
+    command = f"addpath('{folder}'); hhg_analysis_app('','show_scan',false)"
+    host = Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32/wscript.exe"
+    helper = Path(__file__).resolve().parent / "launch_matlab_hidden.vbs"
+    return str(host), [str(helper), command, str(log_path)]
+
+
 def matlab_arguments(log_path: Path, input_path: Path | None = None, action: str | None = None) -> list[str]:
     """Build literal MATLAB arguments; only a quoted resource path enters code."""
     folder = str(companion_directory()).replace("'", "''")

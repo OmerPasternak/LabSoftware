@@ -3,7 +3,10 @@
 Double-click run_hhg_analysis.vbs at the repository root or in this feature
 folder, or press Fundamental Analysis in the camera GUI. These open the SAME
 ShowScanGUI-based analyzer directly. There is no Python analysis window and
-no TCS/statistics launcher panel. MATLAB starts minimized in the background.
+no TCS/statistics launcher panel. MATLAB runs as a dedicated COM server with Visible=0. Analysis figures use
+standalone windows; neither the MATLAB command window nor a docked figure
+container opens on startup. The VBS helper uses the existing MATLAB COM
+registration and never attaches to or hides another MATLAB session.
 
 Use the original Load Scan ..., Load Image ..., Load Two Color Scan ...,
 and Export data to workspace controls. Current HDF5 input is adapted internally.
