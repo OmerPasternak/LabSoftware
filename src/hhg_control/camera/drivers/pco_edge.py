@@ -5,6 +5,7 @@ Wraps the official `pco` Python SDK (pco.Camera).
 
 import time
 import math
+import sys
 from collections.abc import Callable, Iterator
 from datetime import datetime
 from typing import Tuple, List, Dict, Any
@@ -79,6 +80,8 @@ class PcoEdgeCamera(BaseCamera):
     def connect(self) -> None:
         if self._is_connected:
             return
+        if self._cam is not None:
+            raise RuntimeError("Camera handle retained after failed cleanup; close it before reconnecting.")
         if not self._serial or not str(self._serial).isdigit():
             raise ValueError(f"Configured camera serial must be numeric, got {self._serial!r}.")
         try:
@@ -394,27 +397,55 @@ class PcoEdgeCamera(BaseCamera):
 
         roi = self.get_roi()
         check_stack_memory(num_frames, roi[3] - roi[1], roi[2] - roi[0])
-        self._cam.record(number_of_images=num_frames, mode="sequence")
-        raw_images, metadata_list = self._cam.images()
-        images_array = np.ascontiguousarray(np.stack(raw_images, axis=0), dtype=np.uint16)
-        roi = self.get_roi()
-        
-        metas = []
-        for i, meta in enumerate(metadata_list):
-            cam_time, time_text, timestamp_source = _frame_time_fields(
-                meta if isinstance(meta, dict) else {}
-            )
-            metas.append({
-                "frame_id": i,
-                "camera_timestamp": cam_time,
-                "camera_time_str": time_text,
-                "timestamp_source": timestamp_source,
-                "raw_meta": str(meta),
-                "exposure_s": self._exposure_time_s,
-                "roi": roi
-            })
+        try:
+            self._cam.record(number_of_images=num_frames, mode="sequence")
+            raw_images, metadata_list = self._cam.images()
+            if len(raw_images) != num_frames or len(metadata_list) != num_frames:
+                raise RuntimeError("PCO image/metadata count differs from requested frame count.")
+            frames, metas, previous = [], [], None
+            for frame, raw_meta in zip(raw_images, metadata_list):
+                frame, meta = self._validate_frame(frame, raw_meta, roi, previous)
+                frames.append(frame)
+                metas.append(meta)
+                previous = meta["frame_id"]
+            return np.stack(frames), metas
+        finally:
+            self._stop_recording()
 
-        return images_array, metas
+    def _validate_frame(self, frame, raw_meta, roi, previous_id):
+        """Validate uint16 ROI pixels and recorder identity without conversion."""
+        frame = np.asarray(frame)
+        expected_shape = (roi[3] - roi[1], roi[2] - roi[0])
+        if frame.dtype != np.uint16 or frame.shape != expected_shape:
+            raise RuntimeError(f"PCO FIFO frame has shape {frame.shape} and dtype {frame.dtype}; "
+                               f"expected {expected_shape} and uint16 for ROI {roi}.")
+        if not isinstance(raw_meta, dict) or "recorder image number" not in raw_meta:
+            raise RuntimeError("PCO FIFO image lacks a recorder frame number.")
+        identifier = raw_meta["recorder image number"]
+        if isinstance(identifier, (bool, np.bool_)) or not isinstance(identifier, (int, np.integer)):
+            raise RuntimeError("PCO recorder frame number must be an integer.")
+        frame_id = int(identifier)
+        if not 0 <= frame_id < 2**32:
+            raise RuntimeError("PCO recorder frame number is outside the uint32 domain.")
+        if previous_id is not None and frame_id != (previous_id + 1) % 2**32:
+            raise RuntimeError(f"PCO FIFO frame gap: expected {(previous_id + 1) % 2**32}, got {frame_id}.")
+        cam_time, time_text, timestamp_source = _frame_time_fields(raw_meta)
+        return frame, {
+            "frame_id": frame_id, "camera_timestamp": cam_time, "camera_time_str": time_text,
+            "timestamp_source": timestamp_source, "host_frame_read_monotonic_ns": time.perf_counter_ns(),
+            "raw_meta": str(raw_meta), "exposure_s": self._exposure_time_s, "roi": roi,
+        }
+
+    def _stop_recording(self):
+        """Verify recorder stop; latch lockout and retain any active acquisition error."""
+        acquisition_error = sys.exc_info()[1]
+        try:
+            self._cam.stop()
+            if getattr(self._cam, "is_recording", False):
+                raise RuntimeError("Camera still reports recording after stop.")
+        except BaseException as cleanup:
+            self.state_unknown = True
+            raise RuntimeError(f"Acquisition error: {acquisition_error}; camera state unknown after stop: {cleanup}") from cleanup
 
     def iter_frames(
         self,
@@ -471,33 +502,11 @@ class PcoEdgeCamera(BaseCamera):
                 frame, raw_meta = self._cam.image(image_index=0)
                 host_frame_read_ns = time.perf_counter_ns()
                 handling_started = time.perf_counter() if diagnostics is not None else 0.0
-                frame = np.asarray(frame)
-                expected_shape = (roi[3] - roi[1], roi[2] - roi[0])
-                if frame.dtype != np.uint16 or frame.shape != expected_shape:
-                    raise RuntimeError(
-                        f"PCO FIFO frame has shape {frame.shape} and dtype {frame.dtype}; "
-                        f"expected {expected_shape} and uint16 for ROI {roi}."
-                    )
-                if not isinstance(raw_meta, dict) or "recorder image number" not in raw_meta:
-                    raise RuntimeError("PCO FIFO image lacks a recorder frame number.")
-                frame_id = int(raw_meta["recorder image number"])
-                if previous_id is not None and frame_id != (previous_id + 1) % (2**32):
-                    raise RuntimeError(
-                        f"PCO FIFO frame gap: expected {previous_id + 1}, got {frame_id}."
-                    )
-                previous_id = frame_id
-                cam_time, time_text, timestamp_source = _frame_time_fields(raw_meta)
+                frame, meta = self._validate_frame(frame, raw_meta, roi, previous_id)
+                previous_id = meta["frame_id"]
+                meta["host_frame_read_monotonic_ns"] = host_frame_read_ns
                 images.append(np.ascontiguousarray(frame))
-                metas.append({
-                    "frame_id": frame_id,
-                    "camera_timestamp": cam_time,
-                    "camera_time_str": time_text,
-                    "timestamp_source": timestamp_source,
-                    "host_frame_read_monotonic_ns": host_frame_read_ns,
-                    "raw_meta": str(raw_meta),
-                    "exposure_s": self._exposure_time_s,
-                    "roi": roi,
-                })
+                metas.append(meta)
                 if diagnostics is not None:
                     diagnostics.stage("python_frame_handling", time.perf_counter() - handling_started)
                 if len(images) == batch_size:
@@ -521,7 +530,7 @@ class PcoEdgeCamera(BaseCamera):
                     f"({self.last_fifo_capacity_bytes / 2**20:.1f} MiB): {status}"
                 )
         finally:
-            self._cam.stop()
+            self._stop_recording()
 
     def start_live(self, buffer_size: int = 4) -> None:
         """Start a persistent PCO ring buffer for efficient live display."""
@@ -558,7 +567,7 @@ class PcoEdgeCamera(BaseCamera):
     def stop_live(self) -> None:
         """Stop the PCO recorder if a live ring buffer is active."""
         if self._cam is not None and getattr(self, "_live_active", False):
-            self._cam.stop()
+            self._stop_recording()
         self._live_active = False
 
 

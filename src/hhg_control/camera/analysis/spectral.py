@@ -388,6 +388,20 @@ def validate_harmonic_regions(
     return validated
 
 
+def validate_map_destination(output_path: str | Path, source_path: str | Path) -> Path:
+    """Validate a JSON sidecar destination before any preview or map writes."""
+    output, source = Path(output_path).resolve(), Path(source_path).resolve()
+    if output == source or (output.exists() and source.exists() and output.samefile(source)):
+        raise ValueError("Harmonic map destination must differ from the raw source.")
+    if output.suffix.lower() != ".json":
+        raise ValueError("Harmonic maps require a .json destination.")
+    if output.exists():
+        import h5py
+        if h5py.is_hdf5(output):
+            raise ValueError("An HDF5 acquisition file cannot be a harmonic map destination.")
+    return output
+
+
 def save_harmonic_regions(
     output_path: str | Path,
     regions: Sequence[dict[str, Any]],
@@ -406,7 +420,7 @@ def save_harmonic_regions(
     Existing sidecars are preserved unless overwrite=True explicitly requests
     an atomic replacement of the persistent reference map.
     """
-    output = Path(output_path)
+    output = validate_map_destination(output_path, source_path)
     if output.exists() and not overwrite:
         raise FileExistsError(f"Refusing to overwrite existing harmonic map: {output}")
     height, width = map(int, image_shape_yx)

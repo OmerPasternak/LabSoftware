@@ -7,6 +7,8 @@ from collections import deque
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
+import copy
+import operator
 import math
 import os
 from pathlib import Path
@@ -305,6 +307,7 @@ class CameraScanManager:
         queue_batches: int | None,
         abort_check: Optional[Callable[[], bool]],
         source=None,
+        scan_plan=None,
     ) -> tuple[Path, np.ndarray]:
         step_started = time.perf_counter()
         self.last_step_timing = {}
@@ -385,6 +388,8 @@ class CameraScanManager:
                 "available_physical_memory_at_start_bytes": int(available_memory_at_start),
                 "camera_yields_owned_batches": bool(self.camera.yields_owned_batches),
         }
+        if scan_plan is not None:
+            attrs.update(scan_plan)
         mode = self.camera.get_readout_mode()
         attrs["readout_mode"] = mode.name
         attrs["readout_mode_value"] = int(mode.value)
@@ -455,35 +460,45 @@ class CameraScanManager:
                     writer_ready.set()
                     batches_written = 0
                     next_space_check = 0.0
-                    while True:
-                        queue_wait_started = time.perf_counter()
-                        try:
-                            images, metadata = pending.get(timeout=0.05)
-                        except Empty:
+                    try:
+                        while True:
+                            queue_wait_started = time.perf_counter()
+                            try:
+                                images, metadata = pending.get(timeout=0.05)
+                            except Empty:
+                                queue_get_wait_s += time.perf_counter() - queue_wait_started
+                                if producer_done.is_set():
+                                    break
+                                continue
                             queue_get_wait_s += time.perf_counter() - queue_wait_started
-                            if producer_done.is_set():
-                                break
-                            continue
-                        queue_get_wait_s += time.perf_counter() - queue_wait_started
-                        if images.shape[1:] != (height, width):
-                            raise ValueError(
-                                f"Camera batch shape {images.shape[1:]} differs from applied ROI "
-                                f"shape {(height, width)}."
-                            )
-                        end = written + len(images)
-                        if time.monotonic() >= next_space_check:
-                            check_disk_space(self.storage_dir, images.nbytes)
-                            next_space_check = time.monotonic() + 1.0
-                        write_started = time.perf_counter()
-                        self._write_batch(image_dset, metadata_dset, written, images, metadata)
-                        batch_write_durations.append(time.perf_counter() - write_started)
-                        written = end
-                        batches_written += 1
-                        if batches_written % 32 == 0:
+                            if images.shape[1:] != (height, width):
+                                raise ValueError(
+                                    f"Camera batch shape {images.shape[1:]} differs from applied ROI "
+                                    f"shape {(height, width)}."
+                                )
+                            end = written + len(images)
+                            if time.monotonic() >= next_space_check:
+                                check_disk_space(self.storage_dir, images.nbytes)
+                                next_space_check = time.monotonic() + 1.0
+                            write_started = time.perf_counter()
+                            self._write_batch(image_dset, metadata_dset, written, images, metadata)
+                            batch_write_durations.append(time.perf_counter() - write_started)
+                            written = end
+                            batches_written += 1
+                            if batches_written % 32 == 0:
+                                h5f.attrs["frames_written"] = written
+                                flush_started = time.perf_counter()
+                                h5f.flush()
+                                periodic_flush_durations.append(time.perf_counter() - flush_started)
+                    except BaseException as write_error:
+                        writer_errors.append(write_error)
+                        try:
                             h5f.attrs["frames_written"] = written
-                            flush_started = time.perf_counter()
+                            h5f.attrs["complete"] = False
                             h5f.flush()
-                            periodic_flush_durations.append(time.perf_counter() - flush_started)
+                        except BaseException as progress_error:
+                            writer_errors.append(RuntimeError(f"Partial progress persistence failed: {progress_error}"))
+                        raise
                     h5f.attrs["frames_written"] = written
                     h5f.attrs["writer_queue_max_batches_used"] = max_pending_batches
                     if producer_complete and written == num_frames:
@@ -507,7 +522,8 @@ class CameraScanManager:
                 writer_timing["hdf5_close_s"] = time.perf_counter() - close_started
                 writer_timing["writer_total_s"] = time.perf_counter() - writer_started
             except BaseException as exc:
-                writer_errors.append(exc)
+                if not any(error is exc for error in writer_errors):
+                    writer_errors.append(exc)
                 writer_timing["writer_total_s"] = time.perf_counter() - writer_started
             finally:
                 # Release the producer on initialization failure so it can
@@ -557,7 +573,7 @@ class CameraScanManager:
                     else:
                         queued_images = images.copy()
                         producer_copied_image_bytes += images.nbytes
-                    copied_batch = (queued_images, list(metadata))
+                    copied_batch = (queued_images, copy.deepcopy(metadata))
                     producer_copy_s += time.perf_counter() - copy_started
                     queue_put_started = time.perf_counter()
                     while True:
@@ -636,7 +652,7 @@ class CameraScanManager:
         }
 
         if writer_errors:
-            raise RuntimeError("HDF5 writer failed; partial file retained.") from writer_errors[0]
+            raise RuntimeError("HDF5 writer failed; partial file retained. " + "; ".join(map(str, writer_errors))) from writer_errors[0]
         if producer_error is not None:
             raise producer_error
         if not producer_complete or written != num_frames or latest_frame is None:
@@ -692,12 +708,25 @@ class CameraScanManager:
         """
         if not self.camera.is_connected:
             raise RuntimeError("Cannot execute scan: Camera is disconnected.")
-        if num_steps < 1:
-            raise ValueError(f"Number of steps must be at least 1, got {num_steps}.")
-        if num_frames < 1:
-            raise ValueError("num_frames must be >= 1.")
-        if start_step < 0 or start_step >= num_steps:
-            raise ValueError(f"start_step must be between 0 and {num_steps - 1}, got {start_step}.")
+        for name, count in (("num_steps", num_steps), ("num_frames", num_frames), ("start_step", start_step)):
+            try:
+                if isinstance(count, (bool, np.bool_)):
+                    raise TypeError
+                operator.index(count)
+            except TypeError as exc:
+                raise ValueError(f"{name} must be an integer.") from exc
+        num_steps, num_frames, start_step = map(operator.index, (num_steps, num_frames, start_step))
+        if num_steps < 1 or num_frames < 1:
+            raise ValueError("num_steps and num_frames must be >= 1.")
+        if not 0 <= start_step < num_steps:
+            raise ValueError("start_step must be within the scan grid.")
+        try:
+            coordinates = (start_value, step_size, start_value + (num_steps - 1) * step_size)
+            if not all(math.isfinite(value) for value in coordinates):
+                raise ValueError("Scan coordinates must be finite, including the final setpoint.")
+        except (TypeError, OverflowError) as exc:
+            raise ValueError("Scan coordinates must be finite numeric values without overflow.") from exc
+        run_storage_dir = self.storage_dir
         run_id = run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
 
         from .capture_pipeline import BufferedCamera, ClosedFilePipeline
@@ -731,7 +760,7 @@ class CameraScanManager:
                         self.writer_queue_byte_budget, self.writer_memory_reserve_bytes, storage.collect)
                     # Reuse exactly the existing writer and schema. Its one-batch
                     # queue shares the configured byte limit with the SDK reader.
-                    writer = CameraScanManager(source, self.storage_dir, compression=self.compression,
+                    writer = CameraScanManager(source, run_storage_dir, compression=self.compression,
                                                writer_queue_byte_budget=self.writer_queue_byte_budget,
                                                writer_memory_reserve_bytes=self.writer_memory_reserve_bytes)
                     try:
@@ -740,6 +769,7 @@ class CameraScanManager:
                             experiment_name, step, param_name, value, num_frames,
                             run_id=run_id, batch_size=4, queue_batches=1,
                             abort_check=abort_check, source=source,
+                            scan_plan={"scan_num_steps": num_steps, "scan_start_value": start_value, "scan_step_size": step_size},
                         )
                         manifest = source.finish_manifest()
                         storage.submit(filepath, manifest, acquisition={"started_at": started_at,

@@ -18,6 +18,7 @@ from hhg_control.analysis.spectral import (
     save_harmonic_regions, validate_harmonic_regions,
     calibrate_harmonic_orders,
     is_simulated_spectral_source,
+    validate_map_destination,
 )
 from hhg_control.safe_io import unique_output
 from hhg_control.analysis.plot_windows import show_analysis_figures
@@ -107,6 +108,7 @@ def main(argv: list[str] | None = None) -> int:
         snapshot = None
         try:
             proposed = [dict(region) for region in regions]
+            validate_map_destination(output, args.input)
             validate_harmonic_regions(proposed, width)
             reference_label, accepted = QInputDialog.getItem(
                 window, "Odd harmonic reference", "Choose one known odd harmonic peak:",

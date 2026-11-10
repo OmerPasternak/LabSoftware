@@ -8,6 +8,7 @@ No camera opens at import. All files are retained, including failed checks.
 from __future__ import annotations
 
 import hashlib
+import copy
 import json
 import math
 import multiprocessing
@@ -21,6 +22,21 @@ import traceback
 import numpy as np
 
 from ...safe_io import available_physical_memory_bytes, filesystem_path
+
+
+def _update_metadata_digest(digest, metadata):
+    """Hash normalized JSON values using the writer's existing conversion rules."""
+    from .scan_manager import _json_safe
+    for item in metadata:
+        normalized = json.loads(json.dumps(item, default=_json_safe))
+        digest.update((json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode("utf-8"))
+
+
+def _metadata_digest(metadata):
+    """Return an order-sensitive source reference for complete per-frame metadata."""
+    digest = hashlib.sha256()
+    _update_metadata_digest(digest, metadata)
+    return digest.hexdigest()
 
 
 class BufferedCamera:
@@ -106,7 +122,7 @@ class BufferedCamera:
         self.manifest_partial = Path(str(self.manifest) + ".partial")
         self._manifest = filesystem_path(self.manifest_partial).open("x", encoding="utf-8")
         self.file_start, self.file_frames = self.delivered, attrs["num_frames"]
-        header = {"version": 1, "algorithm": "sha256", "dtype": "<u2",
+        header = {"version": 2, "metadata_encoding": "canonical-json-lines-v1", "algorithm": "sha256", "dtype": "<u2",
                   "shape": [self.file_frames, *self.shape], "settings": {
                       key: attrs[key] for key in ("camera_serial", "roi_bounds", "exposure_time_s",
                                                  "trigger_mode", "readout_mode", "scan_step_index")}}
@@ -133,7 +149,7 @@ class BufferedCamera:
                         raise RuntimeError("Camera frame-ID gap or duplicate in measurement step.")
                     previous = frame_id
                 owned = images if self.camera.yields_owned_batches else images.copy()
-                batch = owned, [dict(item) for item in metadata]
+                batch = owned, copy.deepcopy(metadata)
                 self.retrieved += len(images)
                 available = available_physical_memory_bytes()
                 self.min_available = min(self.min_available, available)
@@ -208,7 +224,7 @@ class BufferedCamera:
                     self.first_id = first
                 self.last_id = last
                 self._manifest.write(json.dumps({"start": self.delivered-self.file_start, "frames": len(images),
-                    "sha256": digest, "first_id": first, "last_id": last}, separators=(",", ":")) + "\n")
+                    "sha256": digest, "metadata_sha256": _metadata_digest(metadata), "first_id": first, "last_id": last}, separators=(",", ":")) + "\n")
                 self.delivered += len(images)
                 yield images, metadata
             if self.delivered == self.frames:
@@ -280,7 +296,7 @@ def verify_file(path, manifest_path, *, read_bytes=64 * 2**20):
             h5py.File(filesystem_path(path), "r") as h5:
         header = json.loads(next(references))
         images, metadata = h5["images"], h5["frame_metadata/json"]
-        if (header["version"] != 1 or header["algorithm"] != "sha256" or header["dtype"] != "<u2"
+        if (header["version"] not in (1, 2) or header["algorithm"] != "sha256" or header["dtype"] != "<u2"
                 or list(images.shape) != header["shape"] or images.dtype != np.dtype("<u2")
                 or not h5.attrs.get("complete", False) or len(metadata) != len(images)
                 or int(h5.attrs.get("frames_written", -1)) != len(images)):
@@ -298,20 +314,25 @@ def verify_file(path, manifest_path, *, read_bytes=64 * 2**20):
         buffer = np.empty((buffer_frames, *images.shape[1:]), dtype="<u2")
         window_start = window_stop = 0
         window_ids = []
+        window_metadata = []
         for line in references:
             block = json.loads(line)
             frames = block["frames"]
             if block["start"] != count or not isinstance(frames, int) or frames < 1 or count + frames > len(images):
                 raise ValueError("Source manifest has missing, repeated or invalid image ranges.")
             digest = hashlib.sha256()
+            metadata_digest = hashlib.sha256()
             end = count + frames
             while count < end:
                 if count >= window_stop:
                     window_start, window_stop = count, min(count + buffer_frames, len(images))
                     images.read_direct(buffer, np.s_[window_start:window_stop], np.s_[:window_stop-window_start])
                     window_ids = []
+                    window_metadata = []
                     for record in metadata[window_start:window_stop]:
-                        identifier = int(json.loads(record)["frame_id"])
+                        decoded = json.loads(record)
+                        window_metadata.append(decoded)
+                        identifier = int(decoded["frame_id"])
                         if previous is not None and identifier != (previous + 1) % 2**32:
                             raise ValueError("Saved frame IDs have a gap or duplicate.")
                         if first is None:
@@ -323,12 +344,17 @@ def verify_file(path, manifest_path, *, read_bytes=64 * 2**20):
                         or stop == end and window_ids[stop-window_start-1] != block["last_id"]):
                     raise ValueError("Saved frame IDs differ from source-pixel references.")
                 digest.update(memoryview(buffer[count-window_start:stop-window_start]).cast("B"))
+                _update_metadata_digest(metadata_digest, window_metadata[count-window_start:stop-window_start])
                 count = stop
+            if header["version"] >= 2 and metadata_digest.hexdigest() != block.get("metadata_sha256"):
+                raise ValueError(f"Saved frame metadata differs from source at frames {block['start']}:{end}.")
             if digest.hexdigest() != block["sha256"]:
                 raise ValueError(f"Saved pixels differ from source at frames {block['start']}:{end}.")
         if count != len(images):
             raise ValueError("Source manifest does not cover every saved frame.")
     return {"frames_verified": count, "pixels_equal_source": True, "consecutive_frame_ids": True,
+            "metadata_equal_source": header["version"] >= 2,
+            "verification_scope": "pixels, frame IDs, root settings" + (", all per-frame JSON metadata" if header["version"] >= 2 else "; legacy manifest has no metadata reference"),
             "first_frame_id": first, "last_frame_id": previous, "verification_s": time.perf_counter()-began,
             "external_trigger_accounting": "NOT_TESTED"}
 

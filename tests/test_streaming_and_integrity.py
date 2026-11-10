@@ -395,3 +395,64 @@ def test_optional_gzip_remains_matlab_readable(tmp_path):
         assert h5f.attrs["storage_compression"] == "gzip"
         assert h5f["images"].shape == (2, 200, 256)
     camera.close()
+
+
+
+def test_direct_writer_snapshots_nested_metadata_and_partial_progress(tmp_path, monkeypatch):
+    camera = _small_camera()
+    gate, changed = threading.Event(), threading.Event()
+    shared = {"frame_id": 42, "nested": {"values": [42]}}
+    def frames(*args, **kwargs):
+        yield np.full((1, 200, 256), 42, dtype=np.uint16), [shared]
+        assert gate.wait(3)
+        shared["frame_id"] = 43; shared["nested"]["values"][0] = 43
+        changed.set()
+        yield np.full((1, 200, 256), 43, dtype=np.uint16), [shared]
+    camera.iter_frames = frames
+    manager = CameraScanManager(camera, tmp_path)
+    original = manager._write_batch
+    calls = []
+    def write(images, metadata, start, pixels, records):
+        calls.append(start)
+        if start == 0:
+            gate.set(); assert changed.wait(3)
+            original(images, metadata, start, pixels, records)
+        else:
+            raise OSError("late batch failure")
+    monkeypatch.setattr(manager, "_write_batch", write)
+    try:
+        with pytest.raises(RuntimeError, match="writer failed"):
+            manager.acquire_and_save_step("partial", 0, "delay", 0, 2, batch_size=1)
+        partial = next(tmp_path.glob("*.partial"))
+        with h5py.File(partial) as h5:
+            assert not h5.attrs["complete"] and h5.attrs["frames_written"] == 1
+            record = json.loads(h5["frame_metadata/json"][0])
+            assert record["frame_id"] == record["nested"]["values"][0] == 42
+            assert np.all(h5["images"][0] == 42)
+    finally:
+        gate.set(); changed.set(); camera.close()
+
+
+@pytest.mark.parametrize('completed,half_pair',[(1,False),(5,False),(1,True)])
+def test_later_writer_failure_counts_only_completed_pairs(tmp_path,monkeypatch,completed,half_pair):
+    camera=_small_camera()
+    def frames(*args,**kwargs):
+        for index in range(completed+1):
+            yield np.full((1,200,256),index,dtype=np.uint16),[{'frame_id':42+index}]
+    camera.iter_frames=frames
+    manager=CameraScanManager(camera,tmp_path);original=manager._write_batch
+    def write(images,metadata,start,pixels,records):
+        if start==completed:
+            if half_pair: images[start:start+1]=pixels
+            raise OSError('injected later/half-pair write error')
+        original(images,metadata,start,pixels,records)
+    monkeypatch.setattr(manager,'_write_batch',write)
+    try:
+        with pytest.raises(RuntimeError,match='writer failed'):
+            manager.acquire_and_save_step('recover',0,'delay',0,completed+1,batch_size=1)
+        with h5py.File(next(tmp_path.glob('*.partial'))) as h5:
+            assert not h5.attrs['complete'] and h5.attrs['frames_written']==completed
+            assert [json.loads(record)['frame_id'] for record in h5['frame_metadata/json'][:completed]]==list(range(42,42+completed))
+            np.testing.assert_array_equal(h5['images'][:completed,0,0],np.arange(completed))
+            assert h5['frame_metadata/json'][completed] in (b'','')
+    finally: camera.close()
