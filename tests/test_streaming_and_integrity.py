@@ -106,7 +106,7 @@ def test_abort_retains_partial_file(tmp_path):
         manager.acquire_and_save_step(
             "abort", 0, "delay_mm", 0.0, 8, run_id="run", abort_check=lambda: True
         )
-    partials = list(tmp_path.glob("*.partial"))
+    partials = list(tmp_path.glob("*.h5.partial"))
     assert len(partials) == 1
     assert manager.state == "IDLE"
     camera.close()
@@ -148,7 +148,7 @@ def test_bounded_writer_queue_fails_instead_of_silently_losing_frames(tmp_path):
             "backpressure", 0, "delay_mm", 0.0, 20,
             batch_size=1, queue_batches=1,
         )
-    partials = list(tmp_path.glob("*.partial"))
+    partials = list(tmp_path.glob("*.h5.partial"))
     assert len(partials) == 1
     with h5py.File(partials[0], "r") as h5f:
         assert not h5f.attrs["complete"]
@@ -380,7 +380,7 @@ def test_writer_error_retains_incomplete_step(tmp_path):
     with pytest.raises(RuntimeError, match="writer failed"):
         manager.acquire_and_save_step("disk_error", 0, "x", 0.0, 3)
     assert not list(tmp_path.glob("*.h5"))
-    assert len(list(tmp_path.glob("*.partial"))) == 1
+    assert len(list(tmp_path.glob("*.h5.partial"))) == 1
     assert manager.state == "IDLE"
     camera.close()
 
@@ -423,7 +423,7 @@ def test_direct_writer_snapshots_nested_metadata_and_partial_progress(tmp_path, 
     try:
         with pytest.raises(RuntimeError, match="writer failed"):
             manager.acquire_and_save_step("partial", 0, "delay", 0, 2, batch_size=1)
-        partial = next(tmp_path.glob("*.partial"))
+        partial = next(tmp_path.glob("*.h5.partial"))
         with h5py.File(partial) as h5:
             assert not h5.attrs["complete"] and h5.attrs["frames_written"] == 1
             record = json.loads(h5["frame_metadata/json"][0])
@@ -450,7 +450,7 @@ def test_later_writer_failure_counts_only_completed_pairs(tmp_path,monkeypatch,c
     try:
         with pytest.raises(RuntimeError,match='writer failed'):
             manager.acquire_and_save_step('recover',0,'delay',0,completed+1,batch_size=1)
-        with h5py.File(next(tmp_path.glob('*.partial'))) as h5:
+        with h5py.File(next(tmp_path.glob('*.h5.partial'))) as h5:
             assert not h5.attrs['complete'] and h5.attrs['frames_written']==completed
             assert [json.loads(record)['frame_id'] for record in h5['frame_metadata/json'][:completed]]==list(range(42,42+completed))
             np.testing.assert_array_equal(h5['images'][:completed,0,0],np.arange(completed))

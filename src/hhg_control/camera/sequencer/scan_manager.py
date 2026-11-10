@@ -7,13 +7,13 @@ from collections import deque
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
-import copy
 import operator
 import math
 import os
 from pathlib import Path
 from queue import Empty, Full, Queue
 import re
+import sys
 import threading
 import time
 from typing import Any, Optional
@@ -21,6 +21,8 @@ from typing import Any, Optional
 import numpy as np
 
 from ..drivers.base_camera import BaseCamera, TriggerMode
+from ..payload import CameraPayload, combine_errors
+from .recovery import RecoveryJournal
 from ...safe_io import available_physical_memory_bytes, check_disk_space, filesystem_path
 
 
@@ -112,6 +114,7 @@ class CameraScanManager:
         *, compression: str | None = None,
         writer_queue_byte_budget: int = DEFAULT_WRITER_QUEUE_BYTES,
         writer_memory_reserve_bytes: int = DEFAULT_WRITER_MEMORY_RESERVE_BYTES,
+        recovery_journals=None,
     ) -> None:
         """Configure scan storage; use no compression for fast acquisition.
 
@@ -133,6 +136,59 @@ class CameraScanManager:
         self._state = "IDLE"
         self.last_step_timing: dict[str, Any] = {}
         self.last_scan_pipeline: dict[str, Any] = {}
+        self._recovery_journals = [] if recovery_journals is None else recovery_journals
+        self.last_recovery = []
+
+    @property
+    def pending_recovery_payloads(self):
+        """Expose unpersisted evidence; keep this session alive until retry succeeds."""
+        return tuple(payload for journal in self._recovery_journals for payload in journal.payloads.pending)
+
+    def _require_recovered_payloads(self):
+        """Prevent another acquisition from obscuring a failed recovery attempt."""
+        if any(journal.payloads for journal in self._recovery_journals):
+            raise RuntimeError("Unpersisted acquisition evidence remains in RAM; restore storage and call retry_pending_recovery before acquiring again.")
+
+    def retry_pending_recovery(self):
+        """Retry only retained recovery writes while idle; issue no camera commands."""
+        with self._operation("RECOVERING"), self._camera_lock:
+            for journal in self._recovery_journals:
+                if journal.payloads:
+                    journal.persist()
+            self.last_recovery = [journal.summary() for journal in self._recovery_journals]
+        return self.last_recovery
+
+    def _preserve_pending(self, camera, origin, reason, local=(), context=None):
+        """Collect stopped owners' buffers before writing incomplete evidence.
+
+        The shared journal list keeps failed writes reachable on the original
+        scan manager even when a per-file writer/source goes out of scope.
+        """
+        if context is None and hasattr(camera, "sensor"):
+            context = {"camera": camera.sensor, "roi_bounds": camera.roi, "exposure_time_s": camera.exposure,
+                       "readout_mode": camera.readout.name, "trigger_mode": camera.trigger.value}
+        journal = RecoveryJournal(origin, reason, context)
+        for payload in local:
+            if payload is not None:
+                journal.payloads.retain(payload)
+        collection_error = None
+        recover = getattr(camera, "recover_pending_payloads", None)
+        if recover is not None:
+            try:
+                recover(journal.payloads.retain)
+            except BaseException as exc:
+                collection_error = exc
+        if journal.payloads:
+            self._recovery_journals[:] = [item for item in self._recovery_journals if item.payloads]
+            self._recovery_journals.append(journal)
+            try:
+                journal.persist()
+            except BaseException as exc:
+                self.last_recovery = [item.summary() for item in self._recovery_journals]
+                raise RuntimeError(f"Recovery storage failed: {exc}; unpersisted payloads remain in RAM on pending_recovery_payloads; keep the session alive and retry_pending_recovery().") from exc
+            self.last_recovery = [journal.summary()]
+        if collection_error is not None:
+            raise collection_error
 
     @property
     def state(self) -> str:
@@ -142,6 +198,8 @@ class CameraScanManager:
 
     @contextmanager
     def _operation(self, state: str):
+        if state in ("SCANNING", "PREVIEW", "LIVE"):
+            self._require_recovered_payloads()
         with self._state_lock:
             if self._state != "IDLE":
                 raise RuntimeError(f"Camera is busy ({self._state}); cannot start {state}.")
@@ -218,6 +276,7 @@ class CameraScanManager:
 
     def start_live(self, buffer_size: int = 4) -> None:
         """Enter LIVE state and start the camera's persistent preview buffer."""
+        self._require_recovered_payloads()
         with self._state_lock:
             if self._state != "IDLE":
                 raise RuntimeError(f"Camera is busy ({self._state}); cannot start LIVE.")
@@ -402,6 +461,7 @@ class CameraScanManager:
         latest_frame: np.ndarray | None = None
         captured = 0
         written = 0
+        producer_payload = writer_payload = None
         producer_error: BaseException | None = None
         producer_complete = False
         max_pending_batches = 0
@@ -416,7 +476,7 @@ class CameraScanManager:
 
         def write_batches() -> None:
             """Own the HDF5 handle and drain copied frame batches in order."""
-            nonlocal written
+            nonlocal written, writer_payload
             writer_started = time.perf_counter()
             batch_write_durations = _Timings()
             periodic_flush_durations = _Timings()
@@ -464,7 +524,8 @@ class CameraScanManager:
                         while True:
                             queue_wait_started = time.perf_counter()
                             try:
-                                images, metadata = pending.get(timeout=0.05)
+                                writer_payload = pending.get(timeout=0.05)
+                                images, metadata = writer_payload.images, writer_payload.metadata
                             except Empty:
                                 queue_get_wait_s += time.perf_counter() - queue_wait_started
                                 if producer_done.is_set():
@@ -481,7 +542,9 @@ class CameraScanManager:
                                 check_disk_space(self.storage_dir, images.nbytes)
                                 next_space_check = time.monotonic() + 1.0
                             write_started = time.perf_counter()
+                            writer_payload.context.update(may_overlap_partial=True, file_frame_start=written)
                             self._write_batch(image_dset, metadata_dset, written, images, metadata)
+                            writer_payload = None
                             batch_write_durations.append(time.perf_counter() - write_started)
                             written = end
                             batches_written += 1
@@ -490,6 +553,26 @@ class CameraScanManager:
                                 flush_started = time.perf_counter()
                                 h5f.flush()
                                 periodic_flush_durations.append(time.perf_counter() - flush_started)
+                        h5f.attrs["frames_written"] = written
+                        h5f.attrs["writer_queue_max_batches_used"] = max_pending_batches
+                        if producer_complete and written == num_frames:
+                            h5f.attrs["complete"] = True
+                        final_flush_started = time.perf_counter()
+                        h5f.flush()
+                        writer_timing["hdf5_final_flush_s"] = time.perf_counter() - final_flush_started
+                        writer_timing["hdf5_batch_write_s"] = batch_write_durations.total
+                        writer_timing["hdf5_batch_write_max_s"] = batch_write_durations.maximum
+                        writer_timing["hdf5_batch_write_p50_s"] = batch_write_durations.percentile(50)
+                        writer_timing["hdf5_batch_write_p95_s"] = batch_write_durations.percentile(95)
+                        writer_timing["hdf5_batch_write_p99_s"] = batch_write_durations.percentile(99)
+                        writer_timing["hdf5_percentile_sample_limit"] = 4096
+                        writer_timing["hdf5_periodic_flush_s"] = periodic_flush_durations.total
+                        writer_timing["hdf5_periodic_flush_max_s"] = periodic_flush_durations.maximum
+                        writer_timing["writer_queue_get_wait_s"] = queue_get_wait_s
+                        for key, value in writer_timing.items():
+                            if key.startswith("hdf5_"):
+                                h5f.attrs[f"timing_{key}"] = value
+                        close_started = time.perf_counter()
                     except BaseException as write_error:
                         writer_errors.append(write_error)
                         try:
@@ -499,26 +582,6 @@ class CameraScanManager:
                         except BaseException as progress_error:
                             writer_errors.append(RuntimeError(f"Partial progress persistence failed: {progress_error}"))
                         raise
-                    h5f.attrs["frames_written"] = written
-                    h5f.attrs["writer_queue_max_batches_used"] = max_pending_batches
-                    if producer_complete and written == num_frames:
-                        h5f.attrs["complete"] = True
-                    final_flush_started = time.perf_counter()
-                    h5f.flush()
-                    writer_timing["hdf5_final_flush_s"] = time.perf_counter() - final_flush_started
-                    writer_timing["hdf5_batch_write_s"] = batch_write_durations.total
-                    writer_timing["hdf5_batch_write_max_s"] = batch_write_durations.maximum
-                    writer_timing["hdf5_batch_write_p50_s"] = batch_write_durations.percentile(50)
-                    writer_timing["hdf5_batch_write_p95_s"] = batch_write_durations.percentile(95)
-                    writer_timing["hdf5_batch_write_p99_s"] = batch_write_durations.percentile(99)
-                    writer_timing["hdf5_percentile_sample_limit"] = 4096
-                    writer_timing["hdf5_periodic_flush_s"] = periodic_flush_durations.total
-                    writer_timing["hdf5_periodic_flush_max_s"] = periodic_flush_durations.maximum
-                    writer_timing["writer_queue_get_wait_s"] = queue_get_wait_s
-                    for key, value in writer_timing.items():
-                        if key.startswith("hdf5_"):
-                            h5f.attrs[f"timing_{key}"] = value
-                    close_started = time.perf_counter()
                 writer_timing["hdf5_close_s"] = time.perf_counter() - close_started
                 writer_timing["writer_total_s"] = time.perf_counter() - writer_started
             except BaseException as exc:
@@ -546,6 +609,14 @@ class CameraScanManager:
                     ),
                 )
                 for images, metadata in iterator:
+                    copy_started = time.perf_counter()
+                    producer_payload = CameraPayload.snapshot(images, metadata,
+                        owned=self.camera.yields_owned_batches, origin="writer input batch",
+                        frames=len(images), recording_start=getattr(self.camera, "file_start", 0)+captured)
+                    if not self.camera.yields_owned_batches:
+                        producer_copied_image_bytes += images.nbytes
+                    images, metadata = producer_payload.images, producer_payload.metadata
+                    producer_copy_s += time.perf_counter() - copy_started
                     if abort_check is not None and abort_check():
                         raise AcquisitionAborted(
                             f"Acquisition stopped after {captured} of {num_frames} frames."
@@ -567,14 +638,7 @@ class CameraScanManager:
                                 f"{self.writer_memory_reserve_bytes / 2**30:.1f} GiB reserved. "
                                 "Acquisition stopped and the partial file was retained."
                             )
-                    copy_started = time.perf_counter()
-                    if self.camera.yields_owned_batches:
-                        queued_images = images
-                    else:
-                        queued_images = images.copy()
-                        producer_copied_image_bytes += images.nbytes
-                    copied_batch = (queued_images, copy.deepcopy(metadata))
-                    producer_copy_s += time.perf_counter() - copy_started
+                    copied_batch = producer_payload
                     queue_put_started = time.perf_counter()
                     while True:
                         try:
@@ -600,6 +664,7 @@ class CameraScanManager:
                                 ) from exc
                     queue_put_durations.append(time.perf_counter() - queue_put_started)
                     captured += len(images)
+                    producer_payload = None
                     diagnostics = getattr(self.camera, "acquisition_diagnostics", None)
                     if diagnostics is not None:
                         diagnostics.queue_sample(captured, written, pending.qsize(),
@@ -626,13 +691,28 @@ class CameraScanManager:
                     if close_iterator is not None:
                         close_iterator()
                 except BaseException as exc:
-                    if producer_error is None:
-                        producer_error = exc
-                        producer_complete = False
+                    producer_error = combine_errors(producer_error, exc, "producer iterator cleanup failed")
+                    producer_complete = False
                 producer_done.set()
                 drain_started = time.perf_counter()
                 writer.join()
                 writer_drain_s = time.perf_counter() - drain_started
+                if producer_error is not None or writer_errors or not producer_complete:
+                    retained = [writer_payload]
+                    while True:
+                        try:
+                            retained.append(pending.get_nowait())
+                        except Empty:
+                            break
+                    retained.append(producer_payload)
+                    try:
+                        self._preserve_pending(self.camera, filepath,
+                            "; ".join(str(error) for error in [producer_error, *writer_errors] if error is not None) or "Acquisition incomplete",
+                            retained, context=attrs)
+                    except BaseException as recovery_error:
+                        producer_error = combine_errors(producer_error, recovery_error, "evidence recovery failed")
+                        if writer_errors:
+                            writer_errors.append(recovery_error)
 
         self.last_step_timing = {
             "captured_frames": captured,
@@ -648,6 +728,7 @@ class CameraScanManager:
             "writer_queue_max_batches_used": max_pending_batches,
             "writer_queue_capacity_batches": queue_batches,
             "writer_queue_capacity_bytes": queue_capacity_bytes,
+            "recovery": self.last_recovery,
             **writer_timing,
         }
 
@@ -737,6 +818,7 @@ class CameraScanManager:
         with self._operation("SCANNING"), self._camera_lock:
             storage = ClosedFilePipeline()
             continuous_source = None
+            last_output = run_storage_dir / f"{sanitize_filename_component(experiment_name)}_{sanitize_filename_component(run_id)}_unassigned"
             try:
                 try:
                     storage.start(abort_check)
@@ -749,6 +831,8 @@ class CameraScanManager:
                         storage.wait_for_slot(abort_check)
                     except AcquisitionAborted:
                         break
+                    if continuous_source is not None:
+                        continuous_source.check_error()
                     value = start_value + step * step_size
                     if on_step_start is not None:
                         on_step_start(step, value)
@@ -762,7 +846,8 @@ class CameraScanManager:
                     # queue shares the configured byte limit with the SDK reader.
                     writer = CameraScanManager(source, run_storage_dir, compression=self.compression,
                                                writer_queue_byte_budget=self.writer_queue_byte_budget,
-                                               writer_memory_reserve_bytes=self.writer_memory_reserve_bytes)
+                                               writer_memory_reserve_bytes=self.writer_memory_reserve_bytes,
+                                               recovery_journals=self._recovery_journals)
                     try:
                         started_at = time.perf_counter()
                         filepath, latest_frame = writer._acquire_and_save_step(
@@ -771,6 +856,7 @@ class CameraScanManager:
                             abort_check=abort_check, source=source,
                             scan_plan={"scan_num_steps": num_steps, "scan_start_value": start_value, "scan_step_size": step_size},
                         )
+                        last_output = filepath
                         manifest = source.finish_manifest()
                         storage.submit(filepath, manifest, acquisition={"started_at": started_at,
                             "capture_and_save_s": time.perf_counter() - started_at,
@@ -788,6 +874,7 @@ class CameraScanManager:
                     # STOP between files must end SDK retrieval immediately,
                     # before waiting for outstanding closed-file checks.
                     continuous_source.close()
+                    self._preserve_pending(continuous_source, last_output, "Unassigned recording tail at scan end")
                 storage.finish()
                 self.last_scan_pipeline = {"files_verified": storage.completed,
                                            "max_pending_files": storage.peak_pending,
@@ -795,6 +882,12 @@ class CameraScanManager:
                                            "continuous_recording": continuous, "start_step": start_step,
                                            **storage.durable_summary()}
             finally:
-                if continuous_source is not None:
-                    continuous_source.close()
-                storage.close()
+                active_error = sys.exc_info()[1]
+                try:
+                    if continuous_source is not None:
+                        continuous_source.close()
+                        self._preserve_pending(continuous_source, last_output, active_error or "Unassigned recording tail")
+                except BaseException as cleanup:
+                    raise combine_errors(active_error, cleanup, "recording-tail recovery failed")
+                finally:
+                    storage.close()

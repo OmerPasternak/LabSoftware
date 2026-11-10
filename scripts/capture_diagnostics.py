@@ -12,6 +12,7 @@ import threading
 import time
 
 import numpy as np
+from hhg_control.camera.payload import CameraPayload, PayloadLedger
 
 
 class Samples:
@@ -225,11 +226,22 @@ class ProfileCamera:
 
     def __init__(self, camera, probe):
         self.camera, self.acquisition_diagnostics = camera, probe
+        self._pending_payloads = PayloadLedger()
 
     def __getattr__(self, name):
         return getattr(self.camera, name)
 
+    def recover_pending_payloads(self, receive):
+        """Transfer batches rejected by profiling, then underlying driver evidence."""
+        self._pending_payloads.drain_to(receive)
+        recover = getattr(self.camera, "recover_pending_payloads", None)
+        if recover is not None:
+            recover(receive)
+
     def iter_frames(self, *args, **kwargs):
+        if self._pending_payloads:
+            raise RuntimeError("Unpersisted profiling payloads remain; recover before acquiring again.")
+        delivered = 0
         probe = self.acquisition_diagnostics
         probe.iterator_started = time.perf_counter()
         iterator = self.camera.iter_frames(*args, **kwargs)
@@ -241,9 +253,15 @@ class ProfileCamera:
                 except StopIteration:
                     probe.stage("driver_next", time.perf_counter() - began)
                     break
-                probe.stage("driver_next", time.perf_counter() - began)
-                probe.observe(images, metadata)
+                try:
+                    probe.stage("driver_next", time.perf_counter() - began)
+                    probe.observe(images, metadata)
+                except BaseException:
+                    self._pending_payloads.retain(CameraPayload.snapshot(images, metadata,
+                        owned=self.camera.yields_owned_batches, origin="profiling failed before handoff", frames=len(images), recording_start=delivered))
+                    raise
                 began = time.perf_counter()
+                delivered += len(images)
                 yield images, metadata
                 probe.stage("consumer_between_batches", time.perf_counter() - began)
         finally:

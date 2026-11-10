@@ -256,7 +256,9 @@ def test_reader_buffer_is_bounded_and_stops_on_full_without_a_consumer(cfg):
             assert source.full_events == 1 and not source.read_complete
         finally:
             source.close_iterator()
-        assert not source.reader.is_alive() and source.discarded_on_abort == 2
+        assert not source.reader.is_alive() and source.discarded_on_abort == 0
+        assert source.recovered_on_abort == 4
+        assert source.recovery_journals[0].summary()["complete"] is False
 
 
 def test_reader_failure_is_reported_and_camera_iterator_is_closed(cfg, monkeypatch):

@@ -24,6 +24,7 @@ import numpy as np
 from scripts import lab_computer_acceptance as lab
 from scripts import capture_diagnostics as capture_diag
 from hhg_control.sequencer.scan_manager import CameraScanManager, _frame_chunk_shape
+from hhg_control.camera.payload import CameraPayload, PayloadLedger
 from hhg_control.safe_io import filesystem_path
 
 
@@ -458,6 +459,14 @@ class _PixelReferenceCamera:
         self.blocks = []
         self.hash_s = 0.0
         self.hash_cpu_s = 0.0
+        self._pending_payloads = PayloadLedger()
+
+    def recover_pending_payloads(self, receive):
+        """Transfer an unhanded hashing batch and underlying stopped buffers."""
+        self._pending_payloads.drain_to(receive)
+        recover = getattr(self.camera, "recover_pending_payloads", None)
+        if recover is not None:
+            recover(receive)
 
     def __getattr__(self, name):
         return getattr(self.camera, name)
@@ -466,8 +475,10 @@ class _PixelReferenceCamera:
         """Yield original batches after SHA-256 over canonical little-endian pixels."""
         iterator = self.camera.iter_frames(*args, **kwargs)
         start = 0
+        unhanded = None
         try:
             for images, metadata in iterator:
+                unhanded = (images, metadata)
                 began = time.perf_counter()
                 cpu_began = time.thread_time()
                 pixels = np.ascontiguousarray(images, dtype="<u2")
@@ -476,8 +487,13 @@ class _PixelReferenceCamera:
                 self.hash_cpu_s += time.thread_time() - cpu_began
                 self.blocks.append({"start": start, "frames": len(images), "sha256": digest})
                 start += len(images)
+                unhanded = None
                 yield images, metadata
         finally:
+            if unhanded is not None:
+                images, metadata = unhanded
+                self._pending_payloads.retain(CameraPayload.snapshot(images, metadata,
+                    owned=self.camera.yields_owned_batches, origin="pixel-reference failed before handoff", frames=len(images), recording_start=start))
             iterator.close()
 
 
