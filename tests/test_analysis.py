@@ -29,7 +29,7 @@ def test_analysis_hdf5_loaders_and_beam_profiling(tmp_path):
             step_index=step,
             param_name="delay_stage_mm",
             param_value=float(step * 0.2),
-            num_frames=2
+            num_frames=2, run_id="analysis_test"
         )
         saved_files.append(filepath)
 

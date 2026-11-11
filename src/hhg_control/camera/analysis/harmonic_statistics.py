@@ -15,7 +15,7 @@ import json
 
 import numpy as np
 
-from .hdf5_io import iter_scan_step_frames
+from .hdf5_io import iter_scan_step_frames, normalize_roi_bounds
 from .spectral import _read_source_metadata, load_harmonic_regions
 
 
@@ -121,7 +121,7 @@ def compute_si_harmonic_g2(
         if tuple(harmonic_map["image_shape_yx"]) != shape[1:]:
             raise ValueError(f"Harmonic map image shape does not match {path.name}.")
         roi = metadata.get("roi_bounds")
-        if roi is not None and harmonic_map.get("roi_bounds_xyxy") != roi:
+        if roi is not None and normalize_roi_bounds(harmonic_map.get("roi_bounds_xyxy")) != normalize_roi_bounds(roi):
             raise ValueError(f"Harmonic map ROI does not match {path.name}.")
         if "complete" not in metadata:
             warnings.append(f"{path.name}: completion metadata absent (legacy file); confirm acquisition completed.")
@@ -138,6 +138,15 @@ def compute_si_harmonic_g2(
         raise ValueError("Reference mismatch in exposure; use matched detector settings.")
     if len(known_exposures) != 3:
         warnings.append("exposure: not recorded in all inputs; matching settings not verified.")
+    # ON/OFF are paired at one scientific coordinate. The no-XUV background
+    # may be reused across delays, but must still match detector settings above.
+    pairing_fields = ("scan_parameter_name", "scan_parameter_units", "scan_parameter_value", "trigger_mode")
+    for key in pairing_fields:
+        values = [metadata.get(key) for metadata, _ in headers[:2]]
+        if any(value is None for value in values):
+            warnings.append(f"ON/OFF {key}: matching unverified (legacy metadata missing).")
+        elif not np.array_equal(values[0], values[1]):
+            raise ValueError(f"ON/OFF reference mismatch in {key}.")
     stacks = [_moments(path, regions, batch_size) for path in paths]
     on, off, bg = stacks
     results = []
@@ -168,6 +177,8 @@ def compute_si_harmonic_g2(
         "analysis_type": "SI background-corrected pixel-intensity MCP intercept estimate",
         "method_reference": "Even Tzur et al., arXiv:2511.18362v1, SI S8-S11, pp. S4-S7",
         "source_files": dict(zip(("BSV_ON", "BSV_OFF", "BACKGROUND"), map(lambda p: str(p.resolve()), paths))),
+        "observed_input_settings": {name: metadata for name, (metadata, _) in zip(("BSV_ON", "BSV_OFF", "BACKGROUND"), headers)},
+        "pairing_policy": "ON/OFF same coordinate, parameter units and trigger; background delay-independent, matched detector/exposure settings",
         "frame_counts": dict(zip(("BSV_ON", "BSV_OFF", "BACKGROUND"), (s["count"] for s in stacks))),
         "harmonic_map": harmonic_map,
         "harmonic_map_sha256": hashlib.sha256(json.dumps(harmonic_map, sort_keys=True).encode()).hexdigest(),

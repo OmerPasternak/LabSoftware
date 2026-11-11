@@ -2,7 +2,7 @@
 PyQt6 Graphical User Interface for pco.edge 5.5 sCMOS Camera Control and Scan Sequencer.
 Implements top-left Go/Stop controls, horizontal widescreen layout with side control panel,
 bright, directly editable color-scale limits beside the image,
-source-labelled frame timestamps, and hardware-constrained symmetrical ROI.
+source-labelled frame timestamps, and hardware-constrained ROI controls.
 """
 
 import sys
@@ -17,7 +17,7 @@ from datetime import datetime
 import numpy as np
 
 from PyQt6 import sip
-from PyQt6.QtCore import Qt, QPointF, QEvent, QProcess
+from PyQt6.QtCore import Qt, QPointF, QEvent
 from PyQt6.QtGui import QColor, QPainter
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -34,10 +34,8 @@ import matplotlib.patches as mpatches
 
 from hhg_control.camera.drivers.base_camera import BaseCamera, ReadoutMode, TriggerMode
 from hhg_control.camera.drivers.camera_defaults import DEFAULT_CAMERA_SERIAL
-from hhg_control.camera.analysis.spectral import default_harmonic_map_path
 from hhg_control.camera.drivers.mock_camera import MockPcoCamera
 from hhg_control.camera.sequencer.scan_manager import CameraScanManager
-from hhg_control.project_paths import project_root
 from .workers import (
     CameraConnectTask,
     CameraDisconnectTask,
@@ -48,6 +46,7 @@ from .workers import (
     LiveStreamTask,
     PreviewTask,
     ScanSequenceTask,
+    StorageDirectoryTask,
 )
 
 IMAGE_AXIS_RECT = (0.12, 0.08, 0.83, 0.86)
@@ -203,8 +202,13 @@ class CameraMainWindow(QMainWindow):
         self._current_executing_step: int = 0
         self._frame_count: int = 0
         self._closing: bool = False
+        self._fundamental_analysis_window = None
         self._after_live_stopped: Optional[Callable[[], None]] = None
         self._after_connect: Optional[Callable[[], None]] = None
+        self.active_storage_task = None
+        self._scan_preflight_failed = False
+        self._stop_generation = 0
+        self._run_fingerprint = None
         self._resume_live_after_mode: bool = False
         self._resume_live_after_trigger: bool = False
         self._trigger_change_succeeded: bool = False
@@ -217,7 +221,7 @@ class CameraMainWindow(QMainWindow):
         self._colorbar = None
         self._timestamp_artist = None
         self._plot_background = None
-        self._roi_patch = None           # persistent Rectangle patch drawn when ROI is applied or edited
+        self._roi_patch = None           # always None; only the in-progress drag is painted
         self._roi_drag_patch = None
         self._roi_drag_start: Optional[tuple[float, float]] = None
         self._roi_change_pending = False
@@ -232,7 +236,6 @@ class CameraMainWindow(QMainWindow):
         self._is_dragging_roi: bool = False
         self._preview_edit_until = 0.0
         self._numeric_editors = set()
-        self._analysis_processes: list[QProcess] = []
 
         self._build_ui()
         # Block competing edits without greying out the entire settings area.
@@ -545,33 +548,33 @@ class CameraMainWindow(QMainWindow):
         self.spn_roi_x1.valueChanged.connect(self._on_roi_x1_changed)
         lay_cam.addWidget(self.spn_roi_x1, 2, 2, 1, 2)
 
-        lay_cam.addWidget(QLabel("Y (sym):"), 3, 0)
+        self.lbl_roi_y_axis = QLabel("Y:")
+        lay_cam.addWidget(self.lbl_roi_y_axis, 3, 0)
         self.spn_roi_y0 = QSpinBox()
         self.spn_roi_y0.setMinimumWidth(60)
         self.spn_roi_y0.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        # Accept either sensor-side edge here. An upper-half coordinate is
-        # normalized to the matching lower edge after editing.
         self.spn_roi_y0.setRange(0, 2160)
         self.spn_roi_y0.setValue(0)
         self.spn_roi_y0.setKeyboardTracking(False)
-        self.spn_roi_y0.setToolTip("ROI Y lower edge; entering an upper edge (e.g. 1116) sets its symmetric pair.")
+        self.spn_roi_y0.setToolTip("ROI Y start in sensor pixels.")
         self.spn_roi_y0.valueChanged.connect(self._on_roi_y0_changed)
         lay_cam.addWidget(self.spn_roi_y0, 3, 1)
 
         self.spn_roi_y1 = QSpinBox()
         self.spn_roi_y1.setMinimumWidth(60)
         self.spn_roi_y1.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        self.spn_roi_y1.setRange(1088, 2160)
+        self.spn_roi_y1.setRange(0, 2160)
         self.spn_roi_y1.setValue(2160)
         self.spn_roi_y1.setKeyboardTracking(False)
-        self.spn_roi_y1.setToolTip("ROI Y End — auto-set symmetrically")
+        self.spn_roi_y1.setToolTip("ROI Y end in sensor pixels (exclusive).")
         self.spn_roi_y1.valueChanged.connect(self._on_roi_y1_changed)
         lay_cam.addWidget(self.spn_roi_y1, 3, 2, 1, 2)
 
-        lbl_roi_hint = QLabel("Y edges mirror around 1080; enter either edge. X in 4-px steps.")
-        lbl_roi_hint.setWordWrap(True)
-        lbl_roi_hint.setStyleSheet("font-size: 9px; color: #6c757d; font-style: italic;")
-        lay_cam.addWidget(lbl_roi_hint, 4, 0, 1, 4)
+        self.lbl_roi_hint = QLabel()
+        self.lbl_roi_hint.setWordWrap(True)
+        self.lbl_roi_hint.setStyleSheet("font-size: 9px; color: #6c757d; font-style: italic;")
+        lay_cam.addWidget(self.lbl_roi_hint, 4, 0, 1, 4)
+        self._update_roi_constraint_ui()
 
         roi_btn_row = QHBoxLayout()
         roi_btn_row.setSpacing(4)
@@ -694,30 +697,16 @@ class CameraMainWindow(QMainWindow):
         self.btn_open_folder = QPushButton("Open")
         self.btn_open_folder.clicked.connect(self._open_storage_folder)
 
-        self.btn_spectral_covariance = QPushButton("X Pearson")
-        self.btn_spectral_covariance.setToolTip(
-            "Show the Pearson correlation matrix (-1 to +1) between x pixels across saved frames."
-        )
-        self.btn_spectral_covariance.clicked.connect(self._launch_spectral_covariance)
-        self.btn_mark_harmonics = QPushButton("Mark Harmonics")
-        self.btn_mark_harmonics.setToolTip(
-            "Detect harmonic windows in saved data, review them, and replace the remembered map."
-        )
-        self.btn_mark_harmonics.clicked.connect(self._launch_harmonic_marker)
-        self.btn_harmonic_g2 = QPushButton("Harmonic g²")
-        self.btn_harmonic_g2.setToolTip(
-            "Use remembered windows and saved ON/OFF/BACKGROUND files for SI MCP-corrected g²."
-        )
-        self.btn_harmonic_g2.clicked.connect(self._launch_harmonic_g2)
+        self.btn_fundamental_analysis = QPushButton("Fundamental Analysis")
+        self.btn_fundamental_analysis.setToolTip("Open the dedicated data-analysis window.")
+        self.btn_fundamental_analysis.clicked.connect(self._open_fundamental_analysis)
 
         folder_buttons = QHBoxLayout()
         folder_buttons.setSpacing(4)
         folder_buttons.addWidget(self.btn_browse)
         folder_buttons.addWidget(self.btn_open_folder)
         folder_buttons.addStretch(1)
-        folder_buttons.addWidget(self.btn_spectral_covariance)
-        folder_buttons.addWidget(self.btn_mark_harmonics)
-        folder_buttons.addWidget(self.btn_harmonic_g2)
+        folder_buttons.addWidget(self.btn_fundamental_analysis)
         store_grid.addLayout(folder_buttons, 1, 0, 1, 2)
 
         store_grid.addWidget(QLabel("Header:"), 2, 0)
@@ -733,6 +722,7 @@ class CameraMainWindow(QMainWindow):
 
         # Greatly reduced height for activity log so it doesn't take over vertical space
         self.txt_activity_log = QTextEdit()
+        self.txt_activity_log.document().setMaximumBlockCount(2000)
         self.txt_activity_log.setReadOnly(True)
         self.txt_activity_log.setStyleSheet("font-family: Consolas, monospace; font-size: 10px;")
         self.txt_activity_log.setFixedHeight(60)
@@ -745,103 +735,11 @@ class CameraMainWindow(QMainWindow):
 
         self._update_progress_display()
 
-    def _launch_spectral_covariance(self) -> None:
-        """Launch offline Pearson correlation analysis for one completed scan step."""
-        filepath, _ = QFileDialog.getOpenFileName(
-            self,
-            "Choose one completed scan-step HDF5 file",
-            self.txt_storage_dir.text().strip(),
-            "HDF5 camera scans (*.h5 *.hdf5)",
-        )
-        if filepath:
-            self._launch_analysis_script("analyze_spectral_covariance.py", Path(filepath))
+    def _open_fundamental_analysis(self) -> None:
+        """Show the separate analysis window without coupling it to acquisition state."""
+        from hhg_control.hhg_analysis.window import main
+        main()
 
-    def _launch_harmonic_marker(self) -> None:
-        """Open a completed HDF5 step's mean snapshot in the harmonic marker."""
-        filepath, _ = QFileDialog.getOpenFileName(
-            self,
-            "Choose a completed scan-step HDF5 file",
-            self.txt_storage_dir.text().strip(),
-            "HDF5 camera scans (*.h5 *.hdf5)",
-        )
-        if filepath:
-            self._launch_analysis_script("mark_harmonic_limits.py", Path(filepath))
-
-    def _launch_harmonic_g2(self) -> None:
-        """Analyze saved ON/OFF/background files using the persistent reference map."""
-        map_path = default_harmonic_map_path()
-        if not map_path.is_file():
-            QMessageBox.warning(self, "Harmonic Map Missing", "Run Mark Harmonics and confirm the windows first.")
-            return
-        selected = []
-        for name in ("BSV ON", "BSV OFF (coherent only)", "BACKGROUND (no XUV)"):
-            path, _ = QFileDialog.getOpenFileName(
-                self, f"Choose {name} saved HDF5 file", self.txt_storage_dir.text().strip(),
-                "HDF5 camera scans (*.h5 *.hdf5)",
-            )
-            if not path:
-                return
-            selected.append(path)
-        self._launch_analysis_script(
-            "analyze_harmonic_g2.py", Path(selected[0]),
-            extra_args=["--bsv-off", selected[1], "--background", selected[2]],
-        )
-
-    def _launch_analysis_script(
-        self, script_name: str, input_path: Path, extra_args: Optional[list[str]] = None
-    ) -> None:
-        """Run a GUI analysis script asynchronously, leaving the acquisition UI responsive."""
-        script_path = project_root() / "scripts" / script_name
-        if not script_path.is_file():
-            QMessageBox.warning(self, "Analysis Tool Missing", f"Could not find analysis script:\n{script_path}")
-            return
-
-        process = QProcess(self)
-        process.setProgram(sys.executable)
-        process.setArguments([str(script_path), str(input_path), *(extra_args or [])])
-        process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
-        process.readyReadStandardOutput.connect(
-            lambda proc=process: self._read_analysis_output(proc)
-        )
-        process.finished.connect(
-            lambda exit_code, _status, proc=process, name=script_name:
-                self._on_analysis_finished(proc, name, exit_code)
-        )
-        process.errorOccurred.connect(
-            lambda error, proc=process, name=script_name:
-                self._on_analysis_process_error(proc, name, error)
-        )
-        self._analysis_processes.append(process)
-        self._append_log(f"[ANALYSIS] Starting {script_name} for {input_path}.")
-        process.start()
-
-    def _read_analysis_output(self, process: QProcess) -> None:
-        """Forward child-process output into the existing activity log."""
-        output = bytes(process.readAllStandardOutput()).decode("utf-8", errors="replace").strip()
-        if output:
-            for line in output.splitlines():
-                self._append_log(f"[ANALYSIS] {line}")
-
-    def _on_analysis_finished(self, process: QProcess, script_name: str, exit_code: int) -> None:
-        """Record the completion status and release the process wrapper."""
-        self._read_analysis_output(process)
-        status = "completed" if exit_code == 0 else f"failed (exit code {exit_code})"
-        self._append_log(f"[ANALYSIS] {script_name} {status}.")
-        if process in self._analysis_processes:
-            self._analysis_processes.remove(process)
-        process.deleteLater()
-
-    def _on_analysis_process_error(self, process: QProcess, script_name: str, error) -> None:
-        """Report failed script startup or an unexpected child-process error."""
-        self._append_log(f"[ANALYSIS ERROR] {script_name}: {process.errorString()} ({error}).")
-        if error == QProcess.ProcessError.FailedToStart:
-            if process in self._analysis_processes:
-                self._analysis_processes.remove(process)
-            process.deleteLater()
-
-    # =========================================================================
-    # GO and STOP Controls (Top-Left Docked)
-    # =========================================================================
     def _set_go_button_style(self, active: bool) -> None:
         if self._go_visual_active == active:
             return
@@ -969,6 +867,7 @@ class CameraMainWindow(QMainWindow):
     def _on_stop_clicked(self) -> None:
         """Global Stop: halts live view or gracefully aborts in-progress scan."""
         self._append_log("[STOP] Stop button pressed.")
+        self._stop_generation += 1
         if self._configuration_display_preserved:
             self._configuration_display_preserved = False
             self._set_go_button_style(active=False)
@@ -1024,6 +923,7 @@ class CameraMainWindow(QMainWindow):
         self._hardware_state_unknown = False
         self.camera = camera
         self.scan_manager.camera = self.camera
+        self._update_roi_constraint_ui()
         self._connected_source = "simulated" if is_sim else "physical"
         self._configure_writer_memory()
         self._append_log(f"[CAMERA SETTINGS] Serial {camera.get_sensor_info().get('serial_number')}; exposure {camera._exposure_time_s} s; mode {camera._readout_mode.name}; trigger {camera._trigger_mode.value}.")
@@ -1140,6 +1040,7 @@ class CameraMainWindow(QMainWindow):
         self.chk_external_trigger.blockSignals(False)
         self.camera = MockPcoCamera()
         self.scan_manager.camera = self.camera
+        self._update_roi_constraint_ui()
         self.figure.clear()
         self.axis = self.figure.add_axes(IMAGE_AXIS_RECT)
         self.canvas.coordinate_axis = self.axis
@@ -1218,7 +1119,7 @@ class CameraMainWindow(QMainWindow):
         if was_live:
             self._mode_change_pending = True
             self._configuration_controls(True)
-            self._stop_live(after_stop=lambda: self._start_mode_change(mode, resume_live=True))
+            self._stop_live(after_stop=lambda generation=self._stop_generation: self._start_mode_change(mode, resume_live=generation == self._stop_generation))
             return
         self._start_mode_change(mode, resume_live=False)
 
@@ -1323,7 +1224,7 @@ class CameraMainWindow(QMainWindow):
         if self._is_live_active:
             self._trigger_change_pending = True
             self._configuration_controls(True)
-            self._stop_live(after_stop=lambda: self._start_trigger_change(mode, resume_live=True))
+            self._stop_live(after_stop=lambda generation=self._stop_generation: self._start_trigger_change(mode, resume_live=generation == self._stop_generation))
             return
         self._start_trigger_change(mode, resume_live=False)
 
@@ -1445,8 +1346,8 @@ class CameraMainWindow(QMainWindow):
             low:  Lower intensity bound in ADU (0–65534).
             high: Upper intensity bound in ADU (1–65535, must be > low).
         """
-        self._clim_low = max(0, low)
-        self._clim_high = min(65535, max(low + 1, high))
+        self._clim_low = min(65534, max(0, int(low)))
+        self._clim_high = min(65535, max(self._clim_low + 1, int(high)))
         # Sync spinboxes without triggering extra redraws
         self.spn_clim_low.blockSignals(True)
         self.spn_clim_high.blockSignals(True)
@@ -1455,29 +1356,16 @@ class CameraMainWindow(QMainWindow):
         self.spn_clim_low.blockSignals(False)
         self.spn_clim_high.blockSignals(False)
         if self._image_artist is not None:
-            self._image_artist.set_clim(self._clim_low, self._clim_high)
+            with self._image_artist.norm.callbacks.blocked():
+                self._image_artist.set_clim(self._clim_low, self._clim_high)
+            self._image_artist.changed()
             self._colorbar.set_ticks([])
             self._plot_background = None
             self.canvas.draw_idle()
 
     def _on_clim_changed(self) -> None:
         """Apply color limits immediately whenever spinbox values change."""
-        low = self.spn_clim_low.value()
-        high = self.spn_clim_high.value()
-        if high <= low:
-            high = min(65535, low + 1)
-            self.spn_clim_high.blockSignals(True)
-            self.spn_clim_high.setValue(high)
-            self.spn_clim_high.blockSignals(False)
-        if low == self._clim_low and high == self._clim_high:
-            return
-        self._clim_low = low
-        self._clim_high = high
-        if self._image_artist is not None:
-            self._image_artist.set_clim(self._clim_low, self._clim_high)
-            self._colorbar.set_ticks([])
-            self._plot_background = None
-            self.canvas.draw_idle()
+        self._set_clim(self.spn_clim_low.value(), self.spn_clim_high.value())
 
     def _on_clim_apply_clicked(self) -> None:
         self._on_clim_changed()
@@ -1550,8 +1438,6 @@ class CameraMainWindow(QMainWindow):
         self.canvas.restore_region(self._plot_background)
         if self._image_artist is not None:
             self.axis.draw_artist(self._image_artist)
-        if self._roi_patch is not None:
-            self.axis.draw_artist(self._roi_patch)
         if self._roi_drag_patch is not None:
             self.axis.draw_artist(self._roi_drag_patch)
         if self._timestamp_artist is not None:
@@ -1582,7 +1468,7 @@ class CameraMainWindow(QMainWindow):
             if self.lbl_intensity_metrics.styleSheet() != metrics_style:
                 self.lbl_intensity_metrics.setStyleSheet(metrics_style)
             self.lbl_intensity_metrics.setText(
-                f"Pixel Intensity Metrics | Minimum: {c_min:,} ADU | Maximum: {c_max:,} ADU | Mean: {c_mean:,.1f} ADU{sat_warning}"
+                f"Pixel Intensity Metrics | Minimum{' (sampled)' if sample is not frame else ''}: {c_min:,} ADU | Maximum: {c_max:,} ADU | Mean{' (sampled)' if sample is not frame else ''}: {c_mean:,.1f} ADU{sat_warning}"
             )
 
         # Downsample to the current image axes so display work tracks the viewer size.
@@ -1674,15 +1560,17 @@ class CameraMainWindow(QMainWindow):
             self._blit_frame()
 
     # =========================================================================
-    # Hardware ROI Symmetrical Constraints & Dynamic Redraw
+    # Hardware ROI Constraints & Dynamic Redraw
     # =========================================================================
     def _sync_roi_patch_from_spinboxes(self) -> None:
-        """Redraw the persistent ROI rectangle patch directly from current spinbox values."""
-        x0 = self.spn_roi_x0.value()
-        x1 = self.spn_roi_x1.value()
-        y0 = self.spn_roi_y0.value()
-        y1 = self.spn_roi_y1.value()
-        self._draw_roi_patch(x0, y0, x1, y1)
+        """Clear the transient selection outline; ROI bounds remain in the controls."""
+        if self._roi_patch is None:
+            return
+        patch = self._roi_patch
+        self._roi_patch = None
+        if patch.axes is not None:
+            patch.remove()
+        self._blit_frame()
 
     def _on_roi_x0_changed(self) -> None:
         """Ensure minimum span of 64 px (push X End up if needed) and redraw ROI."""
@@ -1720,29 +1608,88 @@ class CameraMainWindow(QMainWindow):
             self._is_updating_roi = False
         self._sync_roi_patch_from_spinboxes()
 
-    def _on_roi_y0_changed(self) -> None:
-        """Map either typed Y edge to a centered ROI with at least 16 px height."""
-        if self._is_updating_roi:
-            return
+    def _roi_vertical_limits(self) -> tuple[int, int, int, bool]:
+        """Return sensor height, Y step, minimum height, and symmetry requirement."""
+        height = int(self.camera.get_sensor_info().get("height", 2160))
+        limits = self.camera.get_roi_limits()
+        step_y = max(1, int(limits["steps"][1]))
+        min_height = max(1, int(limits["minimum"][1]))
+        symmetric_y = bool(limits["symmetric"][1])
+        return height, step_y, min_height, symmetric_y
+
+    def _update_roi_constraint_ui(self) -> None:
+        """Show the connected camera's Y ROI capability without altering raw coordinates."""
+        height, step_y, min_height, symmetric_y = self._roi_vertical_limits()
         self._is_updating_roi = True
         try:
-            edge = self.spn_roi_y0.value()
-            lower = min(edge, 2160 - edge, 1072)
-            self.spn_roi_y0.setValue(lower)
-            self.spn_roi_y1.setValue(2160 - lower)
+            self.spn_roi_y0.setSingleStep(step_y)
+            self.spn_roi_y1.setSingleStep(step_y)
+            if symmetric_y:
+                half_minimum = (min_height + 1) // 2
+                # Accept a coordinate from either half, then map it to the
+                # hardware-required mirrored pair in the value-change handler.
+                self.spn_roi_y0.setRange(0, height)
+                self.spn_roi_y1.setRange(min(height, height // 2 + half_minimum), height)
+                y0 = min(self.spn_roi_y0.value(), max(0, height // 2 - half_minimum))
+                self.spn_roi_y0.setValue(y0)
+                self.spn_roi_y1.setValue(height - y0)
+                self.lbl_roi_y_axis.setText("Y (sym):")
+                self.lbl_roi_hint.setText(
+                    f"Y bounds must mirror around {height // 2}; X uses 4-pixel steps."
+                )
+            else:
+                self.spn_roi_y0.setRange(0, height)
+                self.spn_roi_y1.setRange(0, height)
+                self.lbl_roi_y_axis.setText("Y:")
+                self.lbl_roi_hint.setText(
+                    f"Y bounds can be positioned independently; minimum height {min_height} px. "
+                    "X uses 4-pixel steps."
+                )
+        finally:
+            self._is_updating_roi = False
+        self._sync_roi_patch_from_spinboxes()
+
+    def _on_roi_y0_changed(self) -> None:
+        """Keep Y bounds valid while preserving off-center placement when supported."""
+        if self._is_updating_roi:
+            return
+        height, _step_y, min_height, symmetric_y = self._roi_vertical_limits()
+        self._is_updating_roi = True
+        try:
+            y0, y1 = self.spn_roi_y0.value(), self.spn_roi_y1.value()
+            if symmetric_y:
+                half_minimum = (min_height + 1) // 2
+                lower = min(y0, height - y0, height // 2 - half_minimum)
+                y0 = max(0, lower)
+                y1 = height - y0
+            elif y1 - y0 < min_height:
+                y1 = min(height, y0 + min_height)
+                if y1 - y0 < min_height:
+                    y0 = max(0, y1 - min_height)
+            self.spn_roi_y0.setValue(y0)
+            self.spn_roi_y1.setValue(y1)
         finally:
             self._is_updating_roi = False
         self._sync_roi_patch_from_spinboxes()
 
     def _on_roi_y1_changed(self) -> None:
-        """Force symmetrical vertical constraint around y=1080 (Y0 = 2160 - Y1) and redraw ROI."""
+        """Keep the Y span valid without recentering an asymmetric ROI."""
         if self._is_updating_roi:
             return
+        height, _step_y, min_height, symmetric_y = self._roi_vertical_limits()
         self._is_updating_roi = True
         try:
-            val = self.spn_roi_y1.value()
-            val = max(1088, min(2160, val))
-            self.spn_roi_y0.setValue(2160 - val)
+            y0, y1 = self.spn_roi_y0.value(), self.spn_roi_y1.value()
+            if symmetric_y:
+                half_minimum = (min_height + 1) // 2
+                y1 = max(height // 2 + half_minimum, min(height, y1))
+                y0 = height - y1
+            elif y1 - y0 < min_height:
+                y0 = max(0, y1 - min_height)
+                if y1 - y0 < min_height:
+                    y1 = min(height, y0 + min_height)
+            self.spn_roi_y0.setValue(y0)
+            self.spn_roi_y1.setValue(y1)
         finally:
             self._is_updating_roi = False
         self._sync_roi_patch_from_spinboxes()
@@ -1753,8 +1700,24 @@ class CameraMainWindow(QMainWindow):
         else:
             self._on_canvas_button_release(None)
 
+    @staticmethod
+    def _snap_roi_span(start: float, end: float, sensor_size: int,
+                       step: int, minimum: int) -> tuple[int, int]:
+        """Round a drawn interval outward to hardware steps and minimum size."""
+        step = max(1, step)
+        minimum_span = ((minimum + step - 1) // step) * step
+        lower = max(0, int(np.floor(start / step)) * step)
+        upper = min(sensor_size, int(np.ceil(end / step)) * step)
+        if upper - lower < minimum_span:
+            upper = min(sensor_size, lower + minimum_span)
+            if upper - lower < minimum_span:
+                lower = max(0, upper - minimum_span)
+                lower = (lower // step) * step
+                upper = min(sensor_size, lower + minimum_span)
+        return lower, upper
+
     def _on_roi_drawn(self, start_x: float, start_y: float, end_x: float, end_y: float) -> None:
-        """Handle rectangle drawn on image: expand Y symmetrically around 1080 and snap X."""
+        """Snap a drawn rectangle to hardware steps while preserving its placement."""
         x_min, x_max = sorted([start_x, end_x])
         y_min, y_max = sorted([start_y, end_y])
 
@@ -1764,15 +1727,15 @@ class CameraMainWindow(QMainWindow):
         x0 = max(0, min(2496, x0))
         x1 = max(x0 + 64, min(2560, x1))
 
-        # Enforce pco.edge 5.5 vertical symmetry centered at 1080 (minimal bounding)
-        center_y = 1080
-        max_dist = max(abs(center_y - y_min), abs(y_max - center_y))
-        max_dist = max(8.0, max_dist)
-
-        y0 = int(round(center_y - max_dist))
-        y1 = int(round(center_y + max_dist))
-        y0 = max(0, min(1072, y0))
-        y1 = min(2160, max(1088, y1))
+        height, step_y, min_height, symmetric_y = self._roi_vertical_limits()
+        if symmetric_y:
+            center_y = height / 2
+            max_dist = max(abs(center_y - y_min), abs(y_max - center_y), min_height / 2)
+            y0 = int(np.floor((center_y - max_dist) / step_y) * step_y)
+            y0 = max(0, min(height // 2, y0))
+            y1 = height - y0
+        else:
+            y0, y1 = self._snap_roi_span(y_min, y_max, height, step_y, min_height)
 
         self._is_updating_roi = True
         try:
@@ -1783,11 +1746,11 @@ class CameraMainWindow(QMainWindow):
         finally:
             self._is_updating_roi = False
 
-        # Display the persistent minimal symmetric ROI outline
-        self._draw_roi_patch(x0, y0, x1, y1)
+        # Keep the selected coordinates in the controls; do not leave an outline.
+        self._sync_roi_patch_from_spinboxes()
 
         self._append_log(
-            f"[ROI SELECTED] Minimal bounding symmetric ROI: X:[{x0}, {x1}], Y:[{y0}, {y1}] ({x1-x0}x{y1-y0} px).\n"
+            f"[ROI SELECTED] X:[{x0}, {x1}], Y:[{y0}, {y1}] ({x1-x0}x{y1-y0} px).\n"
             f"               Click 'Apply Hardware ROI' to apply to camera sensor."
         )
 
@@ -1805,28 +1768,6 @@ class CameraMainWindow(QMainWindow):
         self.btn_draw_roi.setChecked(False)
         self.btn_draw_roi.blockSignals(was_blocked)
 
-    def _draw_roi_patch(self, x0: int, y0: int, x1: int, y1: int) -> None:
-        """Stamp a persistent thin red outline rectangle onto the axis."""
-        width = x1 - x0
-        height = y1 - y0
-        if self._roi_patch is None:
-            self._roi_patch = mpatches.Rectangle(
-                (x0, y0), width, height,
-                linewidth=1.5, edgecolor="red", facecolor="none",
-                linestyle="-", zorder=5, fill=False
-            )
-            self._roi_patch.set_animated(True)
-            self.axis.add_patch(self._roi_patch)
-        else:
-            self._roi_patch.set_bounds(x0, y0, width, height)
-        if self._image_artist is None:
-            self.axis.set_xlim(0, 2560)
-            self.axis.set_ylim(2160, 0)
-            self.axis.set_aspect("auto")
-            self.canvas.draw_idle()
-        else:
-            self._blit_frame()
-
     def _apply_roi(self) -> None:
         """Queue a valid sensor-pixel ROI change after live acquisition stops."""
         # Snap to valid hardware constraints
@@ -1835,8 +1776,15 @@ class CameraMainWindow(QMainWindow):
         x0 = max(0, min(2496, x0))
         x1 = max(x0 + 64, min(2560, x1))
 
-        y0 = self.spn_roi_y0.value()
-        y1 = 2160 - y0
+        height, step_y, min_height, symmetric_y = self._roi_vertical_limits()
+        if symmetric_y:
+            y0 = self.spn_roi_y0.value()
+            y1 = height - y0
+        else:
+            y0, y1 = self._snap_roi_span(
+                self.spn_roi_y0.value(), self.spn_roi_y1.value(), height,
+                step_y, min_height,
+            )
 
         self._is_updating_roi = True
         try:
@@ -1907,7 +1855,7 @@ class CameraMainWindow(QMainWindow):
                 f"Y:[{y0}, {y1}] ({x1-x0}x{y1-y0} px)."
             )
             self._deactivate_draw_roi()
-            self._draw_roi_patch(x0, y0, x1, y1)
+            self._sync_roi_patch_from_spinboxes()
             self._clear_paused_scan("Hardware ROI modified")
 
     def _on_roi_task_error(self, error: str) -> None:
@@ -2097,28 +2045,34 @@ class CameraMainWindow(QMainWindow):
     # Storage Directory Handlers
     # =========================================================================
     def _on_storage_dir_edited(self) -> None:
-        folder = Path(self.txt_storage_dir.text().strip()).expanduser()
-        self.scan_manager.set_storage_dir(folder)
+        # The text is a pending destination; filesystem validation belongs to the scan worker.
+        if self.active_scan_task is not None:
+            self.txt_storage_dir.setText(str(self.scan_manager.storage_dir))
 
     def _browse_directory(self) -> None:
+        if self.active_scan_task is not None:
+            return
         chosen_dir = QFileDialog.getExistingDirectory(
             self, "Select Destination Folder for HDF5 Datasets", self.txt_storage_dir.text()
         )
         if chosen_dir:
             self.txt_storage_dir.setText(chosen_dir)
-            self.scan_manager.set_storage_dir(chosen_dir)
             self._append_log(f"[STORAGE] Destination folder set to: {chosen_dir}")
 
     def _open_storage_folder(self) -> None:
-        folder = Path(self.txt_storage_dir.text().strip()).expanduser().resolve()
-        folder.mkdir(parents=True, exist_ok=True)
-        try:
-            if sys.platform == "win32":
-                os.startfile(str(folder))
-            else:
-                subprocess.Popen(["xdg-open", str(folder)])
-        except Exception as err:
-            QMessageBox.warning(self, "Unable to Open Folder", f"Could not open directory:\n{err}")
+        if self.active_storage_task is not None:
+            return
+        task = StorageDirectoryTask(self.txt_storage_dir.text().strip())
+        self.active_storage_task = task
+        task.error_occurred.connect(lambda error: QMessageBox.warning(self, "Unable to Open Folder", error))
+        task.finished.connect(self._on_storage_task_finished)
+        task.start()
+
+    def _on_storage_task_finished(self):
+        """Release folder-worker ownership and complete a pending cooperative close."""
+        task, self.active_storage_task = self.active_storage_task, None
+        if task is not None: task.deleteLater()
+        if self._closing: self.close()
 
     # =========================================================================
     # Automated Scan Execution & Pause / Resume Coordination
@@ -2148,6 +2102,14 @@ class CameraMainWindow(QMainWindow):
             return "PHYSICAL"
         return "CAMERA"
 
+    def _measurement_fingerprint(self):
+        """Identify a paused run's scientific settings and frozen output selection."""
+        return (self._connected_source, self.camera._exposure_time_s, self.camera._readout_mode,
+                self.camera._trigger_mode, self._cached_roi(), self.spn_frames.value(),
+                self.spn_start_val.value(), self.spn_step_size.value(), self.spn_num_steps.value(),
+                self.txt_scan_param.text(), self.txt_file_header.text(),
+                os.path.normcase(os.path.abspath(os.path.expanduser(self.txt_storage_dir.text().strip()))))
+
     def _toggle_measurement_scan(self) -> None:
         """Start scan, stop in-progress scan, or continue paused scan."""
         if not self.camera.is_connected:
@@ -2169,8 +2131,8 @@ class CameraMainWindow(QMainWindow):
             return
 
         # Stop live stream cleanly before starting multi-step scan
-        if self._is_live_active:
-            self._resume_live_after_scan = True
+        if self.active_live_task is not None:
+            self._resume_live_after_scan = self._is_live_active
             self._stop_live(after_stop=self._toggle_measurement_scan)
             return
 
@@ -2218,43 +2180,21 @@ class CameraMainWindow(QMainWindow):
             self._resume_live_if_scan_not_started()
             return
 
+        fingerprint = self._measurement_fingerprint()
+        if self._paused_step is not None and fingerprint != self._run_fingerprint:
+            self._clear_paused_scan("Acquisition settings or destination changed; starting a new run.")
         start_step = self._paused_step if self._paused_step is not None else 0
-        if start_step == 0:
+        if self._paused_step is None:
             self._current_run_id = datetime.now().strftime("%Y%m%dT%H%M%S_%f")
             self._scan_active_elapsed_s = 0.0
+            self._run_fingerprint = fingerprint
         else:
             self._current_run_id = self._paused_run_id
-
-        target_dir = Path(self.txt_storage_dir.text().strip()).expanduser().resolve()
-        target_dir.mkdir(parents=True, exist_ok=True)
-        remaining_steps = self.spn_num_steps.value() - start_step
-        raw_bytes = (
-            (active_roi[2] - active_roi[0]) * (active_roi[3] - active_roi[1])
-            * 2 * self.spn_frames.value() * remaining_steps
-        )
-        required_bytes = int(raw_bytes * 1.1) + 100_000_000
-        try:
-            free_bytes = shutil.disk_usage(target_dir).free
-        except OSError as exc:
-            message = f"Cannot check free space in {target_dir}: {exc}"
-            self._append_log(f"[SCAN BLOCKED] {message}")
-            QMessageBox.warning(self, "Storage Check Failed", message)
-            self._resume_live_if_scan_not_started()
-            return
-        if required_bytes > free_bytes:
-            message = (
-                f"This measurement needs about {required_bytes / 1024**3:.1f} GiB "
-                f"for {remaining_steps} remaining steps; only {free_bytes / 1024**3:.1f} GiB "
-                "is free. Reduce ROI, frames, or steps, or choose a drive with more space."
-            )
-            self._append_log(f"[SCAN BLOCKED] {message}")
-            QMessageBox.warning(self, "Insufficient Storage", message)
-            self._resume_live_if_scan_not_started()
-            return
-        self.scan_manager.set_storage_dir(target_dir)
+        target_dir = self.txt_storage_dir.text().strip()
         self._configure_writer_memory()
 
         self._scan_completed_successfully = False
+        self._scan_preflight_failed = False
         self._set_ui_scanning_state(is_scanning=True)
 
         exp_name = self.txt_file_header.text().strip() or "HHG_Scan"
@@ -2295,7 +2235,7 @@ class CameraMainWindow(QMainWindow):
             num_frames=num_frames,
             start_step=start_step,
             run_id=self._current_run_id,
-            expected_roi=active_roi, expected_trigger=requested_trigger,
+            expected_roi=active_roi, expected_trigger=requested_trigger, target_dir=target_dir,
         )
         self.active_scan_task.step_started.connect(self._on_scan_step_started)
         self.active_scan_task.step_completed.connect(self._on_scan_step_completed)
@@ -2320,6 +2260,9 @@ class CameraMainWindow(QMainWindow):
         return self._scan_active_elapsed_s
 
     def _set_ui_scanning_state(self, is_scanning: bool) -> None:
+        self.txt_storage_dir.setEnabled(not is_scanning)
+        self.txt_file_header.setEnabled(not is_scanning)
+        self.txt_scan_param.setEnabled(not is_scanning)
         if is_scanning:
             self.btn_take_measurement.setText("Stop Measurement")
             self.btn_take_measurement.setStyleSheet(
@@ -2458,6 +2401,8 @@ class CameraMainWindow(QMainWindow):
         self._append_log(f"[SCAN FINALIZED] Scan cut at Step {stopped}. Next scan will start from Step 1.")
 
     def _on_scan_error(self, err_msg: str) -> None:
+        self._scan_preflight_failed = self.active_scan_task is not None and not self.active_scan_task.acquisition_started
+        self._hardware_state_unknown = self._hardware_state_unknown or getattr(self.camera, "state_unknown", False)
         self._scan_completed_successfully = False
         elapsed_s = self._finish_scan_segment()
         self._append_log(
@@ -2468,6 +2413,8 @@ class CameraMainWindow(QMainWindow):
         QMessageBox.warning(self, "Scan Execution Error", f"Scan error occurred:\n\n{err_msg}")
 
     def _on_scan_task_finished(self) -> None:
+        # A cancelled reader can discover a failed stop during final cleanup.
+        self._hardware_state_unknown = self._hardware_state_unknown or getattr(self.camera, "state_unknown", False)
         if self.active_scan_task is not None:
             self.active_scan_task.deleteLater()
             self.active_scan_task = None
@@ -2489,11 +2436,13 @@ class CameraMainWindow(QMainWindow):
             self.btn_cut_measurement.setVisible(False)
 
         self._set_ui_scanning_state(is_scanning=False)
+        if self._hardware_state_unknown:
+            self._configuration_controls(False)
 
         # If user closed window while scan was aborting, finish close now
         if self._closing:
             self.close()
-        elif self._resume_live_after_scan and self._scan_completed_successfully:
+        elif self._resume_live_after_scan and (self._scan_completed_successfully or self._scan_preflight_failed):
             self._resume_live_after_scan = False
             self._append_log("[LIVE] Resuming live view after measurement.")
             self._start_live()
@@ -2509,6 +2458,11 @@ class CameraMainWindow(QMainWindow):
         self._is_live_active = False
         self._resume_live_after_scan = False
         self._after_live_stopped = None
+        self._stop_generation += 1
+        self._exposure_change_pending = self._mode_change_pending = False
+        self._roi_change_pending = self._trigger_change_pending = False
+        self._resume_live_after_exposure = self._resume_live_after_mode = False
+        self._resume_live_after_roi = self._resume_live_after_trigger = False
 
         if self.active_scan_task is not None and self.active_scan_task.isRunning():
             self._closing = True
@@ -2552,7 +2506,11 @@ class CameraMainWindow(QMainWindow):
             event.ignore()
             return
 
-        if self.active_exposure_task is not None or self._exposure_change_pending:
+        if self.active_storage_task is not None:
+            self._closing = True
+            event.ignore()
+            return
+        if self.active_exposure_task is not None and self.active_exposure_task.isRunning():
             self._closing = True
             event.ignore()
             return

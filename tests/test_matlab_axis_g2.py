@@ -55,6 +55,10 @@ def test_matlab_folder_pixel_g2_and_x_correlation(tmp_path):
     auto_data_dir.mkdir()
     auto_script = auto_script_dir / script.name
     shutil.copyfile(script, auto_script)
+    canonical = script.parents[1] / "src/HHG analysis/matlab/hhg_analysis_axis_g2.m"
+    target = auto_project / "src/HHG analysis/matlab"
+    target.mkdir(parents=True)
+    shutil.copyfile(canonical, target / canonical.name)
     shutil.copyfile(good / "a.h5", auto_data_dir / "a.h5")
     shutil.copyfile(good / "b.h5", auto_data_dir / "b.h5")
 
@@ -141,3 +145,19 @@ def test_matlab_folder_pixel_g2_and_x_correlation(tmp_path):
         np.testing.assert_allclose(actual_matrix, expected_matrix, rtol=1e-6, equal_nan=True)
         np.testing.assert_allclose(actual_g2x, expected_g2x, rtol=1e-6, equal_nan=True)
         np.testing.assert_array_equal(actual_pixels, expected_pixels)
+
+
+
+def test_matlab_bright_weak_fluctuations_are_stable_across_batches(tmp_path):
+    matlab=shutil.which("matlab")
+    if matlab is None: pytest.skip("MATLAB is not installed")
+    data=np.full((4,2048,2),65000,dtype=np.uint16)
+    data[:,0,0]=[65000,65001,65000,65001]
+    data[:,0,1]=[65001,65000,65001,65000]
+    _write_mock_step(tmp_path/"bright.h5",data)
+    root=Path(__file__).resolve().parents[1]
+    literal=lambda p:str(p).replace("'","''")
+    command=f"addpath('{literal(root/'src/HHG analysis/matlab')}'); "
+    command+=f"for batch=[1 2 3 4]; r=hhg_analysis_axis_g2('{literal(tmp_path)}',[],1,0,batch,false); assert(abs(r.pearsonMatrix(1,2)+1)<1e-12); end"
+    result=subprocess.run([matlab,"-batch",command],capture_output=True,text=True,timeout=120)
+    assert result.returncode==0,result.stdout+result.stderr

@@ -7,6 +7,32 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 
 
+def _beam_signal(frame, background):
+    """Return separate clipped analysis weights and the common background in ADU.
+
+    Automatic background is the median of four nonoverlapping corner patches,
+    each at most one eighth of the corresponding image dimension. This is an
+    empirical ROI background, not a claim that a cropped beam has dark borders.
+    Supply a measured background for broad/truncated beams. All returned widths
+    are moments of the observed image, not an inferred full Gaussian beam.
+    """
+    img = np.asarray(frame, dtype=np.float64)
+    if img.ndim != 2 or min(img.shape) < 2 or not np.all(np.isfinite(img)):
+        raise ValueError("Beam profile requires a finite 2D image at least 2x2.")
+    if background is None:
+        h, w = img.shape
+        rows, cols = max(1, h//8), max(1, w//8)
+        corners = np.concatenate([img[:rows,:cols].ravel(), img[:rows,-cols:].ravel(),
+                                  img[-rows:,:cols].ravel(), img[-rows:,-cols:].ravel()])
+        background = float(np.median(corners))
+    if not np.isfinite(background):
+        raise ValueError("Background must be finite ADU.")
+    signal = np.maximum(img - background, 0.0)
+    if signal.sum() <= 0:
+        raise ValueError("No positive beam signal above background; centroid and width are undefined.")
+    return signal, float(background)
+
+
 def compute_beam_centroid(
     frame: np.ndarray,
     background_threshold: Optional[float] = None
@@ -17,30 +43,14 @@ def compute_beam_centroid(
     Args:
         frame: 2D numpy array representing a single camera image.
         background_threshold: Optional intensity floor below which pixels are zeroed.
-            If None, uses mean background level estimated from the image corners.
+            If None, uses a size-aware corner median (see _beam_signal).
+            Empty/constant signals above this floor are reported as undefined.
 
     Returns:
         (centroid_x, centroid_y): Floating point pixel coordinates.
     """
-    img = frame.astype(np.float64)
-
-    if background_threshold is None:
-        # Estimate background from the outer 50-pixel margin
-        corners = np.concatenate([
-            img[:50, :50].ravel(),
-            img[:50, -50:].ravel(),
-            img[-50:, :50].ravel(),
-            img[-50:, -50:].ravel()
-        ])
-        background_threshold = float(np.median(corners) + 3.0 * np.std(corners))
-
-    # Subtract background threshold and clip below zero
-    signal = np.maximum(img - background_threshold, 0.0)
+    signal, _ = _beam_signal(frame, background_threshold)
     total_signal = signal.sum()
-
-    if total_signal <= 0.0:
-        h, w = frame.shape
-        return float(w / 2.0), float(h / 2.0)
 
     # Axis projections avoid allocating two full-resolution index arrays.
     x_projection = signal.sum(axis=0)
@@ -51,9 +61,13 @@ def compute_beam_centroid(
     return centroid_x, centroid_y
 
 
-def fit_gaussian_beam_profile(frame: np.ndarray) -> Dict[str, float]:
+def fit_gaussian_beam_profile(frame: np.ndarray, background: Optional[float] = None) -> Dict[str, float]:
     """
-    Compute 2D second moments and Gaussian beam parameters (waist, FWHM, peak intensity).
+    Compute observed-image moments and Gaussian-equivalent FWHM in pixels.
+
+    These are truncated-image moments, not a Gaussian fit or inferred full-beam
+    parameters. background is an optional measured scalar in ADU; otherwise use
+    the same size-aware corner median as compute_beam_centroid.
 
     Args:
         frame: 2D numpy array of sensor intensity counts.
@@ -69,31 +83,10 @@ def fit_gaussian_beam_profile(frame: np.ndarray) -> Dict[str, float]:
             - 'peak_intensity': Maximum sensor count (ADU)
             - 'total_power': Integrated counts above background
     """
-    img = frame.astype(np.float64)
-    cx, cy = compute_beam_centroid(img)
-
-    # Estimate background from corners
-    corners = np.concatenate([
-        img[:40, :40].ravel(),
-        img[:40, -40:].ravel(),
-        img[-40:, :40].ravel(),
-        img[-40:, -40:].ravel()
-    ])
-    bg = float(np.median(corners))
-    signal = np.maximum(img - bg, 0.0)
+    signal, bg = _beam_signal(frame, background)
     total_sig = float(signal.sum())
-
-    if total_sig <= 0.0:
-        return {
-            "centroid_x": cx,
-            "centroid_y": cy,
-            "sigma_x": 0.0,
-            "sigma_y": 0.0,
-            "fwhm_x": 0.0,
-            "fwhm_y": 0.0,
-            "peak_intensity": float(frame.max()),
-            "total_power": 0.0
-        }
+    cx = float(np.dot(np.arange(signal.shape[1]), signal.sum(axis=0)) / total_sig)
+    cy = float(np.dot(np.arange(signal.shape[0]), signal.sum(axis=1)) / total_sig)
 
     x_projection = signal.sum(axis=0)
     y_projection = signal.sum(axis=1)
@@ -116,5 +109,6 @@ def fit_gaussian_beam_profile(frame: np.ndarray) -> Dict[str, float]:
         "fwhm_x": round(sigma_x * fwhm_factor, 2),
         "fwhm_y": round(sigma_y * fwhm_factor, 2),
         "peak_intensity": float(frame.max()),
-        "total_power": round(total_sig, 1)
+        "total_power": round(total_sig, 1),
+        "background_adu": bg
     }

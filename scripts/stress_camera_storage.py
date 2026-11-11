@@ -22,6 +22,7 @@ import numpy as np
 # the interpreter used to launch the script.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from hhg_control.safe_io import filesystem_path
 from hhg_control.drivers.base_camera import BaseCamera, TriggerMode
 from hhg_control.sequencer.scan_manager import CameraScanManager
 
@@ -130,7 +131,7 @@ def run_case(case: str, camera: ReplayCamera, run_dir: Path, frames: int,
         assert count == frames
     elif case in ("hdf5_plain", "hdf5_gzip"):
         path = path.with_suffix(".h5")
-        with h5py.File(path, "x") as h5f:
+        with h5py.File(filesystem_path(path), "x") as h5f:
             filters = {"compression": "gzip", "compression_opts": 1, "shuffle": True} \
                 if case == "hdf5_gzip" else {}
             dset = h5f.create_dataset(
@@ -145,7 +146,7 @@ def run_case(case: str, camera: ReplayCamera, run_dir: Path, frames: int,
         assert offset == frames
         created.append(path)
     elif case == "raw_single":
-        with path.open("xb") as handle:
+        with filesystem_path(path).open("xb") as handle:
             for images, _ in camera.iter_frames(frames, batch_size=batch_size):
                 handle.write(images.tobytes(order="C"))
         created.append(path)
@@ -154,7 +155,7 @@ def run_case(case: str, camera: ReplayCamera, run_dir: Path, frames: int,
         for images, _ in camera.iter_frames(frames, batch_size=batch_size):
             for image in images:
                 frame_path = run_dir / f"BENCHMARK_ONLY_raw_frame_{index:08d}.bin"
-                with frame_path.open("xb") as handle:
+                with filesystem_path(frame_path).open("xb") as handle:
                     handle.write(image.tobytes(order="C"))
                 created.append(frame_path)
                 index += 1
@@ -165,15 +166,15 @@ def run_case(case: str, camera: ReplayCamera, run_dir: Path, frames: int,
     elapsed_s = time.perf_counter() - started
     cpu_s = time.process_time() - cpu_started
     raw_bytes = frames * camera.bank.shape[1] * camera.bank.shape[2] * 2
-    output_bytes = sum(item.stat().st_size for item in created)
+    output_bytes = sum(filesystem_path(item).stat().st_size for item in created)
     if case == "application":
-        with h5py.File(path, "r") as h5f:
+        with h5py.File(filesystem_path(path), "r") as h5f:
             assert h5f["images"].shape == (frames, camera.height, camera.width)
             assert bool(h5f.attrs["complete"]) and h5f.attrs["frames_written"] == frames
             assert np.array_equal(h5f["images"][0], camera.bank[0])
             assert np.array_equal(h5f["images"][-1], camera.bank[(frames - 1) % batch_size])
     elif case in ("hdf5_plain", "hdf5_gzip"):
-        with h5py.File(path, "r") as h5f:
+        with h5py.File(filesystem_path(path), "r") as h5f:
             assert np.array_equal(h5f["images"][0], camera.bank[0])
             assert np.array_equal(h5f["images"][-1], camera.bank[(frames - 1) % batch_size])
     elif case == "raw_single":
@@ -212,7 +213,7 @@ def main() -> None:
     args = parser.parse_args()
     if min(args.frames, args.width, args.height, args.batch_size) < 1:
         parser.error("frames, width, height, and batch-size must all be positive")
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    filesystem_path(args.output_dir).mkdir(parents=True, exist_ok=True)
     raw_bytes = args.frames * args.width * args.height * 2
     bank_bytes = min(args.batch_size, args.frames) * args.width * args.height * 2
     # Uncompressed HDF5 can allocate padded edge chunks, exceeding raw bytes.
@@ -247,7 +248,7 @@ def main() -> None:
             "results": results,
         }
         report_path = run_dir / f"BENCHMARK_ONLY_camera_storage_stress_{datetime.now(timezone.utc):%Y%m%dT%H%M%S_%fZ}.json"
-        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        filesystem_path(report_path).write_text(json.dumps(report, indent=2), encoding="utf-8")
         print(f"Report: {report_path}")
     finally:
         camera.close()

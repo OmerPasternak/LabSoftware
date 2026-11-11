@@ -1,5 +1,6 @@
 """Small mock-only 4F checks, including a real spawned verifier process."""
 
+from hhg_control.safe_io import filesystem_path
 from pathlib import Path
 import json
 import threading
@@ -50,11 +51,11 @@ def test_continuous_files_use_one_iterator_and_verify_all_pixels(cfg, monkeypatc
     ids = []
     for row in drive["files"]:
         assert row["verification_status"] == "VERIFIED" and row["pixels_equal_source"]
-        with h5py.File(Path(drive["output_directory"]) / row["file"]) as h5:
+        with h5py.File(filesystem_path(Path(drive["output_directory"]) / row["file"])) as h5:
             assert h5.attrs["schema_version"] == "2.0" and h5.attrs["complete"]
             ids += [json.loads(item)["frame_id"] for item in h5["frame_metadata/json"][:]]
     assert ids == list(range(ids[0], ids[0]+7))
-    saved = json.loads(Path(report["report_file"]).read_text())
+    saved = json.loads(filesystem_path(Path(report["report_file"])).read_text())
     assert saved["source"] == "mock" and saved["section"] == "4f"
     assert saved["drives"]["selected"]["summary"]["complete_verified_fps"] > 0
     assert saved["diagnostic_settings"]["stage_output_GB"] == 30.0
@@ -75,18 +76,18 @@ def test_coalesced_pixel_reads_keep_hash_boundaries_and_detect_corruption(tmp_pa
     import numpy as np
     pixels = np.arange(11 * 6, dtype=np.uint16).reshape(11, 2, 3)
     path, manifest = tmp_path / "pixels.h5", tmp_path / "pixels.json"
-    with h5py.File(path, "w") as h5:
+    with h5py.File(filesystem_path(path), "w") as h5:
         h5.attrs.update(complete=True, frames_written=11)
         h5.create_dataset("images", data=pixels)
     blocks = [{"start": start, "frames": len(pixels[start:start+3]),
                "sha256": hashlib.sha256(memoryview(pixels[start:start+3]).cast("B")).hexdigest()}
               for start in range(0, 11, 3)]
-    manifest.write_text(json.dumps({"shape_frame_y_x": list(pixels.shape), "blocks": blocks}))
+    filesystem_path(manifest).write_text(json.dumps({"shape_frame_y_x": list(pixels.shape), "blocks": blocks}))
     result = storage.verify_hdf5_pixels(path, manifest, read_block_bytes=read_frames * 12)
     assert result["pixels_equal_source"] and result["frames_verified"] == 11
     assert result["pixel_read_calls"] == ceil(11/read_frames)
     assert result["pixel_read_buffer_bytes"] == read_frames * 12
-    with h5py.File(path, "r+") as h5:
+    with h5py.File(filesystem_path(path), "r+") as h5:
         h5["images"][7, 0, 0] += 1
     with pytest.raises(AssertionError, match="pixels differ.*6:9"):
         storage.verify_hdf5_pixels(path, manifest, read_block_bytes=read_frames * 12)
@@ -156,7 +157,7 @@ def test_policy_tagged_pipeline_handles_long_windows_hdf5_paths(cfg, tmp_path):
     assert report["status"] == "EXECUTED", report.get("error")
     drive = report["drives"]["selected"]
     assert drive["summary"]["frames_verified"] == drive["summary"]["frames_synced"] == 7
-    saved = json.loads(Path(report["report_file"]).read_text())
+    saved = json.loads(filesystem_path(Path(report["report_file"])).read_text())
     assert saved["report_schema_version"] == "3.0"
 
 
@@ -235,7 +236,7 @@ def test_reader_copies_reusable_driver_buffers_before_reading_ahead(cfg, monkeyp
     drive = report["drives"]["selected"]
     pixels = []
     for row in drive["files"]:
-        with h5py.File(Path(drive["output_directory"]) / row["file"]) as h5:
+        with h5py.File(filesystem_path(Path(drive["output_directory"]) / row["file"])) as h5:
             pixels.extend(h5["images"][:, 0, 0].tolist())
     assert pixels == list(range(1, 9))
 
@@ -255,7 +256,9 @@ def test_reader_buffer_is_bounded_and_stops_on_full_without_a_consumer(cfg):
             assert source.full_events == 1 and not source.read_complete
         finally:
             source.close_iterator()
-        assert not source.reader.is_alive() and source.discarded_on_abort == 2
+        assert not source.reader.is_alive() and source.discarded_on_abort == 0
+        assert source.recovered_on_abort == 4
+        assert source.recovery_journals[0].summary()["complete"] is False
 
 
 def test_reader_failure_is_reported_and_camera_iterator_is_closed(cfg, monkeypatch):
@@ -276,7 +279,7 @@ def test_reader_failure_is_reported_and_camera_iterator_is_closed(cfg, monkeypat
     drive = report["drives"]["selected"]
     assert drive["reader_buffer"]["reader_stopped"]
     assert not drive["summary"].get("complete_verified_fps")
-    saved = json.loads(Path(report["report_file"]).read_text())
+    saved = json.loads(filesystem_path(Path(report["report_file"])).read_text())
     assert saved["drives"]["selected"]["reader_buffer"]["error"]
 
 
@@ -373,17 +376,17 @@ def test_cross_file_frame_gap_stops_and_preserves_report(cfg, monkeypatch):
     report = trial.run_complete_pipeline_trial(cfg, frames=7, frames_per_file=4)
     assert report["status"] == "FAILED"
     assert "Frame-ID gap" in report["error"]
-    assert Path(report["report_file"]).is_file()
+    assert filesystem_path(Path(report["report_file"])).is_file()
     assert report["drives"]["selected"]["summary"]["whole_trial_fps"] is None
 
 
 def test_worker_rejects_corrupt_pixels(cfg, tmp_path):
     path, manifest = tmp_path / "corrupt.h5", tmp_path / "corrupt.pixels.sha256.json"
     # The saved file is complete and has valid IDs, but the source hash differs.
-    with h5py.File(path, "w") as h5:
+    with h5py.File(filesystem_path(path), "w") as h5:
         h5.attrs.update(complete=True, frames_written=1)
         h5.create_dataset("images", data=[[[1, 2]]], dtype="uint16")
-    manifest.write_text(json.dumps({"shape_frame_y_x": [1, 1, 2],
+    filesystem_path(manifest).write_text(json.dumps({"shape_frame_y_x": [1, 1, 2],
                                    "blocks": [{"start": 0, "frames": 1, "sha256": "invalid"}]}))
     from queue import Queue
     tasks, results = Queue(), Queue()

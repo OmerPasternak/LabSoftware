@@ -21,6 +21,22 @@ import traceback
 import numpy as np
 
 from ...safe_io import available_physical_memory_bytes, filesystem_path
+from ..payload import CameraPayload, PayloadLedger, combine_errors
+
+
+def _update_metadata_digest(digest, metadata):
+    """Hash normalized JSON values using the writer's existing conversion rules."""
+    from .scan_manager import _json_safe
+    for item in metadata:
+        normalized = json.loads(json.dumps(item, default=_json_safe))
+        digest.update((json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode("utf-8"))
+
+
+def _metadata_digest(metadata):
+    """Return an order-sensitive source reference for complete per-frame metadata."""
+    digest = hashlib.sha256()
+    _update_metadata_digest(digest, metadata)
+    return digest.hexdigest()
 
 
 class BufferedCamera:
@@ -74,6 +90,9 @@ class BufferedCamera:
         self.continuous = continuous
         self.carry = None
         self.file_start = self.file_frames = 0
+        self._reader_payload = self._consumer_payload = None
+        self._pending_payloads = PayloadLedger()
+        self.recovery_transferred = 0
 
     @property
     def is_connected(self):
@@ -106,7 +125,7 @@ class BufferedCamera:
         self.manifest_partial = Path(str(self.manifest) + ".partial")
         self._manifest = filesystem_path(self.manifest_partial).open("x", encoding="utf-8")
         self.file_start, self.file_frames = self.delivered, attrs["num_frames"]
-        header = {"version": 1, "algorithm": "sha256", "dtype": "<u2",
+        header = {"version": 2, "metadata_encoding": "canonical-json-lines-v1", "algorithm": "sha256", "dtype": "<u2",
                   "shape": [self.file_frames, *self.shape], "settings": {
                       key: attrs[key] for key in ("camera_serial", "roi_bounds", "exposure_time_s",
                                                  "trigger_mode", "readout_mode", "scan_step_index")}}
@@ -121,6 +140,10 @@ class BufferedCamera:
             iterator = self.camera.iter_frames(self.frames, batch_size=self.batch_size,
                                                stop_check=self.stop.is_set)
             for images, metadata in iterator:
+                self._reader_payload = CameraPayload.snapshot(images, metadata,
+                    owned=self.camera.yields_owned_batches, origin="reader returned batch",
+                    frames=len(images), recording_start=self.retrieved)
+                images, metadata = self._reader_payload.images, self._reader_payload.metadata
                 if self.stop.is_set():
                     break
                 if (images.ndim != 3 or images.shape[1:] != self.shape or images.dtype != np.uint16
@@ -132,8 +155,7 @@ class BufferedCamera:
                     if previous is not None and frame_id != (previous + 1) % 2**32:
                         raise RuntimeError("Camera frame-ID gap or duplicate in measurement step.")
                     previous = frame_id
-                owned = images if self.camera.yields_owned_batches else images.copy()
-                batch = owned, [dict(item) for item in metadata]
+                batch = self._reader_payload
                 self.retrieved += len(images)
                 available = available_physical_memory_bytes()
                 self.min_available = min(self.min_available, available)
@@ -142,6 +164,7 @@ class BufferedCamera:
                 while not self.stop.is_set():
                     try:
                         self.pending.put(batch, timeout=0.05)
+                        self._reader_payload = None
                         self.peak_batches = max(self.peak_batches, self.pending.qsize())
                         break
                     except Full as exc:
@@ -158,8 +181,7 @@ class BufferedCamera:
                 if iterator is not None:
                     iterator.close()
             except BaseException as exc:
-                if self.error is None:
-                    self.error = exc
+                self.error = combine_errors(self.error, exc, "reader iterator cleanup failed")
             self.done.set()
 
     def iter_frames(self, num_frames, batch_size=4, stop_check=None):
@@ -184,21 +206,25 @@ class BufferedCamera:
                 if self.error is not None:
                     raise self.error
                 if self.carry is not None:
-                    images, metadata = self.carry
-                    self.carry = None
+                    self._consumer_payload, self.carry = self.carry, None
                 else:
                     try:
-                        images, metadata = self.pending.get(timeout=0.05)
+                        self._consumer_payload = self.pending.get(timeout=0.05)
                     except Empty:
                         if self.done.is_set():
                             if self.error is not None:
                                 raise self.error
                             raise RuntimeError("Camera reader ended before delivering all frames.")
                         continue
+                images, metadata = self._consumer_payload.images, self._consumer_payload.metadata
                 remaining = file_end - self.delivered
                 if len(images) > remaining:
-                    self.carry = images[remaining:], metadata[remaining:]
+                    self.carry = CameraPayload(images[remaining:], metadata[remaining:],
+                        {**self._consumer_payload.context, "frames": len(images)-remaining,
+                         "recording_start": self.delivered+remaining})
                     images, metadata = images[:remaining], metadata[:remaining]
+                    self._consumer_payload = CameraPayload(images, metadata,
+                        {**self._consumer_payload.context, "frames": len(images)})
                 began = time.perf_counter()
                 pixels = np.ascontiguousarray(images, dtype="<u2")
                 digest = hashlib.sha256(memoryview(pixels).cast("B")).hexdigest()
@@ -208,8 +234,9 @@ class BufferedCamera:
                     self.first_id = first
                 self.last_id = last
                 self._manifest.write(json.dumps({"start": self.delivered-self.file_start, "frames": len(images),
-                    "sha256": digest, "first_id": first, "last_id": last}, separators=(",", ":")) + "\n")
+                    "sha256": digest, "metadata_sha256": _metadata_digest(metadata), "first_id": first, "last_id": last}, separators=(",", ":")) + "\n")
                 self.delivered += len(images)
+                self._consumer_payload = None  # Ownership transfers to the immediate consumer.
                 yield images, metadata
             if self.delivered == self.frames:
                 self.reader.join()  # Includes the driver's final FIFO/error check and stop.
@@ -230,6 +257,42 @@ class BufferedCamera:
         if self._manifest is not None:
             self._manifest.close()
 
+    def recover_pending_payloads(self, receive):
+        """Stop SDK ownership, then transfer unassigned buffers in recording order."""
+        cleanup_error = None
+        try:
+            self.close()
+        except BaseException as exc:
+            cleanup_error = exc
+        if self._consumer_payload is not None:
+            self._pending_payloads.retain(self._consumer_payload)
+            self._consumer_payload = None
+        if self.carry is not None:
+            self._pending_payloads.retain(self.carry)
+            self.carry = None
+        while True:
+            try:
+                self._pending_payloads.retain(self.pending.get_nowait())
+            except Empty:
+                break
+        if self._reader_payload is not None:
+            self._pending_payloads.retain(self._reader_payload)
+            self._reader_payload = None
+        def accepted(payload):
+            receive(payload)
+            self.recovery_transferred += payload.context.get("frames", 0)
+        self._pending_payloads.drain_to(accepted)
+        recover = getattr(self.camera, "recover_pending_payloads", None)
+        if recover is not None:
+            recover(receive)
+        if cleanup_error is not None:
+            raise cleanup_error
+
+    def check_error(self):
+        """Reject a failed continuous recording before invoking another setpoint."""
+        if self.error is not None:
+            raise self.error
+
     def finish_manifest(self):
         """Publish complete source references; incomplete references retain .partial."""
         if self._manifest is not None:
@@ -248,7 +311,8 @@ class BufferedCamera:
     def summary(self):
         """Return bounded diagnostics, without retaining frame or timing histories."""
         return {"scope": "recording", "frames_retrieved": self.retrieved, "frames_delivered": self.delivered,
-                "buffered_unsaved_frames": self.retrieved-self.delivered,
+                "buffered_unsaved_frames": max(0, self.retrieved-self.delivered-self.recovery_transferred),
+                "frames_transferred_to_recovery": self.recovery_transferred,
                 "capacity_bytes": self.capacity_bytes, "peak_pending_batches": self.peak_batches,
                 "queue_full_events": self.full_events, "minimum_available_memory_bytes": self.min_available,
                 "source_hash_s": self.hash_s, "first_frame_id": self.first_id, "last_frame_id": self.last_id,
@@ -280,7 +344,7 @@ def verify_file(path, manifest_path, *, read_bytes=64 * 2**20):
             h5py.File(filesystem_path(path), "r") as h5:
         header = json.loads(next(references))
         images, metadata = h5["images"], h5["frame_metadata/json"]
-        if (header["version"] != 1 or header["algorithm"] != "sha256" or header["dtype"] != "<u2"
+        if (header["version"] not in (1, 2) or header["algorithm"] != "sha256" or header["dtype"] != "<u2"
                 or list(images.shape) != header["shape"] or images.dtype != np.dtype("<u2")
                 or not h5.attrs.get("complete", False) or len(metadata) != len(images)
                 or int(h5.attrs.get("frames_written", -1)) != len(images)):
@@ -298,20 +362,25 @@ def verify_file(path, manifest_path, *, read_bytes=64 * 2**20):
         buffer = np.empty((buffer_frames, *images.shape[1:]), dtype="<u2")
         window_start = window_stop = 0
         window_ids = []
+        window_metadata = []
         for line in references:
             block = json.loads(line)
             frames = block["frames"]
             if block["start"] != count or not isinstance(frames, int) or frames < 1 or count + frames > len(images):
                 raise ValueError("Source manifest has missing, repeated or invalid image ranges.")
             digest = hashlib.sha256()
+            metadata_digest = hashlib.sha256()
             end = count + frames
             while count < end:
                 if count >= window_stop:
                     window_start, window_stop = count, min(count + buffer_frames, len(images))
                     images.read_direct(buffer, np.s_[window_start:window_stop], np.s_[:window_stop-window_start])
                     window_ids = []
+                    window_metadata = []
                     for record in metadata[window_start:window_stop]:
-                        identifier = int(json.loads(record)["frame_id"])
+                        decoded = json.loads(record)
+                        window_metadata.append(decoded)
+                        identifier = int(decoded["frame_id"])
                         if previous is not None and identifier != (previous + 1) % 2**32:
                             raise ValueError("Saved frame IDs have a gap or duplicate.")
                         if first is None:
@@ -323,12 +392,17 @@ def verify_file(path, manifest_path, *, read_bytes=64 * 2**20):
                         or stop == end and window_ids[stop-window_start-1] != block["last_id"]):
                     raise ValueError("Saved frame IDs differ from source-pixel references.")
                 digest.update(memoryview(buffer[count-window_start:stop-window_start]).cast("B"))
+                _update_metadata_digest(metadata_digest, window_metadata[count-window_start:stop-window_start])
                 count = stop
+            if header["version"] >= 2 and metadata_digest.hexdigest() != block.get("metadata_sha256"):
+                raise ValueError(f"Saved frame metadata differs from source at frames {block['start']}:{end}.")
             if digest.hexdigest() != block["sha256"]:
                 raise ValueError(f"Saved pixels differ from source at frames {block['start']}:{end}.")
         if count != len(images):
             raise ValueError("Source manifest does not cover every saved frame.")
     return {"frames_verified": count, "pixels_equal_source": True, "consecutive_frame_ids": True,
+            "metadata_equal_source": header["version"] >= 2,
+            "verification_scope": "pixels, frame IDs, root settings" + (", all per-frame JSON metadata" if header["version"] >= 2 else "; legacy manifest has no metadata reference"),
             "first_frame_id": first, "last_frame_id": previous, "verification_s": time.perf_counter()-began,
             "external_trigger_accounting": "NOT_TESTED"}
 

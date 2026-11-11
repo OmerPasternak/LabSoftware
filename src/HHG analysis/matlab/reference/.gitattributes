@@ -1,0 +1,2 @@
+# Preserve the supplied package byte-for-byte, including original line endings.
+* -text

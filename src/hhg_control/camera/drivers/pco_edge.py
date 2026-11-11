@@ -5,6 +5,7 @@ Wraps the official `pco` Python SDK (pco.Camera).
 
 import time
 import math
+import sys
 from collections.abc import Callable, Iterator
 from datetime import datetime
 from typing import Tuple, List, Dict, Any
@@ -12,6 +13,7 @@ import numpy as np
 from .base_camera import BaseCamera, CameraSafetyError, ReadoutMode, TriggerMode
 from .camera_defaults import DEFAULT_CAMERA_SERIAL, DISCONNECT_EXPOSURE_S
 from ...safe_io import check_stack_memory
+from ..payload import CameraPayload
 
 
 PCO_FIFO_BUFFER_BYTES = 256 * 2**20
@@ -79,6 +81,8 @@ class PcoEdgeCamera(BaseCamera):
     def connect(self) -> None:
         if self._is_connected:
             return
+        if self._cam is not None:
+            raise RuntimeError("Camera handle retained after failed cleanup; close it before reconnecting.")
         if not self._serial or not str(self._serial).isdigit():
             raise ValueError(f"Configured camera serial must be numeric, got {self._serial!r}.")
         try:
@@ -242,9 +246,9 @@ class PcoEdgeCamera(BaseCamera):
             return {
                 "steps": desc.get("roi steps", (4, 1)),
                 "minimum": (desc.get("min width", 64), desc.get("min height", 16)),
-                "symmetric": (desc.get("roi is horz symmetric", False), desc.get("roi is vert symmetric", True))
+                "symmetric": (desc.get("roi is horz symmetric", False), desc.get("roi is vert symmetric", False))
             }
-        return {"steps": (4, 1), "minimum": (64, 16), "symmetric": (False, True)}
+        return {"steps": (4, 1), "minimum": (64, 16), "symmetric": (False, False)}
 
     def get_roi(self) -> tuple[int, int, int, int]:
         """Translate SDK one-based inclusive ROI (x0, y0, x1, y1) to zero-based exclusive bounds."""
@@ -392,29 +396,91 @@ class PcoEdgeCamera(BaseCamera):
         if getattr(self, "_live_active", False):
             raise RuntimeError("Stop live acquisition before recording a measurement sequence.")
 
+        if self.pending_acquisition_payloads:
+            raise RuntimeError("Unpersisted acquisition payloads remain; recover them before recording.")
+        raw_images = metadata_list = None
+        prepared = None
         roi = self.get_roi()
         check_stack_memory(num_frames, roi[3] - roi[1], roi[2] - roi[0])
-        self._cam.record(number_of_images=num_frames, mode="sequence")
-        raw_images, metadata_list = self._cam.images()
-        images_array = np.ascontiguousarray(np.stack(raw_images, axis=0), dtype=np.uint16)
-        roi = self.get_roi()
-        
-        metas = []
-        for i, meta in enumerate(metadata_list):
-            cam_time, time_text, timestamp_source = _frame_time_fields(
-                meta if isinstance(meta, dict) else {}
-            )
-            metas.append({
-                "frame_id": i,
-                "camera_timestamp": cam_time,
-                "camera_time_str": time_text,
-                "timestamp_source": timestamp_source,
-                "raw_meta": str(meta),
-                "exposure_s": self._exposure_time_s,
-                "roi": roi
-            })
+        try:
+            self._cam.record(number_of_images=num_frames, mode="sequence")
+            raw_images, metadata_list = self._cam.images()
+            if len(raw_images) != num_frames or len(metadata_list) != num_frames:
+                raise RuntimeError("PCO image/metadata count differs from requested frame count.")
+            frames, metas, previous = [], [], None
+            for frame, raw_meta in zip(raw_images, metadata_list):
+                frame, meta = self._validate_frame(frame, raw_meta, roi, previous)
+                frames.append(frame)
+                metas.append(meta)
+                previous = meta["frame_id"]
+            stack = np.stack(frames)
+            prepared = CameraPayload.snapshot(stack, metas, owned=True, origin="SDK whole stack", frames=len(stack), recording_start=0)
+            return stack, metas
+        finally:
+            # Validation failure: preserve the exact SDK arrays before stop can
+            # release them. A stop failure can also prevent a valid return.
+            failed = sys.exc_info()[1] is not None
+            try:
+                if failed and raw_images is not None:
+                    self._retain_sdk_stack(raw_images, metadata_list)
+            finally:
+                try:
+                    self._stop_recording()
+                except BaseException:
+                    if not failed and prepared is not None:
+                        self._pending_payloads.retain(prepared)
+                    raise
 
-        return images_array, metas
+    def _retain_sdk_stack(self, raw_images, metadata):
+        """Preserve malformed whole-stack arrays/metadata without casting or repair."""
+        if not isinstance(raw_images, (list, tuple)):
+            self._pending_payloads.retain(CameraPayload.snapshot(raw_images, metadata,
+                origin="SDK rejected whole-stack return", frames=len(raw_images), recording_start=0))
+            return
+        indexed_metadata = isinstance(metadata, (list, tuple))
+        for index, frame in enumerate(raw_images):
+            item = metadata[index] if indexed_metadata and index < len(metadata) else None
+            self._pending_payloads.retain(CameraPayload.snapshot(frame, item,
+                origin="SDK whole-stack validation failure", frames=1, recording_start=index))
+        if not indexed_metadata or len(metadata) > len(raw_images):
+            extra = metadata[len(raw_images):] if indexed_metadata else metadata
+            self._pending_payloads.retain(CameraPayload.snapshot(None, extra,
+                origin="SDK unmatched metadata", frames=0))
+
+    def _validate_frame(self, frame, raw_meta, roi, previous_id):
+        """Validate uint16 ROI pixels and recorder identity without conversion."""
+        frame = np.asarray(frame)
+        expected_shape = (roi[3] - roi[1], roi[2] - roi[0])
+        if frame.dtype != np.uint16 or frame.shape != expected_shape:
+            raise RuntimeError(f"PCO FIFO frame has shape {frame.shape} and dtype {frame.dtype}; "
+                               f"expected {expected_shape} and uint16 for ROI {roi}.")
+        if not isinstance(raw_meta, dict) or "recorder image number" not in raw_meta:
+            raise RuntimeError("PCO FIFO image lacks a recorder frame number.")
+        identifier = raw_meta["recorder image number"]
+        if isinstance(identifier, (bool, np.bool_)) or not isinstance(identifier, (int, np.integer)):
+            raise RuntimeError("PCO recorder frame number must be an integer.")
+        frame_id = int(identifier)
+        if not 0 <= frame_id < 2**32:
+            raise RuntimeError("PCO recorder frame number is outside the uint32 domain.")
+        if previous_id is not None and frame_id != (previous_id + 1) % 2**32:
+            raise RuntimeError(f"PCO FIFO frame gap: expected {(previous_id + 1) % 2**32}, got {frame_id}.")
+        cam_time, time_text, timestamp_source = _frame_time_fields(raw_meta)
+        return frame, {
+            "frame_id": frame_id, "camera_timestamp": cam_time, "camera_time_str": time_text,
+            "timestamp_source": timestamp_source, "host_frame_read_monotonic_ns": time.perf_counter_ns(),
+            "raw_meta": str(raw_meta), "exposure_s": self._exposure_time_s, "roi": roi,
+        }
+
+    def _stop_recording(self):
+        """Verify recorder stop; latch lockout and retain any active acquisition error."""
+        acquisition_error = sys.exc_info()[1]
+        try:
+            self._cam.stop()
+            if getattr(self._cam, "is_recording", False):
+                raise RuntimeError("Camera still reports recording after stop.")
+        except BaseException as cleanup:
+            self.state_unknown = True
+            raise RuntimeError(f"Acquisition error: {acquisition_error}; camera state unknown after stop: {cleanup}") from cleanup
 
     def iter_frames(
         self,
@@ -437,6 +503,10 @@ class PcoEdgeCamera(BaseCamera):
         if num_frames < 1 or batch_size < 1:
             raise ValueError("num_frames and batch_size must be >= 1.")
 
+        if self.pending_acquisition_payloads:
+            raise RuntimeError("Unpersisted acquisition payloads remain; recover them before recording.")
+        returned = 0
+        unvalidated = None
         previous_id: int | None = None
         # Explicit 4C profiling only; ordinary acquisitions add no timing calls.
         diagnostics = getattr(self, "acquisition_diagnostics", None)
@@ -469,35 +539,16 @@ class PcoEdgeCamera(BaseCamera):
                         f"({self.last_fifo_capacity_bytes / 2**20:.1f} MiB): {status}"
                     )
                 frame, raw_meta = self._cam.image(image_index=0)
+                unvalidated = (frame, raw_meta, returned)
+                returned += 1
                 host_frame_read_ns = time.perf_counter_ns()
                 handling_started = time.perf_counter() if diagnostics is not None else 0.0
-                frame = np.asarray(frame)
-                expected_shape = (roi[3] - roi[1], roi[2] - roi[0])
-                if frame.dtype != np.uint16 or frame.shape != expected_shape:
-                    raise RuntimeError(
-                        f"PCO FIFO frame has shape {frame.shape} and dtype {frame.dtype}; "
-                        f"expected {expected_shape} and uint16 for ROI {roi}."
-                    )
-                if not isinstance(raw_meta, dict) or "recorder image number" not in raw_meta:
-                    raise RuntimeError("PCO FIFO image lacks a recorder frame number.")
-                frame_id = int(raw_meta["recorder image number"])
-                if previous_id is not None and frame_id != (previous_id + 1) % (2**32):
-                    raise RuntimeError(
-                        f"PCO FIFO frame gap: expected {previous_id + 1}, got {frame_id}."
-                    )
-                previous_id = frame_id
-                cam_time, time_text, timestamp_source = _frame_time_fields(raw_meta)
+                frame, meta = self._validate_frame(frame, raw_meta, roi, previous_id)
+                previous_id = meta["frame_id"]
+                meta["host_frame_read_monotonic_ns"] = host_frame_read_ns
                 images.append(np.ascontiguousarray(frame))
-                metas.append({
-                    "frame_id": frame_id,
-                    "camera_timestamp": cam_time,
-                    "camera_time_str": time_text,
-                    "timestamp_source": timestamp_source,
-                    "host_frame_read_monotonic_ns": host_frame_read_ns,
-                    "raw_meta": str(raw_meta),
-                    "exposure_s": self._exposure_time_s,
-                    "roi": roi,
-                })
+                metas.append(meta)
+                unvalidated = None
                 if diagnostics is not None:
                     diagnostics.stage("python_frame_handling", time.perf_counter() - handling_started)
                 if len(images) == batch_size:
@@ -505,14 +556,17 @@ class PcoEdgeCamera(BaseCamera):
                     batch = np.stack(images, axis=0)
                     if diagnostics is not None:
                         diagnostics.stage("batch_stack", time.perf_counter() - stack_started)
-                    yield batch, metas
+                    outgoing = metas
                     images, metas = [], []
+                    yield batch, outgoing
             if images:
                 stack_started = time.perf_counter() if diagnostics is not None else 0.0
                 batch = np.stack(images, axis=0)
                 if diagnostics is not None:
                     diagnostics.stage("batch_stack", time.perf_counter() - stack_started)
-                yield batch, metas
+                outgoing = metas
+                images, metas = [], []
+                yield batch, outgoing
             status = self._cam.rec.get_status()
             if status.get("bFIFOOverflow") or status.get("dwLastError"):
                 raise RuntimeError(
@@ -521,12 +575,27 @@ class PcoEdgeCamera(BaseCamera):
                     f"({self.last_fifo_capacity_bytes / 2**20:.1f} MiB): {status}"
                 )
         finally:
-            self._cam.stop()
+            # Do not yield from finally: generator.close() must stop immediately.
+            # Unreturned local frames instead transfer to the sequencer's
+            # explicit incomplete-evidence path after the SDK owner has exited.
+            try:
+                if images:
+                    self._pending_payloads.retain(CameraPayload.snapshot(np.stack(images), metas, owned=True,
+                        origin="SDK FIFO unreturned local batch", frames=len(images),
+                        recording_start=returned-len(images)-(1 if unvalidated is not None else 0)))
+                if unvalidated is not None:
+                    frame, raw_meta, ordinal = unvalidated
+                    self._pending_payloads.retain(CameraPayload.snapshot(frame, raw_meta,
+                        origin="SDK FIFO rejected payload", frames=1, recording_start=ordinal))
+            finally:
+                self._stop_recording()
 
     def start_live(self, buffer_size: int = 4) -> None:
         """Start a persistent PCO ring buffer for efficient live display."""
         if self.state_unknown:
             raise RuntimeError("Camera state unknown; close and reconnect before acquisition.")
+        if self.pending_acquisition_payloads:
+            raise RuntimeError("Unpersisted acquisition payloads remain; recover them before recording.")
         if not self._is_connected or self._cam is None:
             raise RuntimeError("Camera is not connected.")
         if buffer_size < 4:
@@ -558,7 +627,7 @@ class PcoEdgeCamera(BaseCamera):
     def stop_live(self) -> None:
         """Stop the PCO recorder if a live ring buffer is active."""
         if self._cam is not None and getattr(self, "_live_active", False):
-            self._cam.stop()
+            self._stop_recording()
         self._live_active = False
 
 

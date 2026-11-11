@@ -110,6 +110,21 @@ def test_profiled_fake_sdk_through_production_writer(monkeypatch, tmp_path):
         camera.close()
 
 
+def test_pco_roi_defaults_allow_off_center_y_when_sdk_omits_symmetry_flag(monkeypatch):
+    """The known off-center ROI capability remains enabled if the SDK omits its flag."""
+    fake = FakePcoCamera("USB 3.0")
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda interface, serial: fake))
+    monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
+    camera = pco_edge.PcoEdgeCamera(serial="12345")
+    camera.connect()
+    try:
+        assert camera.get_roi_limits()["symmetric"] == (False, False)
+        camera.set_roi((100, 100, 500, 500))
+        assert camera.get_roi() == (100, 100, 500, 500)
+    finally:
+        camera.close()
+
+
 class FakeSdk:
     def __init__(self):
         self.setup = 1
@@ -424,4 +439,69 @@ def test_pco_fifo_rejects_frame_shape_that_disagrees_with_roi(monkeypatch):
     with pytest.raises(RuntimeError, match="expected \\(16, 64\\) and uint16"):
         list(camera.iter_frames(1))
     assert not fake.is_recording
+    camera.close()
+
+
+@pytest.mark.parametrize("defect", [None, "dtype", "shape", "missing_id", "gap", "count"])
+def test_whole_stack_preserves_sdk_payload_or_rejects(monkeypatch, defect):
+    fake = FakePcoCamera("USB 3.0")
+    frames = [np.full((16, 64), value, dtype=np.uint16) for value in (65535, 7)]
+    metadata = [{"recorder image number": 42}, {"recorder image number": 43}]
+    if defect == "dtype": frames[0] = frames[0].astype(np.int32)
+    if defect == "shape": frames[0] = frames[0][:1]
+    if defect == "missing_id": metadata[0] = {}
+    if defect == "gap": metadata[1]["recorder image number"] = 45
+    if defect == "count": metadata.pop()
+    fake.images = lambda: (frames, metadata)
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda **_: fake))
+    monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
+    camera = pco_edge.PcoEdgeCamera(serial="12345")
+    camera.connect()
+    try:
+        if defect:
+            with pytest.raises(RuntimeError): camera.acquire_frames(2)
+        else:
+            actual, records = camera.acquire_frames(2)
+            np.testing.assert_array_equal(actual, np.stack(frames))
+            assert [m["frame_id"] for m in records] == [42, 43]
+        assert not fake.is_recording
+    finally:
+        camera.close()
+
+
+def test_failed_stop_locks_all_acquisition_until_reconnect(monkeypatch):
+    fake = FakePcoCamera("USB 3.0")
+    fake.rec = SimpleNamespace(get_status=lambda: {})
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda **_: fake))
+    monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
+    camera = pco_edge.PcoEdgeCamera(serial="12345"); camera.connect()
+    original = fake.stop
+    def fail(): raise OSError("stop unavailable")
+    fake.stop = fail
+    with pytest.raises(RuntimeError, match="state unknown"):
+        list(camera.iter_frames(1))
+    count = len(fake.record_calls)
+    for action in (lambda: list(camera.iter_frames(1)), lambda: camera.acquire_frames(1), camera.start_live):
+        with pytest.raises(RuntimeError, match="state unknown"): action()
+    assert len(fake.record_calls) == count
+    fake.stop = original
+    camera.close(); camera.connect()
+    camera.start_live(); camera.stop_live(); camera.close()
+
+
+def test_failed_setup_and_close_retains_handle_before_retry(monkeypatch):
+    fake = FakePcoCamera("USB 3.0"); factories = []
+    def factory(**_): factories.append(1); return fake
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=factory))
+    monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
+    def fail(): raise OSError("injected failure")
+    original_setup, original_close = fake.sdk.get_camera_setup, fake.close
+    fake.sdk.get_camera_setup = fail; fake.close = fail
+    camera = pco_edge.PcoEdgeCamera(serial="12345")
+    with pytest.raises(ConnectionError, match="close failed"): camera.connect()
+    with pytest.raises(RuntimeError, match="handle retained"): camera.connect()
+    assert len(factories) == 1 and camera._cam is fake
+    fake.close = original_close; fake.sdk.get_camera_setup = original_setup
+    camera.close(); camera.connect()
+    assert len(factories) == 2
     camera.close()

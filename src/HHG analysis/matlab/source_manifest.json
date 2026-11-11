@@ -1,0 +1,87 @@
+{
+  "CovarianceFromGUIdata.m": {
+    "sha256": "68bb3154540c877e9c507236166b8a4cbd8eb51c77b611e604549a23fbc3cb84",
+    "size_bytes": 8800
+  },
+  "normalizeData.m": {
+    "sha256": "421b96b0e2e371f006f7ff2df92336d7b4496b05123ad371c289f28e1dc277e4",
+    "size_bytes": 317
+  },
+  "normalizeDataWRT.m": {
+    "sha256": "4c648779100721909487f0affc5b057a15dd7619c37a73de8710335345b59722",
+    "size_bytes": 326
+  },
+  "ShowScanGUI.fig": {
+    "sha256": "d14d2aee6d97174e45a8b04ef7eddde836f0ab8f52901de235e8877a93311ffa",
+    "size_bytes": 98163
+  },
+  "ShowScanGUI.m": {
+    "sha256": "c1bf7ab12565a0bdcf4c3e20457160410c79aae733cb0233e495de40f0c97569",
+    "size_bytes": 52275
+  },
+  "ShowScanGUI_App.mlapp": {
+    "sha256": "20a08a135395fcbd3cffda08281d0cd6ea2f9455471f5ec5b584525be74f90c4",
+    "size_bytes": 2172,
+    "contains_executable_source": false
+  },
+  "ShowScanGUI_App_1.mlapp": {
+    "sha256": "682a2d95e52ab22afe0e6b22fc76d4051a8d104274a57bd71e99f173ee1e4aec",
+    "size_bytes": 103316,
+    "contains_executable_source": true
+  },
+  "ShowScanGUI_App_1_report.html": {
+    "sha256": "b16ac07f7c4446d5739ca8b827e75714718e7dfb589bc6ecafe9062c1392a3e0",
+    "size_bytes": 10127
+  },
+  "ShowScanGUI_App_2.mlapp": {
+    "sha256": "bb81e00f3dbd4af0fd2344e20f797ae2c2f0d884e01504968ea3e60ef83f5dbe",
+    "size_bytes": 110174,
+    "contains_executable_source": false
+  },
+  "ShowScanGUI_App_2_report.html": {
+    "sha256": "0f86c78784f3bddae38544e8b5b79280de3842e02855eb031688d3ba5102d85e",
+    "size_bytes": 8423
+  },
+  "ShowScanGUI_edited.fig": {
+    "sha256": "fd5111fd93d0a883af3350bf30eb0102dbc7c25f5ab39f6c7bfc16f0e19c235d",
+    "size_bytes": 97363
+  },
+  "ShowScanGUI_edited.m": {
+    "sha256": "3307a95d39db69945bec1448411715717849bb49c1c1a5fa712f33ce2c139261",
+    "size_bytes": 53866
+  },
+  "ShowScanGUI_edited_App.mlapp": {
+    "sha256": "4b714737ef1e5b1823772019ce1f71c4211d39704eebcfd7a99eca5d89ff8c93",
+    "size_bytes": 2547,
+    "contains_executable_source": false
+  },
+  "ShowScanGUI_edited_App_1.mlapp": {
+    "sha256": "ad0829ad34068fa16a511f0e4b6ace77938e63d809fa44599555cd19872d06b2",
+    "size_bytes": 2547,
+    "contains_executable_source": false
+  },
+  "TConlyAnalysisFromGUIdata.m": {
+    "sha256": "0bf6beafbbc803b9fa04d77430eeff8f48e850cfd0b5c2c42589efba7532ca10",
+    "size_bytes": 6255
+  },
+  "w_axis_autoCalib_smoothed.m": {
+    "sha256": "a4abfbe2658d4787952f9567138ce2d0de12468517d9f5fce0a6262c9caa3504",
+    "size_bytes": 4808
+  },
+  "w_axis_calibration_script_tomer_version_OLD.m": {
+    "sha256": "25974dd0d05faf10d38a3e75f7432eac03043a9de5b66d0b701eaec31a6f01f4",
+    "size_bytes": 4192
+  },
+  "wAxis_Calibration (אסף שינפלד's conflicted copy 2026-05-28).m": {
+    "sha256": "291104b1bcee5be707b79b2d94112a884dfa99b019a40ea9d7bc0bb437cc4fde",
+    "size_bytes": 7273
+  },
+  "wAxis_Calibration.m": {
+    "sha256": "81a1da64e43ea4e74fa109c493973cc06f71f26ca7865162520c91900bba0504",
+    "size_bytes": 6200
+  },
+  "wAxis_Calibration.txt": {
+    "sha256": "81a1da64e43ea4e74fa109c493973cc06f71f26ca7865162520c91900bba0504",
+    "size_bytes": 6200
+  }
+}

@@ -8,6 +8,7 @@ from enum import Enum, IntEnum
 from collections.abc import Iterator
 from typing import Tuple, List, Dict, Any, Callable
 import numpy as np
+from ..payload import PayloadLedger
 
 
 class CameraSafetyError(ValueError):
@@ -62,6 +63,16 @@ class BaseCamera(ABC):
         self._exposure_time_s: float = 0.010  # default 10 ms
         self._readout_mode: ReadoutMode = ReadoutMode.ROLLING_SHUTTER
         self._trigger_mode: TriggerMode = TriggerMode.AUTO_SEQUENCE
+        self._pending_payloads = PayloadLedger()
+
+    @property
+    def pending_acquisition_payloads(self):
+        """Return SDK payloads retained after cancellation/error, without releasing them."""
+        return self._pending_payloads.pending
+
+    def recover_pending_payloads(self, receive) -> None:
+        """Transfer retained payloads to a recovery owner; perform no hardware I/O."""
+        self._pending_payloads.drain_to(receive)
 
     @property
     def is_connected(self) -> bool:

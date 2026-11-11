@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 import numpy as np
 
 from ..drivers.base_camera import BaseCamera
-from .hdf5_io import get_scan_metadata, iter_scan_step_frames
+from .hdf5_io import get_scan_metadata, iter_scan_step_frames, validate_scan_inputs
 
 
 class StreamingPixelG2:
@@ -76,7 +76,8 @@ def compute_g2_map(
         - Coherent light (Poissonian laser beam, as simulated in Mock camera):
           g^(2) = 1 + Var(I) / <I>^2 = 1 + 1/<I> ≈ 1.0 (for macroscopic counts).
         - Chaotic / Thermal light: g^(2)(0) = 2.0 (intensity bunching).
-        - Non-classical single-photon state: g^(2)(0) < 1.0 (anti-bunching).
+        - For nonnegative ADU intensity at epsilon=0 this moment ratio is >= 1.
+          It is not a normally ordered photon estimator and cannot establish antibunching.
 
     Args:
         frames: 3D numpy array of shape (num_frames, height, width), typically uint16.
@@ -133,23 +134,34 @@ def acquire_and_compute_g2(
             - 'g2_center': g^(2) value at sensor center
             - 'exposure_s': Exposure time used during acquisition
     """
-    frames, metadata = camera.acquire_frames(num_frames)
-
-    # Calculate 2D g^(2) map
-    g2_map = compute_g2_map(frames, epsilon=epsilon, background=background)
-
-    # Diagnostic statistics
-    mean_intensity = np.mean(frames.astype(np.float64), axis=0)
+    accumulator = StreamingPixelG2(epsilon=epsilon, background=background)
+    raw_sum = None
+    iterator = camera.iter_frames(num_frames, batch_size=4)
+    try:
+        for frames, metadata in iterator:
+            accumulator.update(frames)
+            if background is not None:
+                if raw_sum is None: raw_sum = np.zeros(frames.shape[1:], dtype=np.float64)
+                raw_sum += np.sum(frames, axis=0, dtype=np.float64)
+    finally:
+        iterator.close()
+    if accumulator.count != num_frames:
+        raise ValueError(f"Camera returned {accumulator.count} frames; expected {num_frames}.")
+    g2_map, corrected_mean = accumulator.finalize()
+    mean_intensity = corrected_mean if raw_sum is None else raw_sum / accumulator.count
     peak_intensity = float(mean_intensity.max())
     active_mask = mean_intensity > (0.1 * peak_intensity)
 
-    center_y, center_x = frames.shape[1] // 2, frames.shape[2] // 2
+    center_y, center_x = mean_intensity.shape[0] // 2, mean_intensity.shape[1] // 2
     g2_center = float(g2_map[center_y, center_x]) if not np.isnan(g2_map[center_y, center_x]) else None
     g2_active_mean = float(np.nanmean(g2_map[active_mask])) if np.any(active_mask) else None
 
     summary_stats = {
         "num_frames": num_frames,
-        "mean_intensity_map": mean_intensity,
+        "mean_intensity_map": mean_intensity,  # Existing raw-mean API retained.
+        "raw_mean_intensity_map": mean_intensity,
+        "corrected_mean_intensity_map": corrected_mean,
+        "analysis_background": "subtract then clip at zero" if background is not None else "disabled",
         "peak_intensity": peak_intensity,
         "g2_center": g2_center,
         "g2_mean_active": g2_active_mean,
@@ -165,6 +177,7 @@ def compute_g2_from_scan(
     epsilon: float = 0.0,
     background: Optional[Union[float, np.ndarray]] = None,
     max_steps: Optional[int] = None,
+    *, run_id: str | None = None, repeat_policy: str = "reject", pool_steps: bool = False,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     """
     Load saved HDF5 scan files from a storage directory and compute the 2D g^(2) map
@@ -176,6 +189,9 @@ def compute_g2_from_scan(
         epsilon: Regularization parameter added to denominator (default: 0.0).
         background: Optional dark pedestal or background offset to subtract (e.g. 100.0).
         max_steps: Maximum number of scan step files to analyze. If None, analyzes all.
+        run_id: Select one run; mixed recorded runs are rejected by default.
+        repeat_policy: "reject" or explicit "allow" for duplicate step indices.
+        pool_steps: Explicitly allow pooling samples at different coordinates.
 
     Returns:
         g2_map: 2D numpy array of shape (height, width) containing g^(2) per pixel.
@@ -194,6 +210,8 @@ def compute_g2_from_scan(
     if max_steps is not None and max_steps > 0:
         matched_files = matched_files[:max_steps]
 
+    headers, validation_warnings = validate_scan_inputs(matched_files, run_id=run_id, repeat_policy=repeat_policy, pool_steps=pool_steps)
+    matched_files = [path for path, _ in headers]
     accumulator = StreamingPixelG2(epsilon=epsilon, background=background)
     first_metadata = None
 
@@ -215,6 +233,9 @@ def compute_g2_from_scan(
 
     summary_stats = {
         "num_files": len(matched_files),
+        "validation_warnings": validation_warnings,
+        "pool_steps": pool_steps,
+        "repeat_policy": repeat_policy,
         "total_frames": accumulator.count,
         "mean_intensity_map": mean_i,
         "peak_intensity": peak_intensity,

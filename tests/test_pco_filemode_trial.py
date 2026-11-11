@@ -1,5 +1,6 @@
 """Offline checks for the opt-in PCO native-file trial; no camera is opened."""
 
+from hhg_control.safe_io import filesystem_path
 from pathlib import Path
 from types import SimpleNamespace
 import json
@@ -38,7 +39,7 @@ class FakePco:
     def record(self, *, number_of_images: int, mode: str, file_path: str) -> None:
         assert mode == "pcoraw"
         self.rec.frames = number_of_images
-        (Path(file_path) / "pco_generated_name.pcoraw").write_bytes(
+        (filesystem_path(Path(file_path) / "pco_generated_name.pcoraw")).write_bytes(
             b"fake native recorder output"
         )
 
@@ -180,7 +181,7 @@ def test_one_cell_drive_test_compares_both_formats_with_per_drive_cap(
         if fail_d_hdf5 and len(observed["hdf5"]) == 2:
             raise RuntimeError("simulated D: HDF5 failure")
         hdf5_path = tmp_path / f"hdf5_{len(observed['hdf5'])}.h5"
-        hdf5_path.write_bytes(b"mock HDF5 payload")
+        filesystem_path(hdf5_path).write_bytes(b"mock HDF5 payload")
         return {
             "status": "EXECUTED",
             "result": {"runs": [{
@@ -239,9 +240,9 @@ def test_one_cell_drive_test_compares_both_formats_with_per_drive_cap(
     packet = result["paste_this"]
     assert packet["status"] == result["paste_this"]["status"]
     log_path = Path(packet["execution_log"])
-    assert "Both destinations were preflighted" in log_path.read_text(encoding="utf-8")
-    assert Path(packet["report_file"]).is_file()
-    persisted = json.loads(Path(packet["report_file"]).read_text(encoding="utf-8"))
+    assert "Both destinations were preflighted" in filesystem_path(log_path).read_text(encoding="utf-8")
+    assert filesystem_path(Path(packet["report_file"])).is_file()
+    persisted = json.loads(filesystem_path(Path(packet["report_file"])).read_text(encoding="utf-8"))
     assert persisted == packet
     assert "hard_drive_decision_input" not in persisted
     assert Path(packet["report_file"]).parent == tmp_path
@@ -260,11 +261,31 @@ def test_free_space_probe_accepts_new_destination(tmp_path, monkeypatch):
     ))
     destination = tmp_path / "new" / "camera_test"
     assert filemode._destination_free_bytes(destination) == 48_000_000_000
-    assert probes == [tmp_path.resolve()]
-    assert not destination.exists()
+    assert probes == [filesystem_path(tmp_path.resolve())]
+    assert not filesystem_path(destination).exists()
 
 
 def test_one_cell_drive_test_fills_default_serial_before_camera_use(tmp_path):
     cfg = Settings(expected_serial=None, roi=(0, 0, 1, 1))
     with pytest.raises(ValueError, match="reviewed 2560 x 128 ROI"):
         run_hard_drive_decision_test(cfg, c_output_dir=tmp_path)
+
+
+@pytest.mark.parametrize('hung',[False,True])
+def test_native_recorder_supervision_accounts_for_exposure(tmp_path,monkeypatch,hung):
+    clock=[0.0]
+    monkeypatch.setattr(filemode,'time',SimpleNamespace(perf_counter=lambda:clock[0],sleep=lambda value:clock.__setitem__(0,clock[0]+value)))
+    monkeypatch.setattr(filemode.importlib.metadata,'version',lambda *_:'synthetic')
+    camera=FakePco()
+    def status():
+        count=0 if hung else min(2000,int(clock[0]/.1))
+        return {'is running':count<2000,'dwReqImgCount':2000,'dwProcImgCount':count}
+    camera.rec.get_status=status
+    if hung:
+        with pytest.raises(TimeoutError,match='no progress'):
+            _record_one(camera,tmp_path/'hung',2000,(4,8),455.,exposure_s=.1)
+        assert clock[0]<10.1
+    else:
+        row=_record_one(camera,tmp_path/'slow',2000,(4,8),455.,exposure_s=.1)
+        assert row['frames_read_back']==2000 and row['capture_fps']<11
+    assert camera.stopped

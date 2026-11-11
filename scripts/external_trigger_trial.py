@@ -123,7 +123,9 @@ def analyze_scope_edges(path, *, max_latency_s, window_start_s, window_end_s):
         raise ValueError("Scope evidence needs trigger and exposure edges; check output enable/polarity")
     if len(trigger) > 1 and max_latency_s >= min(np.diff(trigger)):
         raise ValueError("Latency bound overlaps adjacent trigger windows; pairing is ambiguous")
-    eligible = np.asarray(trigger) + max_latency_s <= window_end_s
+    trigger = np.asarray(trigger, dtype=float)
+    exposure = np.asarray(exposure, dtype=float)
+    eligible = trigger + max_latency_s <= window_end_s
     used, delays, unmatched_exposure = set(), [], 0
     for edge in exposure:
         index = int(np.searchsorted(trigger, edge, side="right")) - 1
@@ -190,7 +192,7 @@ def run_external_trigger_trial(cfg, *, files=5, frames_per_file=2000, nominal_so
     # The GUI's sequencer uses batches of four, independent of storage-test profiles.
     cfg = replace(cfg, batch_size=4, output_dir=Path(cfg.output_dir).resolve())
     destination = cfg.output_dir
-    destination.mkdir(parents=True, exist_ok=True)
+    filesystem_path(destination).mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
     width, height = cfg.roi[2]-cfg.roi[0], cfg.roi[3]-cfg.roi[1]
     tag = f"external_{width}x{height}"
@@ -219,7 +221,7 @@ def run_external_trigger_trial(cfg, *, files=5, frames_per_file=2000, nominal_so
     with filesystem_path(log_path).open("w", encoding="utf-8") as log, redirect_stdout(log):
         try:
             storage._preflight(cfg, {"selected": destination}, total, files, max_output_gb, approved_stage=True)
-            folder.mkdir(exist_ok=False)
+            filesystem_path(folder).mkdir(exist_ok=False)
             with lab.configured_camera(cfg, TriggerMode.EXTERNAL_EXPOSURE_START) as camera:
                 report["settings_readback"] = lab.snapshot(camera)
                 with capture.profiled_camera(camera) as (profiled, probe):
@@ -264,7 +266,7 @@ def run_external_trigger_trial(cfg, *, files=5, frames_per_file=2000, nominal_so
                 closed_frames += row["writer"].get("written_frames", 0)
                 sidecar = filesystem_path(folder / row["file"]).with_suffix(".verification.json")
                 try:
-                    checked = json.loads(sidecar.read_text(encoding="utf-8")) if sidecar.exists() else {}
+                    checked = json.loads(filesystem_path(sidecar).read_text(encoding="utf-8")) if filesystem_path(sidecar).exists() else {}
                 except (OSError, ValueError) as exc:
                     checked = {"status": "FAILED", "error": f"Cannot read integrity result: {exc}"}
                 if checked.get("status") != "VERIFIED":

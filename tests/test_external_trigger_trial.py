@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from scripts import external_trigger_trial as trial
+from hhg_control.safe_io import filesystem_path
 
 
 @pytest.fixture
@@ -50,7 +51,7 @@ def test_uses_one_current_gui_recording_and_verifies_every_raw_pixel(config, mon
     for row in report["files"]:
         assert row["integrity"]["status"] == "VERIFIED"
         assert row["integrity"]["pixels_equal_source"]
-        with h5py.File(Path(report["output_directory"]) / row["file"]) as handle:
+        with h5py.File(filesystem_path(Path(report["output_directory"]) / row["file"])) as handle:
             assert handle.attrs["trigger_mode"] == "external exposure start & software trigger"
             assert handle.attrs["complete"]
             saved_pixels.extend(handle["images"][:])
@@ -59,7 +60,7 @@ def test_uses_one_current_gui_recording_and_verifies_every_raw_pixel(config, mon
     assert ids == list(range(ids[0], ids[0]+10))
     path = Path(report["report_file"])
     assert path.parent == config.output_dir
-    assert json.loads(path.read_text())["rates"] == report["rates"]
+    assert json.loads(filesystem_path(path).read_text())["rates"] == report["rates"]
 
 
 def test_no_pulses_preserves_partial_and_failure_report(config, monkeypatch):
@@ -79,7 +80,7 @@ def test_no_pulses_preserves_partial_and_failure_report(config, monkeypatch):
     assert closed == [True]
     assert report["partial_files"]
     assert report["rates"]["durable_fps"] is None
-    assert json.loads(Path(report["report_file"]).read_text())["status"] == "FAILED"
+    assert json.loads(filesystem_path(Path(report["report_file"])).read_text())["status"] == "FAILED"
 
 
 def test_acquisition_deadline_cannot_report_a_successful_short_scan(config):
@@ -107,7 +108,7 @@ def test_camera_period_multiples_are_not_trigger_loss_or_latency():
 
 def test_scope_pairs_on_one_clock_and_censors_incomplete_tail(tmp_path):
     path = tmp_path / "scope.csv"
-    path.write_text("trigger_s,exposure_s\n0,0.00005\n0.001,0.00207\n0.002,\n0.003,\n")
+    filesystem_path(path).write_text("trigger_s,exposure_s\n0,0.00005\n0.001,0.00207\n0.002,\n0.003,\n")
     report = trial.analyze_scope_edges(path, max_latency_s=0.0005, window_start_s=0, window_end_s=0.003)
     assert report["matched_responses"] == 2
     assert report["unmatched_eligible_triggers"] == 1
@@ -117,7 +118,7 @@ def test_scope_pairs_on_one_clock_and_censors_incomplete_tail(tmp_path):
     assert report["saved_frame_accounting"].startswith("NOT_ESTABLISHED")
     with pytest.raises(ValueError, match="ambiguous"):
         trial.analyze_scope_edges(path, max_latency_s=0.0015, window_start_s=0, window_end_s=0.003)
-    assert path.read_text().startswith("trigger_s,exposure_s")
+    assert filesystem_path(path).read_text().startswith("trigger_s,exposure_s")
 
 
 @pytest.mark.parametrize("kwargs", [dict(nominal_source_hz=0), dict(files=0),

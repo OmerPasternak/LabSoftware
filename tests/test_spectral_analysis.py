@@ -256,3 +256,31 @@ def test_blocked_pearson_matches_numpy_across_files_without_modifying_sources(tm
         assert np.all(np.isnan(result[7,:]))
         assert summary['undefined_constant_pixels'] == 1
     assert [p.read_bytes() for p in sources] == before
+
+
+@pytest.mark.parametrize("alias", ["same", "relative", "hdf5_json"])
+def test_map_target_cannot_replace_raw_source(tmp_path, monkeypatch, alias):
+    import hashlib
+    source = tmp_path / ("source.json" if alias == "hdf5_json" else "source.h5")
+    with h5py.File(source, "w") as h5: h5.create_dataset("images", data=np.ones((1,2,8), dtype=np.uint16))
+    before = hashlib.sha256(source.read_bytes()).hexdigest()
+    if alias == "relative":
+        monkeypatch.chdir(tmp_path); output = Path(".") / source.name
+    else: output = source
+    with pytest.raises(ValueError):
+        save_harmonic_regions(output, [{"label":"H11","order":11,"x_start":0,"x_stop":8}], source, (2,8), overwrite=True)
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == before
+
+
+
+def test_map_destination_rejects_other_hdf5_and_hardlink_alias(tmp_path):
+    import os
+    source=tmp_path/'source.h5';target=tmp_path/'other.json';alias=tmp_path/'alias.json'
+    for path in (source,target):
+        with h5py.File(path,'w') as h5:h5.create_dataset('images',data=np.ones((1,2,8),dtype=np.uint16))
+    os.link(source,alias)
+    originals={p:p.read_bytes() for p in (source,target)}
+    for output in (target,alias):
+        with pytest.raises(ValueError):
+            save_harmonic_regions(output,[{'label':'H11','order':11,'x_start':0,'x_stop':8}],source,(2,8),overwrite=True)
+    assert all(p.read_bytes()==content for p,content in originals.items())

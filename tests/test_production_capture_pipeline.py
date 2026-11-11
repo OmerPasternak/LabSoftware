@@ -7,6 +7,7 @@ from queue import Queue
 import h5py
 import numpy as np
 import pytest
+from hhg_control.safe_io import filesystem_path
 
 from hhg_control.drivers.base_camera import TriggerMode
 from hhg_control.drivers.mock_camera import MockPcoCamera
@@ -57,11 +58,11 @@ def test_measurement_scan_uses_reader_and_finishes_all_checks(camera, tmp_path):
     assert manager.last_scan_pipeline["files_verified"] == 2
     assert manager.last_step_timing["reader"]["reader_stopped"]
     for step, _, path, preview in rows:
-        record = json.loads(path.with_suffix(".verification.json").read_text())
+        record = json.loads(filesystem_path(path.with_suffix(".verification.json")).read_text())
         assert record["status"] == "VERIFIED"
         assert record["frames_verified"] == 9 and record["pixels_equal_source"]
         assert record["external_trigger_accounting"] == "NOT_TESTED"
-        with h5py.File(path) as h5:
+        with h5py.File(filesystem_path(path)) as h5:
             assert h5.attrs["trigger_mode"] == TriggerMode.EXTERNAL_EXPOSURE_START.value
             assert h5.attrs["scan_step_index"] == step
             assert h5.attrs["schema_version"] == "2.0"
@@ -83,9 +84,9 @@ def test_continuous_measurement_slices_one_iterator_without_frame_loss(camera, t
     assert calls == [3 * file_frames]
     identifiers = []
     for _, _, path, last in rows:
-        record = json.loads(path.with_suffix(".verification.json").read_text())
+        record = json.loads(filesystem_path(path.with_suffix(".verification.json")).read_text())
         assert record["status"] == "VERIFIED" and record["frames_verified"] == file_frames
-        with h5py.File(path) as h5:
+        with h5py.File(filesystem_path(path)) as h5:
             assert len(h5["images"]) == file_frames
             identifiers.extend(json.loads(item)["frame_id"] for item in h5["frame_metadata/json"])
             assert np.array_equal(last, h5["images"][-1])
@@ -108,7 +109,7 @@ def test_stop_between_continuous_files_closes_reader_before_finishing_checks(cam
     stop.set()
     assert list(iterator) == []
     assert len(list(tmp_path.glob("*.h5"))) == 1
-    assert json.loads(first[2].with_suffix(".verification.json").read_text())["status"] == "VERIFIED"
+    assert json.loads(filesystem_path(first[2].with_suffix(".verification.json")).read_text())["status"] == "VERIFIED"
 
 
 def test_continuous_resume_preserves_step_numbers_and_does_not_overwrite(camera, tmp_path):
@@ -150,10 +151,10 @@ def test_pixel_checks_cover_read_and_source_block_boundaries(camera, tmp_path, r
 def test_every_integrity_failure_is_detected(camera, tmp_path, damage):
     path, manifest, _ = save_source(camera, tmp_path)
     if damage == "manifest":
-        lines = manifest.read_text().splitlines()
-        manifest.write_text("\n".join(lines[:-1]) + "\n")
+        lines = filesystem_path(manifest).read_text().splitlines()
+        filesystem_path(manifest).write_text("\n".join(lines[:-1]) + "\n")
     else:
-        with h5py.File(path, "r+") as h5:
+        with h5py.File(filesystem_path(path), "r+") as h5:
             if damage == "pixels":
                 h5["images"][8, 1, 2] ^= np.uint16(1)
             elif damage == "ids":
@@ -168,7 +169,7 @@ def test_every_integrity_failure_is_detected(camera, tmp_path, damage):
 
 def test_spawned_verifier_rejects_corruption_and_preserves_data(camera, tmp_path):
     path, manifest, _ = save_source(camera, tmp_path)
-    with h5py.File(path, "r+") as h5:
+    with h5py.File(filesystem_path(path), "r+") as h5:
         h5["images"][1, 0, 0] ^= np.uint16(1)
     workers = pipeline.ClosedFilePipeline()
     try:
@@ -178,8 +179,8 @@ def test_spawned_verifier_rejects_corruption_and_preserves_data(camera, tmp_path
             workers.finish()
     finally:
         workers.close()
-    assert path.exists() and manifest.exists()
-    assert json.loads(path.with_suffix(".verification.json").read_text())["status"] == "FAILED"
+    assert filesystem_path(path).exists() and filesystem_path(manifest).exists()
+    assert json.loads(filesystem_path(path.with_suffix(".verification.json")).read_text())["status"] == "FAILED"
     assert not workers.sync.is_alive() and not workers.verify.is_alive()
 
 
@@ -194,8 +195,8 @@ def test_sync_failure_never_reports_success(camera, tmp_path):
             workers.finish()
     finally:
         workers.close()
-    assert json.loads(path.with_suffix(".verification.json").read_text())["status"] == "FAILED"
-    assert path.exists()
+    assert json.loads(filesystem_path(path.with_suffix(".verification.json")).read_text())["status"] == "FAILED"
+    assert filesystem_path(path).exists()
 
 
 def test_dead_worker_cannot_leave_a_silent_infinite_wait():
@@ -305,7 +306,7 @@ def test_reader_owns_reusable_driver_pixels_before_reading_ahead(camera, tmp_pat
 
     camera.iter_frames = reusable
     path, manifest, _ = save_source(camera, tmp_path, frames=20)
-    with h5py.File(path) as h5:
+    with h5py.File(filesystem_path(path)) as h5:
         assert np.array_equal(h5["images"][:], np.concatenate(source_images))
     assert pipeline.verify_file(path, manifest)["pixels_equal_source"]
 
@@ -417,5 +418,47 @@ def test_gui_measurement_button_waits_for_verified_completion(qtbot, camera, tmp
     assert f"[MEASUREMENT COMPLETE] Durable FPS: {rate:.1f}" in window.txt_activity_log.toPlainText()
     records = list(tmp_path.glob("*.verification.json"))
     assert len(records) == 2
-    assert all(json.loads(p.read_text())["status"] == "VERIFIED" for p in records)
+    assert all(json.loads(filesystem_path(p).read_text())["status"] == "VERIFIED" for p in records)
     window.close()
+
+
+@pytest.mark.parametrize("field,value", [("camera_time_str", "changed"), ("exposure_s", 0.9), ("raw_meta", {"nested": [1,2]})])
+def test_verification_detects_scientific_metadata_corruption(camera, tmp_path, field, value):
+    path, manifest, _ = save_source(camera, tmp_path, frames=5)
+    assert pipeline.verify_file(path, manifest, read_bytes=1)["metadata_equal_source"]
+    with h5py.File(filesystem_path(path), "r+") as h5:
+        record = json.loads(h5["frame_metadata/json"][0]); record[field] = value
+        h5["frame_metadata/json"][0] = json.dumps(record)
+    with pytest.raises(ValueError, match="frame metadata differs"):
+        pipeline.verify_file(path, manifest, read_bytes=1)
+
+
+@pytest.mark.parametrize("plan", [dict(num_steps=1.5), dict(num_frames=1.5), dict(start_step=0.1), dict(start_value=float("nan")), dict(step_size=float("inf")), dict(start_value=1e308, step_size=1e308, num_steps=3)])
+def test_scan_plan_rejects_before_any_side_effect(camera, tmp_path, monkeypatch, plan):
+    events = []
+    monkeypatch.setattr(pipeline.ClosedFilePipeline, "start", lambda *_: events.append("worker"))
+    manager = CameraScanManager(camera, tmp_path)
+    args = dict(experiment_name="invalid", param_name="delay", start_value=0, step_size=1, num_steps=2, num_frames=2)
+    args.update(plan)
+    with pytest.raises(ValueError):
+        list(manager.execute_scan(**args, on_step_start=lambda *_: events.append("callback")))
+    assert events == [] and list(tmp_path.iterdir()) == []
+
+
+
+def test_run_destination_is_frozen_before_step_callbacks(camera,tmp_path):
+    folder=tmp_path/'original';other=tmp_path/'changed'
+    manager=CameraScanManager(camera,folder)
+    def callback(step,value):
+        if step==1:manager.set_storage_dir(other)
+    rows=list(manager.execute_scan('destination','delay',0,1,2,2,on_step_start=callback))
+    assert all(path.parent==folder for _,_,path,_ in rows)
+    assert not list(other.glob('*.h5'))
+
+
+def test_metadata_reference_allows_equivalent_json_serialization(camera,tmp_path):
+    path,manifest,_=save_source(camera,tmp_path,frames=3)
+    with h5py.File(filesystem_path(path),'r+') as h5:
+        records=h5['frame_metadata/json']
+        records[0]=json.dumps(json.loads(records[0]),indent=2,sort_keys=False)
+    assert pipeline.verify_file(path,manifest)['metadata_equal_source']

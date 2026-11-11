@@ -124,7 +124,7 @@ def json_default(value):
 def sha256_file(path: Path) -> str:
     """Hash an entire file in bounded reads to verify an archived copy."""
     digest = hashlib.sha256()
-    with Path(path).open("rb") as handle:
+    with filesystem_path(Path(path)).open("rb") as handle:
         for block in iter(lambda: handle.read(32 * 2**20), b""):
             digest.update(block)
     return digest.hexdigest()
@@ -145,11 +145,11 @@ def prepare(cfg: Settings, frames: int = 0) -> Path:
             "ROI must contain four integer sensor-pixel bounds")
     require(cfg.roi[2] > cfg.roi[0] and cfg.roi[3] > cfg.roi[1], "ROI spans must be positive")
     destination = Path(cfg.output_dir).resolve()
-    destination.mkdir(parents=True, exist_ok=True)
+    filesystem_path(destination).mkdir(parents=True, exist_ok=True)
     raw = frames * (cfg.roi[2] - cfg.roi[0]) * (cfg.roi[3] - cfg.roi[1]) * 2
     require(raw <= cfg.max_section_raw_gb * 1e9,
             f"Section needs {raw / 1e9:.2f} GB raw; increase max_section_raw_gb deliberately")
-    require(shutil.disk_usage(destination).free >= raw * 1.5 + 100_000_000,
+    require(shutil.disk_usage(filesystem_path(destination)).free >= raw * 1.5 + 100_000_000,
             f"Need at least {raw * 1.5 / 1e9 + 0.1:.2f} GB free on {destination}")
     print(f"Source: {cfg.source}; destination: {destination}; planned raw data: {raw / 1e9:.2f} GB")
     return destination
@@ -336,7 +336,7 @@ def saved_run(camera, cfg: Settings, label: str, frames: int,
     close_s = time.perf_counter() - start
     cpu_s = time.process_time() - cpu_start
     fsync_started = time.perf_counter()
-    with path.open("r+b", buffering=0) as handle:
+    with filesystem_path(path).open("r+b", buffering=0) as handle:
         os.fsync(handle.fileno())
     fsync_s = time.perf_counter() - fsync_started
     synced_s = time.perf_counter() - start
@@ -345,7 +345,7 @@ def saved_run(camera, cfg: Settings, label: str, frames: int,
                   final_os_fsync_s=fsync_s,
                   pipeline_stage_timing_s=manager.last_step_timing,
                   total_fps=frames / close_s, synced_fps=frames / synced_s,
-                  file_MB_per_s=path.stat().st_size / 1e6 / close_s,
+                  file_MB_per_s=filesystem_path(path).stat().st_size / 1e6 / close_s,
                   cpu_s=cpu_s, average_cpu_cores=cpu_s / close_s)
     return result
 
@@ -438,14 +438,14 @@ def section_1(cfg: Settings) -> dict:
               "revision": revision_text, "git_status": status_text,
               "git_note": git_note,
               "packages": versions, "usb_port_note": cfg.usb_port_note,
-              "free_GB": shutil.disk_usage(destination).free / 1e9}
+              "free_GB": shutil.disk_usage(filesystem_path(destination)).free / 1e9}
     if cfg.run_offline_tests:
         # Separate unique temp directory; pytest may delete its basetemp.
         temp = destination / ("pytest_" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%f"))
         run = subprocess.run([sys.executable, "-m", "pytest", "-q", "--basetemp", str(temp)],
                              cwd=ROOT, capture_output=True, text=True)
         log_path = destination / (temp.name + ".log")
-        log_path.write_text(run.stdout + run.stderr, encoding="utf-8")
+        filesystem_path(log_path).write_text(run.stdout + run.stderr, encoding="utf-8")
         result["offline_tests"] = {
             "passed": run.returncode == 0,
             "exit_code": run.returncode,
@@ -531,7 +531,7 @@ def show_section_3_review_images(report: dict, *, display: bool = False):
     labels = ("first", "middle", "last")
     for row, run in enumerate(runs):
         path = Path(run["file"])
-        with h5py.File(path, "r") as h5:
+        with h5py.File(filesystem_path(path), "r") as h5:
             images = h5["images"]
             count = int(images.shape[0])
             require(count > 0, f"No images found in {path}")
@@ -567,10 +567,10 @@ def show_section_3_review_images(report: dict, *, display: bool = False):
     report_file = report.get("important_metrics", {}).get("report_file")
     review_path = (Path(report_file).with_suffix(".png") if report_file else
                    Path(runs[0]["file"]).with_suffix(".review.png"))
-    figure.savefig(review_path, dpi=150)
+    figure.savefig(filesystem_path(review_path), dpi=150)
     report["review_image"] = str(review_path)
     if report_file:
-        Path(report_file).write_text(
+        filesystem_path(Path(report_file)).write_text(
             json.dumps(compact_section_report(report), indent=1, default=json_default), encoding="utf-8",
         )
     if display:
@@ -659,9 +659,9 @@ def section_6(cfg: Settings) -> dict:
     partials = sorted(set(destination.glob("*.h5.partial")) - before)
     require(len(partials) == 2, "Expected two retained incomplete files")
     for path in partials:
-        with h5py.File(path, "r") as h5:
+        with h5py.File(filesystem_path(path), "r") as h5:
             require(not bool(h5.attrs["complete"]), "Failed step marked complete")
-        require(not path.with_suffix("").exists(), "Failed step published as .h5")
+        require(not filesystem_path(path.with_suffix("")).exists(), "Failed step published as .h5")
     return {"fault_source": "mock only", "outcomes": outcomes,
             "retained_partial_files": partials, "recovery": recovery,
             "pending": "GUI Stop, low-space, disconnect, restart and timeout cases require the manual checks."}
@@ -677,7 +677,7 @@ def section_7(cfg: Settings) -> dict:
     else:
         candidates = list(Path(cfg.output_dir).glob("acceptance_short_*.h5"))
         require(candidates, "Run section 3 first, or set CONFIG.data_files")
-        paths = [max(candidates, key=lambda path: path.stat().st_mtime_ns)]
+        paths = [max(candidates, key=lambda path: filesystem_path(path).stat().st_mtime_ns)]
     files = []
     for path in paths:
         result = inspect_file(path, full_read=True)
@@ -964,7 +964,7 @@ def execute(number: int, cfg: Settings = CONFIG, *, print_output: bool = False,
     remain available to in-process callers; only the compact summary is saved.
     """
     destination = Path(cfg.output_dir).resolve()
-    destination.mkdir(parents=True, exist_ok=True)
+    filesystem_path(destination).mkdir(parents=True, exist_ok=True)
     report = {"section": number, "utc": datetime.now(timezone.utc).isoformat(),
               "source": cfg.source, "settings": asdict(cfg),
               "hardware_acceptance": "not automatically certified; review section benchmarks"}
@@ -972,7 +972,7 @@ def execute(number: int, cfg: Settings = CONFIG, *, print_output: bool = False,
     log_path = path.with_suffix(".log")
     report["log_file"] = str(log_path)
     failure = None
-    with log_path.open("w", encoding="utf-8") as log, redirect_stdout(log):
+    with filesystem_path(log_path).open("w", encoding="utf-8") as log, redirect_stdout(log):
         try:
             prepare(cfg)
             report["result"] = SECTIONS[number](cfg)
@@ -981,14 +981,14 @@ def execute(number: int, cfg: Settings = CONFIG, *, print_output: bool = False,
             failure = exc
             report.update(status="FAILED", error=f"{type(exc).__name__}: {exc}")
         report["important_metrics"] = important_metrics(number, report, cfg, path)
-        path.write_text(json.dumps(compact_section_report(report), indent=1, default=json_default), encoding="utf-8")
+        filesystem_path(path).write_text(json.dumps(compact_section_report(report), indent=1, default=json_default), encoding="utf-8")
         print(f"Status: {report['status']}; report: {path.name}")
         if failure is not None:
             print(report["error"])
         if print_output:
             _print_important_metrics(report["important_metrics"])
     if print_output:
-        print(log_path.read_text(encoding="utf-8"), end="")
+        print(filesystem_path(log_path).read_text(encoding="utf-8"), end="")
     if failure is not None and (raise_on_error or isinstance(failure, (KeyboardInterrupt, SystemExit))):
         raise failure
     return report

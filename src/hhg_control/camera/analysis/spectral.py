@@ -388,6 +388,20 @@ def validate_harmonic_regions(
     return validated
 
 
+def validate_map_destination(output_path: str | Path, source_path: str | Path) -> Path:
+    """Validate a JSON sidecar destination before any preview or map writes."""
+    output, source = Path(output_path).resolve(), Path(source_path).resolve()
+    if output == source or (output.exists() and source.exists() and output.samefile(source)):
+        raise ValueError("Harmonic map destination must differ from the raw source.")
+    if output.suffix.lower() != ".json":
+        raise ValueError("Harmonic maps require a .json destination.")
+    if output.exists():
+        import h5py
+        if h5py.is_hdf5(output):
+            raise ValueError("An HDF5 acquisition file cannot be a harmonic map destination.")
+    return output
+
+
 def save_harmonic_regions(
     output_path: str | Path,
     regions: Sequence[dict[str, Any]],
@@ -406,7 +420,7 @@ def save_harmonic_regions(
     Existing sidecars are preserved unless overwrite=True explicitly requests
     an atomic replacement of the persistent reference map.
     """
-    output = Path(output_path)
+    output = validate_map_destination(output_path, source_path)
     if output.exists() and not overwrite:
         raise FileExistsError(f"Refusing to overwrite existing harmonic map: {output}")
     height, width = map(int, image_shape_yx)
@@ -670,12 +684,23 @@ def compute_harmonic_g2_from_scan(
     squares = {region["label"]: 0.0 for region in regions}
     count = 0
     for batch in iter_scan_step_frames(path, batch_size=batch_size):
-        values = batch.astype(np.float64, copy=False)
         for region in regions:
-            signal = values[:, :, region["x_start"]:region["x_stop"]].sum(axis=(1, 2))
+            signal = batch[:, :, region["x_start"]:region["x_stop"]].sum(axis=(1, 2), dtype=np.float64)
             totals[region["label"]] += float(np.sum(signal, dtype=np.float64))
             squares[region["label"]] += float(np.sum(signal * signal, dtype=np.float64))
         count += batch.shape[0]
+
+    influence_totals = {r["label"]: [0.0, 0.0] for r in regions}
+    for batch in iter_scan_step_frames(path, batch_size=batch_size):
+        for region in regions:
+            label = region["label"]
+            mean_signal, mean_square = totals[label] / count, squares[label] / count
+            if mean_signal <= 0: continue
+            signal = batch[:, :, region["x_start"]:region["x_stop"]].sum(axis=(1, 2), dtype=np.float64)
+            influence = (signal * signal - mean_square) / mean_signal**2
+            influence -= 2 * mean_square * (signal - mean_signal) / mean_signal**3
+            influence_totals[label][0] += float(np.sum(influence))
+            influence_totals[label][1] += float(np.sum(influence * influence))
 
     results = []
     for region in regions:
@@ -689,15 +714,7 @@ def compute_harmonic_g2_from_scan(
             })
             continue
         g2 = mean_square / (mean_signal * mean_signal)
-        influence_sum = 0.0
-        influence_square_sum = 0.0
-        for batch in iter_scan_step_frames(path, batch_size=batch_size):
-            values = batch.astype(np.float64, copy=False)
-            signal = values[:, :, region["x_start"]:region["x_stop"]].sum(axis=(1, 2))
-            influence = (signal * signal - mean_square) / (mean_signal * mean_signal)
-            influence -= 2.0 * mean_square * (signal - mean_signal) / (mean_signal ** 3)
-            influence_sum += float(np.sum(influence, dtype=np.float64))
-            influence_square_sum += float(np.sum(influence * influence, dtype=np.float64))
+        influence_sum, influence_square_sum = influence_totals[label]
         influence_mean = influence_sum / count
         influence_variance = max(
             0.0, (influence_square_sum - count * influence_mean * influence_mean) / (count - 1)

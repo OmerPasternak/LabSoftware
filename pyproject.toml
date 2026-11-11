@@ -30,14 +30,23 @@ test = [
 [project.scripts]
 hhg-camera = "hhg_control.gui.camera.camera_panel:main"
 hhg-tc-motor = "hhg_control.tc_motor.gui.motor_panel:main"
+hhg-analysis = "hhg_control.hhg_analysis.window:main"
+
+[tool.setuptools.package-dir]
+"hhg_control.hhg_analysis" = "src/HHG analysis"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["hhg_control*"]
+exclude = ["hhg_control.tc_motor.tests*"]
 
 [tool.setuptools.package-data]
 "hhg_control.tc_motor" = ["docs/*.md", "docs/*.json", "run_TC_motor.bat"]
+"hhg_control.hhg_analysis" = ["*.bat", "*.vbs", "*.txt", "docs/*.md", "matlab/*.m", "matlab/*.json", "matlab/active/*", "matlab/reference/*", "matlab/colourmaps/*"]
 
 [tool.pytest.ini_options]
+testpaths = ["tests", "src/hhg_control/tc_motor/tests"]
+norecursedirs = ["data", "build", "dist", ".venv", "venv", ".git"]
 pythonpath = ["src"]
 # The tracked .gitkeep creates this parent directory in a fresh checkout.
 cache_dir = "data/test_artifacts/pytest/cache"

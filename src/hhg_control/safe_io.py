@@ -53,7 +53,7 @@ def unique_output(path: Path) -> Path:
     """Suggest a numbered filename when an output already exists."""
     path = Path(path)
     candidate, index = path, 1
-    while candidate.exists():
+    while filesystem_path(candidate).exists():
         candidate = path.with_name(f"{path.stem}_{index}{path.suffix}")
         index += 1
     return candidate
@@ -77,8 +77,8 @@ def benchmark_directory(parent: Path, label: str) -> Path:
     """Create a unique folder clearly marking retained synthetic benchmark data."""
     from uuid import uuid4
     directory = Path(parent) / "benchmark_runs" / f"BENCHMARK_ONLY_{label}_{uuid4().hex[:12]}"
-    directory.mkdir(parents=True, exist_ok=False)
-    (directory / "BENCHMARK_ONLY_README.txt").write_text(
+    filesystem_path(directory).mkdir(parents=True, exist_ok=False)
+    (filesystem_path(directory / "BENCHMARK_ONLY_README.txt")).write_text(
         "Synthetic benchmark data, not experimental measurements.\n"
         "Files are retained. You may manually delete this entire run folder when finished.\n",
         encoding="utf-8",

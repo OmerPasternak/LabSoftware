@@ -24,6 +24,8 @@ from scripts import capture_diagnostics as capture
 from scripts import lab_computer_acceptance as lab
 from scripts import storage_diagnostics as storage
 from hhg_control.safe_io import filesystem_path, available_physical_memory_bytes
+from hhg_control.camera.payload import CameraPayload, PayloadLedger, combine_errors
+from hhg_control.camera.sequencer.recovery import RecoveryJournal
 
 
 def _buffer_plan(cfg, frames, frame_bytes):
@@ -277,6 +279,10 @@ class _ContinuousCamera:
         self.read_previous = None
         self.delivered = self.discarded_on_abort = 0
         self.read_complete = False
+        self._reader_payload = self._consumer_payload = None
+        self._pending_payloads = PayloadLedger()
+        self.recovery_journals = []
+        self.recovered_on_abort = 0
         self.duration_s, self.file_frames = duration_s, file_frames
         self.label = label
         self.capture_started_at = None
@@ -293,6 +299,10 @@ class _ContinuousCamera:
             iterator = self.camera.iter_frames(self.frames, batch_size=self.cfg.batch_size,
                                                stop_check=self.stop.is_set)
             for images, metadata in iterator:
+                self._reader_payload = CameraPayload.snapshot(images, metadata,
+                    owned=self.camera.yields_owned_batches, origin="diagnostic reader returned batch",
+                    frames=len(images), recording_start=self.count)
+                images, metadata = self._reader_payload.images, self._reader_payload.metadata
                 if self.stop.is_set():
                     break
                 if self.capture_started_at is None:
@@ -313,12 +323,12 @@ class _ContinuousCamera:
                 if available_now < (self.plan["memory_reserve_bytes"] + self.plan["working_allowance_bytes"]):
                     raise MemoryError(f"{self.label} camera reader reached the configured RAM reserve; partial data retained")
                 began = time.perf_counter()
-                owned = images if self.camera.yields_owned_batches else images.copy()
-                batch = owned, [dict(item) for item in metadata]
+                batch = self._reader_payload
                 self.copy_s += time.perf_counter() - began
                 began = time.perf_counter()
                 try:
                     self.pending.put(batch, timeout=0.05)
+                    self._reader_payload = None
                 except Full as exc:
                     if self.stop.is_set():
                         break
@@ -356,8 +366,7 @@ class _ContinuousCamera:
                     iterator.close()
             except BaseException as exc:
                 self.read_complete = False
-                if self.error is None:
-                    self.error = exc
+                self.error = combine_errors(self.error, exc, "diagnostic iterator cleanup failed")
             self.reader_finished = time.perf_counter()
             self.backlog_at_reader_stop_frames = max(0, self.count - self.delivered)
             self.done.set()
@@ -380,6 +389,8 @@ class _ContinuousCamera:
                 "queue_full_events": self.full_events, "queue_put_s": self.put_s,
                 "queue_put_max_s": self.put_max_s, "copy_s": self.copy_s,
                 "discarded_buffered_frames_on_abort": self.discarded_on_abort,
+                "recovered_buffered_frames_on_abort": self.recovered_on_abort,
+                "recovery": [journal.summary() for journal in self.recovery_journals],
                 "error": str(self.error) if self.error else None,
                 "reader_stopped": self.done.is_set() if self.reader.ident is not None else True,
                 "reader_started_at_capture_s": (self.reader_started - capture_started
@@ -413,7 +424,7 @@ class _ContinuousCamera:
             yield from self._file_frames(num_frames, batch_size, stop_check)
         except BaseException:
             # Signal and join the reader before the writer drains or camera closes.
-            self.close_iterator()
+            self.close_iterator(preserve=False)
             raise
 
     def _file_frames(self, num_frames, batch_size, stop_check):
@@ -429,7 +440,8 @@ class _ContinuousCamera:
             if stop_check is not None and stop_check():
                 raise RuntimeError("Continuous acquisition aborted")
             try:
-                images, metadata = self.pending.get(timeout=0.05)
+                self._consumer_payload = self.pending.get(timeout=0.05)
+                images, metadata = self._consumer_payload.images, self._consumer_payload.metadata
             except Empty:
                 self.check_error()
                 if self.done.is_set():
@@ -443,6 +455,7 @@ class _ContinuousCamera:
             self.previous = int(metadata[-1]["frame_id"])
             count += len(images)
             self.delivered += len(images)
+            self._consumer_payload = None
             yield images, metadata
         if self.delivered == self.frames:
             # The worker exhausts the generator, including final status/stop checks.
@@ -452,21 +465,45 @@ class _ContinuousCamera:
             if not self.read_complete:
                 raise RuntimeError("Continuous camera did not complete recording")
 
-    def close_iterator(self):
-        """Cancel and join the sole SDK owner before camera-handle cleanup.
+    def recover_pending_payloads(self, receive):
+        """Transfer unassigned diagnostic buffers after joining their SDK owner."""
+        self.close_iterator(preserve=False)
+        for journal in self.recovery_journals:
+            journal.payloads.drain_to(receive)
+        if self._consumer_payload is not None:
+            self._pending_payloads.retain(self._consumer_payload)
+            self._consumer_payload = None
+        while True:
+            try:
+                self._pending_payloads.retain(self.pending.get_nowait())
+            except Empty:
+                break
+        if self._reader_payload is not None:
+            self._pending_payloads.retain(self._reader_payload)
+            self._reader_payload = None
+        self._pending_payloads.drain_to(receive)
+        recover = getattr(self.camera, "recover_pending_payloads", None)
+        if recover is not None:
+            recover(receive)
 
-        The driver checks cancellation between frames and bounds image waits.
-        Never close a generator or camera concurrently with an active read.
+    def close_iterator(self, *, preserve=True):
+        """Stop/join the sole SDK owner, then preserve rather than discard buffers.
+
+        No generator/camera is closed concurrently with a read. Recovery files
+        are incomplete and do not assign buffered frames to another file index.
         """
         self.stop.set()
         if self.reader.ident is not None:
             self.reader.join()
-        while True:
-            try:
-                images, _ = self.pending.get_nowait()
-                self.discarded_on_abort += len(images)
-            except Empty:
-                break
+        if preserve:
+            journal = RecoveryJournal(self.cfg.output_dir / "continuous_recording", self.error or "Diagnostic recording stopped",
+                {"camera": self.sensor, "roi_bounds": self.cfg.roi, "exposure_time_s": self.exposure_s,
+                 "readout_mode": self.cfg.readout.name, "trigger_mode": lab.TriggerMode.AUTO_SEQUENCE.value})
+            self.recover_pending_payloads(journal.payloads.retain)
+            if journal.payloads:
+                self.recovery_journals.append(journal)
+                journal.persist()
+                self.recovered_on_abort += journal.frames_saved
 
 
 def _sustainability(source, frame_bytes, reference_fps, measured_host_fps=None):
@@ -604,7 +641,7 @@ def _run_pipeline_trial(
         for label, destination in destinations.items():
             whole_started = time.perf_counter()
             folder = destination / folder_name
-            folder.mkdir(parents=True, exist_ok=False)
+            filesystem_path(folder).mkdir(parents=True, exist_ok=False)
             drive = {"output_directory": str(folder), "files": [], "summary": {}}
             store = None
             recycled_cursor = 0

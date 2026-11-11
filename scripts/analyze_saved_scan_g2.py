@@ -56,6 +56,9 @@ def parse_args():
         default=None,
         help="Save the map (.npy or .h5). Omit the filename for a unique default; existing files are refused.",
     )
+    parser.add_argument("--run-id", help="Select one recorded run before aggregation.")
+    parser.add_argument("--allow-repeats", action="store_true", help="Explicitly allow repeated step indices within the selected run.")
+    parser.add_argument("--pool-steps", action="store_true", help="Explicitly pool intensity samples at different scan coordinates.")
     return parser.parse_args()
 
 
@@ -81,12 +84,17 @@ def main():
             epsilon=args.epsilon,
             background=args.background,
             max_steps=args.max_steps,
+            run_id=getattr(args,"run_id",None),
+            repeat_policy="allow" if getattr(args,"allow_repeats",False) else "reject",
+            pool_steps=getattr(args,"pool_steps",False),
         )
     except Exception as exc:
         print(f"[ERROR] Failed to compute g^(2) from scan: {exc}")
         return 1
 
-    print("[SUCCESS] Data loaded and processed across all steps.")
+    for warning in stats.get("validation_warnings",[]):
+        print(f"[UNVERIFIED MATCHING] {warning}")
+    print("[SUCCESS] Data loaded and processed across selected inputs.")
     print("-" * 65)
     print("ACQUISITION & DATASET METRICS:")
     print(f"  Total Scan Files Analyzed : {stats['num_files']}")
@@ -136,6 +144,9 @@ def main():
                     dset.attrs["epsilon"] = args.epsilon
                     dset.attrs["background_subtracted"] = args.background
                     dset.attrs["total_frames"] = stats["total_frames"]
+                    dset.attrs["pool_steps"] = getattr(args,"pool_steps",False)
+                    dset.attrs["repeat_policy"] = "allow" if getattr(args,"allow_repeats",False) else "reject"
+                    dset.attrs["selected_run_id"] = getattr(args,"run_id",None) or "not specified"
                 print(f"\n[INFO] Saved g^(2) HDF5 dataset to: {out_path.resolve()}")
             else:
                 with out_path.with_suffix(".npy").open("xb") as handle:

@@ -32,7 +32,7 @@ def test_rolling_pipeline_uses_one_iterator_and_recycles_only_verified_files(cfg
         yield from original(self, *args, **kwargs)
     monkeypatch.setattr(lab.MockPcoCamera, "iter_frames", tracked)
     unrelated = Path(cfg.output_dir) / "research.h5"
-    unrelated.write_bytes(b"leave existing files alone")
+    filesystem_path(unrelated).write_bytes(b"leave existing files alone")
     report = rolling.run_rolling_pipeline_trial(cfg, frames=20, frames_per_file=4,
                                                disk_budget_gb=0.21)
     assert report["status"] == "EXECUTED", report.get("error")
@@ -46,10 +46,10 @@ def test_rolling_pipeline_uses_one_iterator_and_recycles_only_verified_files(cfg
     assert all(row["recycled"] and row["pixels_equal_source"] for row in drive["files"])
     folder = filesystem_path(drive["output_directory"])
     assert not list(folder.glob("*.h5")) and not list(folder.glob("*.pixels.sha256.json"))
-    journal = [json.loads(line) for line in (folder / "rolling_verification.jsonl").read_text().splitlines()]
+    journal = [json.loads(line) for line in (filesystem_path(folder / "rolling_verification.jsonl")).read_text().splitlines()]
     assert len(journal) == 5 and sum(row["frames"] for row in journal) == 20
-    assert unrelated.read_bytes() == b"leave existing files alone"
-    saved = json.loads(Path(report["report_file"]).read_text())
+    assert filesystem_path(unrelated).read_bytes() == b"leave existing files alone"
+    saved = json.loads(filesystem_path(Path(report["report_file"])).read_text())
     assert saved["section"] == "4g" and saved["source"] == "mock"
     assert saved["diagnostic_settings"]["preview_copy_behavior"] == "unchanged production baseline"
     assert not saved["drives"]["selected"]["sustainability"]["long_run_validated"]
@@ -93,8 +93,8 @@ def test_duration_stops_at_file_boundary_with_one_owned_iterator(cfg, monkeypatc
 def _pair(folder, index):
     path = folder / f"BENCHMARK_ONLY_4g_{index}.h5"
     manifest = path.with_suffix(".pixels.sha256.json")
-    path.write_bytes(b"x" * 4000)
-    manifest.write_text("{}")
+    filesystem_path(path).write_bytes(b"x" * 4000)
+    filesystem_path(manifest).write_text("{}")
     return path, manifest
 
 
@@ -105,7 +105,7 @@ def _verified(index):
 
 def test_slots_bound_live_storage_while_cumulative_writes_exceed_budget(tmp_path):
     folder = tmp_path / "BENCHMARK_ONLY_section_4g_test"
-    folder.mkdir()
+    filesystem_path(folder).mkdir()
     store = rolling._RollingFiles(folder, budget_bytes=12000, slot_bytes=6000)
     for index in range(2):
         assert store.reserve(index)
@@ -125,19 +125,19 @@ def test_slots_bound_live_storage_while_cumulative_writes_exceed_budget(tmp_path
 
 def test_recycling_rejects_unverified_and_outside_files(tmp_path):
     folder = tmp_path / "BENCHMARK_ONLY_section_4g_test"
-    folder.mkdir()
+    filesystem_path(folder).mkdir()
     store = rolling._RollingFiles(folder, budget_bytes=12000, slot_bytes=6000)
     assert store.reserve(0)
     paths = _pair(folder, 0)
     store.register(0, *paths)
     with pytest.raises(AssertionError, match="full successful verification"):
         store.recycle(dict(_verified(0), pixels_equal_source=False), {"frames": 2})
-    assert all(p.exists() for p in paths)
+    assert all(filesystem_path(p).exists() for p in paths)
     outside = _pair(tmp_path, 1)
     assert store.reserve(1)
     with pytest.raises(ValueError, match="escapes"):
         store.register(1, *outside)
-    assert all(p.exists() for p in outside)
+    assert all(filesystem_path(p).exists() for p in outside)
 
 
 def test_verification_failure_retains_files_instead_of_recycling(cfg, monkeypatch):
