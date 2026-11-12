@@ -677,6 +677,7 @@ class CameraScanManager:
         abort_check: Optional[Callable[[], bool]] = None,
         run_id: str | None = None,
         continuous: bool = False,
+        preview=None,
     ) -> Iterator[tuple[int, float, Path, np.ndarray]]:
         """Run steps with dedicated retrieval and overlapped durable pixel checks.
 
@@ -689,6 +690,8 @@ class CameraScanManager:
         is only for metadata-only scans (the current GUI): one SDK recording
         spans all file slices and may read ahead of their metadata callbacks.
         Never enable it around physical actuator changes.
+        Optional ``preview`` is a nonblocking MeasurementPreview handoff; only
+        display offers may be skipped, never saved frames or source checks.
         """
         if not self.camera.is_connected:
             raise RuntimeError("Cannot execute scan: Camera is disconnected.")
@@ -726,9 +729,10 @@ class CameraScanManager:
                     if continuous and continuous_source is None:
                         continuous_source = BufferedCamera(self.camera, (num_steps-start_step)*num_frames, 4,
                             self.writer_queue_byte_budget, self.writer_memory_reserve_bytes, storage.collect,
-                            continuous=True)
+                            continuous=True, preview=preview)
                     source = continuous_source if continuous else BufferedCamera(self.camera, num_frames, 4,
-                        self.writer_queue_byte_budget, self.writer_memory_reserve_bytes, storage.collect)
+                        self.writer_queue_byte_budget, self.writer_memory_reserve_bytes, storage.collect,
+                        preview=preview)
                     # Reuse exactly the existing writer and schema. Its one-batch
                     # queue shares the configured byte limit with the SDK reader.
                     writer = CameraScanManager(source, self.storage_dir, compression=self.compression,

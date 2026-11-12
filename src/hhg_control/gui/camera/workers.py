@@ -8,6 +8,7 @@ import numpy as np
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from hhg_control.camera.sequencer.scan_manager import CameraScanManager
+from hhg_control.camera.sequencer.measurement_preview import MeasurementPreview
 from hhg_control.camera.drivers.base_camera import BaseCamera, ReadoutMode, TriggerMode
 from hhg_control.camera.drivers.camera_defaults import DEFAULT_CAMERA_SERIAL
 from hhg_control.camera.drivers.mock_camera import MockPcoCamera
@@ -210,6 +211,12 @@ class LiveStreamTask(QThread):
             externally_triggered = (
                 self.scan_manager.get_trigger_mode() == TriggerMode.EXTERNAL_EXPOSURE_START
             )
+            # Preview zoom is visual only. Restore sensor coverage after a
+            # measurement ROI, without changing the next measurement's controls.
+            sensor = self.scan_manager.camera.get_sensor_info()
+            full_roi = (0, 0, int(sensor["width"]), int(sensor["height"]))
+            if self.scan_manager.get_roi() != full_roi:
+                self.scan_manager.set_roi(full_roi)
             self.scan_manager.start_live(buffer_size=4)
             while self._running:
                 if not self._gui_ready.wait(timeout=0.1):
@@ -277,6 +284,7 @@ class ScanSequenceTask(QThread):
         self.expected_roi, self.expected_trigger = expected_roi, expected_trigger
         self._abort_requested = False
         self._current_step = start_step
+        self.preview = MeasurementPreview()
 
     def request_abort(self) -> None:
         """Request a stop at the next safe frame-batch boundary."""
@@ -288,8 +296,11 @@ class ScanSequenceTask(QThread):
 
     def run(self) -> None:
         try:
-            if self.expected_roi is not None and self.scan_mgr.get_roi() != self.expected_roi:
-                raise RuntimeError("Camera ROI changed since the GUI configuration was verified.")
+            if self.expected_roi is not None:
+                if self.scan_mgr.get_roi() != self.expected_roi:
+                    self.scan_mgr.set_roi(self.expected_roi)
+                if self.scan_mgr.get_roi() != self.expected_roi:
+                    raise RuntimeError("Camera ROI readback differs from the requested acquisition coordinates.")
             if self.expected_trigger is not None and self.scan_mgr.get_trigger_mode() != self.expected_trigger:
                 raise RuntimeError("Camera trigger changed since the GUI configuration was verified.")
             def on_start(step: int, value: float) -> None:
@@ -310,6 +321,7 @@ class ScanSequenceTask(QThread):
                 # GUI setpoints are metadata only; keep one recorder session
                 # across files. Actuator scans must use the gated default.
                 continuous=True,
+                preview=self.preview,
             ):
                 self.step_completed.emit(
                     step, self.num_steps, value, self.param_name, latest_frame, filepath

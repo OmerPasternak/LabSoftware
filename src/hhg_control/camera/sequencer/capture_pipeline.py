@@ -36,7 +36,8 @@ class BufferedCamera:
     can_pause_acquisition = True  # RAM consumer can wait; physical reader cannot.
     acquisition_diagnostics = None
 
-    def __init__(self, camera, frames, batch_size, budget, reserve, poll, *, continuous=False):
+    def __init__(self, camera, frames, batch_size, budget, reserve, poll, *, continuous=False,
+                 preview=None):
         """Cache settings and preflight byte budgets before starting SDK reads."""
         self.camera, self.frames, self.batch_size, self.poll = camera, frames, batch_size, poll
         self.sensor = camera.get_sensor_info()
@@ -72,6 +73,7 @@ class BufferedCamera:
         self.hash_s = 0.0
         self.manifest = self.manifest_partial = self._manifest = None
         self.continuous = continuous
+        self.preview = preview
         self.carry = None
         self.file_start = self.file_frames = 0
 
@@ -149,6 +151,10 @@ class BufferedCamera:
                         if not self.camera.can_pause_acquisition:
                             raise AcquisitionBackpressure("Camera-reader RAM queue filled; downstream processing "
                                                           "cannot keep up; partial data retained.") from exc
+                if self.preview is not None and self.pending.qsize() <= 1:
+                    # Owned batch remains unchanged; the GUI makes its own copy.
+                    # Yield display offers when storage has a reader backlog.
+                    self.preview.offer(images, metadata)
             if not self.stop.is_set() and self.retrieved != self.frames:
                 raise RuntimeError(f"Camera returned {self.retrieved} frames; expected {self.frames}.")
         except BaseException as exc:

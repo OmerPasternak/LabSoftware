@@ -17,7 +17,7 @@ from datetime import datetime
 import numpy as np
 
 from PyQt6 import sip
-from PyQt6.QtCore import Qt, QPointF, QEvent
+from PyQt6.QtCore import Qt, QPointF, QEvent, QTimer
 from PyQt6.QtGui import QColor, QPainter
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -231,6 +231,12 @@ class CameraMainWindow(QMainWindow):
         self._is_dragging_roi: bool = False
         self._preview_edit_until = 0.0
         self._numeric_editors = set()
+        self._view_roi = None
+        self._scan_final_frame = None
+        self._scan_requested_roi = None
+        self._scan_preview_timer = QTimer(self)
+        self._scan_preview_timer.setInterval(100)
+        self._scan_preview_timer.timeout.connect(self._poll_measurement_preview)
 
         self._build_ui()
         # Block competing edits without greying out the entire settings area.
@@ -455,8 +461,8 @@ class CameraMainWindow(QMainWindow):
         right_pane.setSpacing(6)
         right_pane.setContentsMargins(0, 0, 0, 0)
 
-        # --- Group 1: Camera & Hardware ROI --------------------------------
-        grp_camera = QGroupBox("Camera & Hardware ROI")
+        # --- Group 1: Camera & Acquisition ROI -----------------------------
+        grp_camera = QGroupBox("Camera & Acquisition ROI")
         lay_cam = QGridLayout(grp_camera)
         lay_cam.setSpacing(4)
         lay_cam.setContentsMargins(6, 8, 12, 6)
@@ -577,6 +583,7 @@ class CameraMainWindow(QMainWindow):
         self.btn_apply_roi.setMinimumWidth(70)
         self.btn_apply_roi.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.btn_apply_roi.setStyleSheet("padding: 5px; font-weight: bold;")
+        self.btn_apply_roi.setToolTip("Zoom the display to X/Y. Measurement uses X/Y automatically.")
         self.btn_apply_roi.clicked.connect(self._apply_roi)
         roi_btn_row.addWidget(self.btn_apply_roi)
 
@@ -1520,8 +1527,7 @@ class CameraMainWindow(QMainWindow):
                 self._sync_roi_patch_from_spinboxes()
             self._current_displayed_roi = (x0, y0, x1, y1)
             self.axis.set_aspect("auto")
-            self.axis.set_xlim(x0, x1)
-            self.axis.set_ylim(y1, y0)
+            self._set_view_limits()
             self._image_artist.set_clim(self._clim_low, self._clim_high)
             full_draw_needed = True
         else:
@@ -1530,8 +1536,7 @@ class CameraMainWindow(QMainWindow):
                 self._current_displayed_roi = (x0, y0, x1, y1)
                 self._image_artist.set_extent([x0, x1, y1, y0])
                 self.axis.set_aspect("auto")
-                self.axis.set_xlim(x0, x1)
-                self.axis.set_ylim(y1, y0)
+                self._set_view_limits()
                 full_draw_needed = True
 
         # The SDK may omit sensor time; label the source instead of implying it.
@@ -1757,7 +1762,7 @@ class CameraMainWindow(QMainWindow):
 
         self._append_log(
             f"[ROI SELECTED] X:[{x0}, {x1}], Y:[{y0}, {y1}] ({x1-x0}x{y1-y0} px).\n"
-            f"               Click 'Apply Hardware ROI' to apply to camera sensor."
+            f"               Measurement uses these bounds automatically; Apply ROI zooms the view."
         )
 
     def _deactivate_draw_roi(self) -> None:
@@ -1774,38 +1779,36 @@ class CameraMainWindow(QMainWindow):
         self.btn_draw_roi.setChecked(False)
         self.btn_draw_roi.blockSignals(was_blocked)
 
+    def _entered_roi(self) -> tuple[int, int, int, int]:
+        """Read absolute, upper-exclusive sensor coordinates, committing typed text."""
+        controls = (self.spn_roi_x0, self.spn_roi_y0, self.spn_roi_x1, self.spn_roi_y1)
+        for control in controls:
+            control.interpretText()
+        return tuple(control.value() for control in controls)
+
+    def _set_view_limits(self) -> None:
+        """Apply independent view bounds without changing sensor or acquisition ROI."""
+        bounds = self._view_roi or self._current_displayed_roi
+        if bounds is not None:
+            x0, y0, x1, y1 = bounds
+            self.axis.set_xlim(x0, x1)
+            self.axis.set_ylim(y1, y0)
+
     def _apply_roi(self) -> None:
-        """Queue a valid sensor-pixel ROI change after live acquisition stops."""
-        # Snap to valid hardware constraints
-        x0 = (self.spn_roi_x0.value() // 4) * 4
-        x1 = ((self.spn_roi_x1.value() + 3) // 4) * 4
-        x0 = max(0, min(2496, x0))
-        x1 = max(x0 + 64, min(2560, x1))
-
-        height, step_y, min_height, symmetric_y = self._roi_vertical_limits()
-        if symmetric_y:
-            y0 = self.spn_roi_y0.value()
-            y1 = height - y0
-        else:
-            y0, y1 = self._snap_roi_span(
-                self.spn_roi_y0.value(), self.spn_roi_y1.value(), height,
-                step_y, min_height,
-            )
-
-        self._is_updating_roi = True
-        try:
-            self.spn_roi_x0.setValue(x0)
-            self.spn_roi_x1.setValue(x1)
-            self.spn_roi_y0.setValue(y0)
-            self.spn_roi_y1.setValue(y1)
-        finally:
-            self._is_updating_roi = False
-
-        self._request_roi_change((x0, y0, x1, y1), full_sensor=False)
+        """Zoom the image to the entered absolute coordinates; issue no camera commands."""
+        self._view_roi = self._entered_roi()
+        self._deactivate_draw_roi()
+        self._set_view_limits()
+        self._plot_background = None
+        self.canvas.draw_idle()
 
     def _reset_full_sensor(self) -> None:
-        """Queue full-sensor readout while preserving the configured ROI controls."""
-        self._request_roi_change((0, 0, 2560, 2160), full_sensor=True)
+        """Show full sensor coordinates while preserving acquisition X/Y values."""
+        sensor = self.camera.get_sensor_info()
+        self._view_roi = (0, 0, int(sensor["width"]), int(sensor["height"]))
+        self._set_view_limits()
+        self._plot_background = None
+        self.canvas.draw_idle()
 
     def _request_roi_change(self, roi: tuple[int, int, int, int], *, full_sensor: bool) -> None:
         """Serialize ROI changes with live acquisition and reject duplicate clicks."""
@@ -2128,27 +2131,7 @@ class CameraMainWindow(QMainWindow):
             self._stop_live(after_stop=self._toggle_measurement_scan)
             return
 
-        selected_roi = (
-            self.spn_roi_x0.value(), self.spn_roi_y0.value(),
-            self.spn_roi_x1.value(), self.spn_roi_y1.value(),
-        )
-        try:
-            active_roi = self._cached_roi()
-        except Exception as exc:
-            message = f"Cannot verify the camera's active ROI: {exc}"
-            self._append_log(f"[SCAN BLOCKED] {message}")
-            QMessageBox.warning(self, "ROI Readback Failed", message)
-            self._resume_live_if_scan_not_started()
-            return
-        if selected_roi != active_roi:
-            message = (
-                f"ROI controls show {selected_roi}, but the camera is using {active_roi}. "
-                "Click Apply ROI before measuring, or set the controls to the active full sensor."
-            )
-            self._append_log(f"[SCAN BLOCKED] {message}")
-            QMessageBox.warning(self, "ROI Not Applied", message)
-            self._resume_live_if_scan_not_started()
-            return
+        selected_roi = self._entered_roi()
 
         requested_trigger = (
             TriggerMode.EXTERNAL_EXPOSURE_START
@@ -2183,7 +2166,7 @@ class CameraMainWindow(QMainWindow):
         target_dir.mkdir(parents=True, exist_ok=True)
         remaining_steps = self.spn_num_steps.value() - start_step
         raw_bytes = (
-            (active_roi[2] - active_roi[0]) * (active_roi[3] - active_roi[1])
+            (selected_roi[2] - selected_roi[0]) * (selected_roi[3] - selected_roi[1])
             * 2 * self.spn_frames.value() * remaining_steps
         )
         required_bytes = int(raw_bytes * 1.1) + 100_000_000
@@ -2249,7 +2232,7 @@ class CameraMainWindow(QMainWindow):
             num_frames=num_frames,
             start_step=start_step,
             run_id=self._current_run_id,
-            expected_roi=active_roi, expected_trigger=requested_trigger,
+            expected_roi=selected_roi, expected_trigger=requested_trigger,
         )
         self.active_scan_task.step_started.connect(self._on_scan_step_started)
         self.active_scan_task.step_completed.connect(self._on_scan_step_completed)
@@ -2258,6 +2241,9 @@ class CameraMainWindow(QMainWindow):
         self.active_scan_task.error_occurred.connect(self._on_scan_error)
         self.active_scan_task.finished.connect(self._on_scan_task_finished)
         self._scan_segment_started_at = perf_counter()
+        self._scan_requested_roi = selected_roi
+        self._scan_final_frame = None
+        self._scan_preview_timer.start(100)
         self.active_scan_task.start()
 
     def _resume_live_if_scan_not_started(self) -> None:
@@ -2288,9 +2274,9 @@ class CameraMainWindow(QMainWindow):
             self.spn_end_val.setEnabled(False)
             self.spn_step_size.setEnabled(False)
             self.spn_num_steps.setEnabled(False)
-            self.btn_apply_roi.setEnabled(False)
-            self.btn_full_sensor.setEnabled(False)
-            self.btn_draw_roi.setEnabled(False)
+            self.btn_apply_roi.setEnabled(True)
+            self.btn_full_sensor.setEnabled(True)
+            self.btn_draw_roi.setEnabled(True)
             self.cmb_camera_source.setEnabled(False)
         else:
             self.btn_go.setEnabled(True)
@@ -2338,7 +2324,8 @@ class CameraMainWindow(QMainWindow):
             f"[SAVED][{self._scan_source_label()}] Step {step_idx + 1}/{total_steps} -> "
             f"{h5_path.name} ({file_size_mb:.2f} MB, {param_name}={param_val:.4f})"
         )
-        self._update_display(latest_frame)
+        # File progress must not force a repaint per file during acquisition.
+        self._scan_final_frame = latest_frame
         self.lbl_scan_progress.setText(
             f"Scan Progress: Step {step_idx + 1} of {total_steps} (Saved) | {param_name}: {param_val:.4f}"
         )
@@ -2421,7 +2408,36 @@ class CameraMainWindow(QMainWindow):
         self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #dc3545; padding-left: 8px;")
         QMessageBox.warning(self, "Scan Execution Error", f"Scan error occurred:\n\n{err_msg}")
 
+    def _poll_measurement_preview(self) -> None:
+        """Render opportunistically, budgeting roughly 10% GUI time for preview.
+
+        The reader never waits for this timer. Pixel copies and painting happen
+        here, on separate display arrays, with no extra SDK reads or HDF5 reads.
+        """
+        if self.active_scan_task is None or self._is_dragging_roi:
+            return
+        if perf_counter() < self._preview_edit_until:
+            return
+        started = perf_counter()
+        try:
+            pending = self.active_scan_task.preview.take()
+            if pending is None:
+                return
+            self._update_display(pending[0], meta=pending[1])
+            # Reduce refresh frequency when canvas work is expensive.
+            self._scan_preview_timer.setInterval(max(100, int((perf_counter() - started) * 10000)))
+        except Exception as exc:
+            self._scan_preview_timer.stop()
+            self._append_log(f"[DISPLAY] Measurement preview stopped: {exc}")
+
     def _on_scan_task_finished(self) -> None:
+        self._scan_preview_timer.stop()
+        if self._scan_final_frame is not None and not self._closing:
+            try:
+                self._update_display(self._scan_final_frame, meta={"roi": self._scan_requested_roi})
+            except Exception as exc:
+                self._append_log(f"[DISPLAY] Final measurement preview failed: {exc}")
+        self._scan_final_frame = None
         if self.active_scan_task is not None:
             self.active_scan_task.deleteLater()
             self.active_scan_task = None

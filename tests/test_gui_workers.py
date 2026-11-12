@@ -242,8 +242,8 @@ def test_live_view_resumes_after_mock_measurement(qtbot, tmp_path):
     window.close()
 
 
-def test_live_view_returns_after_scan_preflight_rejection(qtbot, tmp_path, monkeypatch):
-    """Rejecting an unapplied ROI leaves the prior live view available."""
+def test_live_view_returns_after_scan_storage_preflight_rejection(qtbot, tmp_path, monkeypatch):
+    """Storage preflight failure leaves the prior live view available."""
     camera = MockPcoCamera()
     camera.connect()
     window = CameraMainWindow()
@@ -252,6 +252,9 @@ def test_live_view_returns_after_scan_preflight_rejection(qtbot, tmp_path, monke
     window.scan_manager = CameraScanManager(camera, tmp_path)
     window.spn_roi_x0.setValue(148)
     window.spn_roi_x1.setValue(2292)
+    import hhg_control.gui.camera.workers as workers
+    monkeypatch.setattr(getattr(workers, "shutil", camera_panel.shutil), "disk_usage", lambda *_: SimpleNamespace(free=0))
+    window.txt_storage_dir.setText(str(tmp_path))
     warnings = []
     monkeypatch.setattr(camera_panel.QMessageBox, "warning", lambda *args: warnings.append(args[-1]))
 
@@ -264,7 +267,7 @@ def test_live_view_returns_after_scan_preflight_rejection(qtbot, tmp_path, monke
         timeout=5000,
     )
     assert window.active_scan_task is None
-    assert "Click Apply ROI" in warnings[0]
+    assert "free" in warnings[0].lower()
     assert window.scan_manager.state == "LIVE"
 
     window._on_stop_clicked()
@@ -294,8 +297,10 @@ def test_stop_cancels_pending_live_to_scan_handoff(qtbot, tmp_path):
     window.close()
 
 
-def test_measurement_rejects_unapplied_roi(qtbot, tmp_path, monkeypatch):
-    """A drawn ROI cannot silently produce full-sensor measurement files."""
+@pytest.mark.parametrize("zoomed", [False, True])
+def test_measurement_uses_entered_roi_without_apply(qtbot, tmp_path, monkeypatch, zoomed):
+    """Zoom state never determines saved sensor bounds, including later edits."""
+    import h5py
     camera = MockPcoCamera()
     camera.connect()
     window = CameraMainWindow()
@@ -305,17 +310,31 @@ def test_measurement_rejects_unapplied_roi(qtbot, tmp_path, monkeypatch):
     window.txt_storage_dir.setText(str(tmp_path))
     warnings = []
     monkeypatch.setattr(camera_panel.QMessageBox, "warning", lambda *args: warnings.append(args[-1]))
-    window.spn_roi_x0.setValue(148)
-    window.spn_roi_x1.setValue(2292)
-    window.spn_roi_y0.setValue(544)
-
-    window._toggle_measurement_scan()
-
-    assert window.active_scan_task is None
-    assert "Click Apply ROI" in warnings[0]
-    assert "[SCAN BLOCKED]" in window.txt_activity_log.toPlainText()
-    assert not list(tmp_path.glob("*.h5"))
-    camera.close()
+    window.spn_roi_x0.setValue(800)
+    window.spn_roi_x1.setValue(928)
+    window.spn_roi_y0.setValue(800)
+    window.spn_roi_y1.setValue(832)
+    if zoomed:
+        window._apply_roi()
+    # Leave newly typed text uncommitted; measurement must read it without Apply.
+    window.spn_roi_x1.lineEdit().setText("1056")
+    window.spn_frames.setValue(3)
+    window.spn_num_steps.setValue(1)
+    try:
+        window._toggle_measurement_scan()
+        qtbot.waitUntil(lambda: window.active_scan_task is None, timeout=15000)
+        assert not warnings
+        paths = list(tmp_path.glob("*.h5"))
+        assert len(paths) == 1
+        with h5py.File(paths[0]) as h5:
+            assert tuple(h5.attrs["roi_bounds"]) == (800, 800, 1056, 832)
+            assert h5["images"].shape == (3, 32, 256)
+        assert window.scan_manager.last_scan_pipeline["files_verified"] == 1
+        if zoomed:
+            assert window.axis.get_xlim() == (800, 928)
+            assert window.axis.get_ylim() == (832, 800)
+    finally:
+        window.close()
 
 
 def test_measurement_rejects_trigger_checkbox_hardware_mismatch(qtbot, tmp_path, monkeypatch):
@@ -533,11 +552,8 @@ def test_applying_roi_preserves_off_center_y_bounds(qtbot, monkeypatch):
     """Applying an entered ROI does not recenter its Y bounds."""
     window = CameraMainWindow()
     qtbot.addWidget(window)
-    selected = []
-    monkeypatch.setattr(
-        window, "_request_roi_change",
-        lambda roi, *, full_sensor: selected.append((roi, full_sensor)),
-    )
+    original_roi = window.camera.get_roi()
+    monkeypatch.setattr(window.scan_manager, "set_roi", lambda *_: pytest.fail("Visual button changed hardware"))
     window.spn_roi_x0.setValue(800)
     window.spn_roi_x1.setValue(1056)
     window.spn_roi_y0.setValue(800)
@@ -545,7 +561,9 @@ def test_applying_roi_preserves_off_center_y_bounds(qtbot, monkeypatch):
 
     window._apply_roi()
 
-    assert selected == [((800, 800, 1056, 1100), False)]
+    assert window.axis.get_xlim() == (800, 1056)
+    assert window.axis.get_ylim() == (1100, 800)
+    assert window.camera.get_roi() == original_roi
     window.close()
 
 
@@ -618,20 +636,22 @@ def test_repeated_roi_and_full_sensor_during_live_stays_open(qtbot, tmp_path):
 
     window._start_live()
     qtbot.waitUntil(lambda: window._frame_count >= 2, timeout=4000)
-    for expected_roi, change in [
+    live_task = window.active_live_task
+    for expected_view, change in [
         ((800, 980, 1056, 1180), window._apply_roi),
         ((0, 0, 2560, 2160), window._reset_full_sensor),
         ((800, 980, 1056, 1180), window._apply_roi),
         ((0, 0, 2560, 2160), window._reset_full_sensor),
     ]:
         change()
-        assert window._roi_change_pending
-        assert window.btn_apply_roi.isEnabled() and window._command_input_locked
-        qtbot.waitUntil(
-            lambda: not window._roi_change_pending and window.scan_manager.state == "LIVE",
-            timeout=6000,
-        )
-        assert window.camera.get_roi() == expected_roi
+        assert not window._roi_change_pending
+        assert window.active_live_task is live_task
+        assert window.scan_manager.state == "LIVE"
+        assert window.camera.get_roi() == (0, 0, 2560, 2160)
+        x0, y0, x1, y1 = expected_view
+        assert window.axis.get_xlim() == (x0, x1)
+        assert window.axis.get_ylim() == (y1, y0)
+        assert window._entered_roi() == (800, 980, 1056, 1180)
         assert window.isVisible()
 
     window._on_stop_clicked()

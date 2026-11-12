@@ -97,8 +97,14 @@ duration includes synthetic image generation and cannot establish the physical
 camera's maximum frame rate.
 If live view was running when a measurement starts, the GUI pauses its camera
 reader for the scan and restarts live view after a successful measurement. The
-last saved frame is displayed after each scan step. STOP, scan errors, and window
-close do not restart live acquisition; GO can start it manually afterward.
+measurement display samples already acquired frames through a single pending
+preview slot. It starts at up to 10 refreshes/s and slows when painting costs
+more than roughly 10% of GUI time; acquisition never waits for the display.
+Only display offers can be skipped. Pixel copies, scaling and painting operate
+on separate display arrays. The final saved frame is displayed after the run.
+STOP, scan errors, and window close do not restart live acquisition; GO can
+start it manually afterward. Physical save-rate impact still needs validation
+on the acquisition PC because display and saving share CPU/memory resources.
 
 The current camera-file layout and MATLAB reading notes are documented in
 [docs/hdf5_camera_schema.md](docs/hdf5_camera_schema.md). The implementation uses
@@ -126,10 +132,17 @@ coincidences.
 New scans use uncompressed HDF5 and a bounded writer queue so saving can overlap
 continuous camera acquisition. A simulated camera waits if storage is slower;
 a physical camera stops with a `.partial` file if the queue fills or frame
-integrity fails. Gzip remains available for slower scans. Before a GUI scan,
-click **Apply ROI** if the ROI controls have changed. The GUI blocks a scan if
-the controls differ from the camera's active ROI or if estimated storage for
-the remaining steps exceeds free space.
+integrity fails. Gzip remains available for slower scans. The X/Y fields are
+absolute sensor coordinates (zero-based, upper endpoint excluded). Measurement
+start automatically applies and verifies those bounds; no Apply ROI click is
+needed after editing. Invalid hardware bounds, failed readback, or insufficient
+storage still prevent acquisition.
+**Apply ROI** only zooms the display to the entered bounds. **Full Sensor** only
+shows the full sensor coordinates and preserves the X/Y acquisition fields.
+Both view buttons work during measurement without changing its frozen ROI.
+Live view uses full sensor readout, so zooming out after a measurement can show
+the surroundings again. A measurement only contains its configured sensor ROI;
+zooming out during that measurement does not acquire pixels outside it.
 The Global Shutter setting is the camera's true global exposure mode, with a
 100 ms maximum exposure; the GUI reads the current sensor mode on connection.
 
