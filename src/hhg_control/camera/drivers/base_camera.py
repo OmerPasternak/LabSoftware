@@ -131,6 +131,31 @@ class BaseCamera(ABC):
         """Get exposure time in seconds."""
         pass
 
+    def get_delay_limits(self) -> tuple[float, float, float]:
+        """Return minimum, maximum and increment of exposure-start delay, in seconds."""
+        raise NotImplementedError("Camera exposure-start delay is unsupported.")
+
+    def validate_delay_time(self, delay_s: float) -> None:
+        """Require finite delay seconds within device limits and on its timing grid."""
+        minimum, maximum, increment = self.get_delay_limits()
+        if not np.isfinite(delay_s) or not minimum <= delay_s <= maximum:
+            raise CameraSafetyError(f"Delay {delay_s} s is outside [{minimum}, {maximum}] s.")
+        ticks = (delay_s - minimum) / increment
+        if not np.isclose(ticks, round(ticks), rtol=0, atol=1e-6):
+            raise CameraSafetyError(f"Delay must follow the {increment:g} s device increment.")
+
+    def set_delay_time(self, delay_s: float) -> None:
+        """Set exposure-start delay in seconds while idle, preserving exposure duration."""
+        raise NotImplementedError("Camera exposure-start delay is unsupported.")
+
+    def get_delay_time(self) -> float:
+        """Read actual exposure-start delay in seconds."""
+        raise NotImplementedError("Camera exposure-start delay is unsupported.")
+
+    def verify_acquisition_stopped(self) -> None:
+        """Require verified recorder and sensor inactivity before changing a delay point."""
+        raise NotImplementedError("Camera acquisition-stop verification is unsupported.")
+
     @abstractmethod
     def set_trigger_mode(self, mode: TriggerMode) -> None:
         """Select free-running or one fixed exposure per external trigger."""
@@ -140,6 +165,21 @@ class BaseCamera(ABC):
     def get_trigger_mode(self) -> TriggerMode:
         """Read the active hardware trigger mode, not only a cached request."""
         pass
+
+    def get_external_trigger_input_settings(self) -> dict[str, object]:
+        """Read external exposure-trigger input settings, including enable and edge polarity."""
+        raise NotImplementedError("Camera external trigger input readback is unsupported.")
+
+    def get_external_trigger_input_enabled(self) -> bool:
+        """Read whether the external exposure-trigger input is enabled."""
+        enabled = self.get_external_trigger_input_settings().get("enabled")
+        if not isinstance(enabled, bool):
+            raise RuntimeError("Camera returned an invalid external trigger input enable state.")
+        return enabled
+
+    def set_external_trigger_input_enabled(self, enabled: bool) -> None:
+        """Enable or disable external exposure triggering while preserving edge polarity."""
+        raise NotImplementedError("Camera external trigger input configuration is unsupported.")
 
     @abstractmethod
     def acquire_frames(self, num_frames: int) -> Tuple[np.ndarray, List[Dict[str, Any]]]:

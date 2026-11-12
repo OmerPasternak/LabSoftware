@@ -198,7 +198,7 @@ class CameraScanManager:
 
     @contextmanager
     def _operation(self, state: str):
-        if state in ("SCANNING", "PREVIEW", "LIVE"):
+        if state in ("SCANNING", "PREVIEW", "LIVE", "DELAY_DIAGNOSTIC"):
             self._require_recovered_payloads()
         with self._state_lock:
             if self._state != "IDLE":
@@ -367,7 +367,10 @@ class CameraScanManager:
         abort_check: Optional[Callable[[], bool]],
         source=None,
         scan_plan=None,
+        frame_context: dict | None = None,
     ) -> tuple[Path, np.ndarray]:
+        """Save a step; optional JSON context is frozen before capture and copied per frame."""
+        frame_context_json = json.dumps(frame_context, allow_nan=False) if frame_context is not None else None
         step_started = time.perf_counter()
         self.last_step_timing = {}
         if not self.camera.is_connected:
@@ -411,6 +414,7 @@ class CameraScanManager:
                 )
         check_disk_space(self.storage_dir, int(num_frames * (roi[2] - roi[0]) * (roi[3] - roi[1]) * 2 * 1.1))
 
+        trigger_mode = self.camera.get_trigger_mode()
         attrs = {
                 "experiment_name": clean_exp,
                 "experiment_identifier": clean_exp,
@@ -438,7 +442,7 @@ class CameraScanManager:
                 "sensor_pixel_height": int(sensor_info.get("height", roi[3] - roi[1])),
                 "roi_bounds": roi,
                 "storage_compression": self.compression or "none",
-                "trigger_mode": self.camera.get_trigger_mode().value,
+                "trigger_mode": trigger_mode.value,
                 "writer_queue_batches": int(queue_batches),
                 "writer_queue_capacity_frames": int(queue_capacity_frames),
                 "writer_queue_capacity_bytes": int(queue_capacity_bytes),
@@ -449,6 +453,17 @@ class CameraScanManager:
         }
         if scan_plan is not None:
             attrs.update(scan_plan)
+        if trigger_mode == TriggerMode.EXTERNAL_EXPOSURE_START:
+            try:
+                trigger_input = self.camera.get_external_trigger_input_settings()
+            except NotImplementedError:
+                attrs["external_trigger_input_verified"] = False
+            else:
+                attrs["external_trigger_input_verified"] = True
+                attrs["external_trigger_input_enabled"] = bool(trigger_input["enabled"])
+                attrs["external_trigger_input_polarity"] = str(trigger_input["polarity"])
+        if frame_context_json is not None:
+            attrs["frame_acquisition_context_json"] = frame_context_json
         mode = self.camera.get_readout_mode()
         attrs["readout_mode"] = mode.name
         attrs["readout_mode_value"] = int(mode.value)
@@ -638,6 +653,9 @@ class CameraScanManager:
                                 f"{self.writer_memory_reserve_bytes / 2**30:.1f} GiB reserved. "
                                 "Acquisition stopped and the partial file was retained."
                             )
+                    if frame_context_json is not None:
+                        producer_payload.metadata = [dict(meta, acquisition_context=json.loads(frame_context_json))
+                                                     for meta in metadata]
                     copied_batch = producer_payload
                     queue_put_started = time.perf_counter()
                     while True:

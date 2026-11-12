@@ -213,6 +213,103 @@ class PcoEdgeCamera(BaseCamera):
         self._trigger_mode = mode
         return mode
 
+    def get_external_trigger_input_settings(self) -> dict[str, object]:
+        """Read PCO HWIO-1 exposure-trigger enable and edge-polarity settings."""
+        if self._cam is None or not self._is_connected:
+            raise RuntimeError("Camera is not connected; external trigger input cannot be verified.")
+        if self.state_unknown:
+            raise RuntimeError("Camera state unknown; reconnect before reading trigger input state.")
+        state = self._cam.sdk.get_hwio_signal(0)
+        enabled = state.get("enabled")
+        polarity = state.get("polarity")
+        if enabled not in {"on", "off"} or polarity not in {"rising edge", "falling edge"}:
+            raise RuntimeError(f"Unsupported PCO exposure-trigger input state: {state!r}.")
+        return {"enabled": enabled == "on", "polarity": polarity}
+
+    def set_external_trigger_input_enabled(self, enabled: bool) -> None:
+        """Set PCO HWIO-1 enable state while preserving its configured edge polarity.
+
+        The input is connector 1 / SMA 1. Its rising/falling edge and other signal
+        configuration remain as found; configuration is read back after changes.
+        """
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled must be a bool.")
+        if self._cam is None or not self._is_connected:
+            raise RuntimeError("Camera is not connected; external trigger input cannot be changed.")
+        if self.state_unknown:
+            raise RuntimeError("Camera state unknown; reconnect before changing trigger input state.")
+        if getattr(self._cam, "is_recording", False) or getattr(self, "_live_active", False):
+            raise RuntimeError("Stop camera recording before changing external trigger input state.")
+        try:
+            state = self._cam.sdk.get_hwio_signal(0)
+            polarity = state.get("polarity")
+            current = state.get("enabled")
+            if polarity not in {"rising edge", "falling edge"} or current not in {"on", "off"}:
+                raise RuntimeError(f"Unsupported PCO exposure-trigger input configuration: {state!r}.")
+            if (current == "on") == enabled:
+                return
+            self._cam.configureHWIO_1_exposureTrigger(enabled, polarity)
+            actual = self._cam.sdk.get_hwio_signal(0)
+            expected_enabled = "on" if enabled else "off"
+            if actual.get("enabled") != expected_enabled or actual.get("polarity") != polarity:
+                raise RuntimeError("PCO exposure-trigger input readback did not match the request.")
+        except Exception:
+            self.state_unknown = True
+            raise
+
+    def verify_acquisition_stopped(self) -> None:
+        """Verify both recorder inactivity and SDK sensor recording state off.
+
+        A stopped Python iterator alone is insufficient: no setting may change
+        while a previous exposure/readout can still belong to its recorder.
+        Unknown or active state fails closed; no buffered pixels are discarded.
+        """
+        try:
+            if self._cam is None or not self.is_connected or self.state_unknown:
+                raise RuntimeError("Camera is disconnected or its state is unknown.")
+            if (getattr(self, "_live_active", False) or self._cam.is_recording
+                    or self._cam.sdk.get_recording_state().get("recording state") != "off"):
+                raise RuntimeError("Camera recorder/sensor is still recording.")
+        except Exception as exc:
+            self.state_unknown = True
+            raise RuntimeError("Cannot verify acquisition stopped; camera state unknown.") from exc
+
+    def get_delay_limits(self) -> tuple[float, float, float]:
+        """Read SDK minimum, maximum and increment in seconds; require valid descriptors."""
+        if self._cam is None or not self.is_connected:
+            raise RuntimeError("Camera is not connected.")
+        desc = self._cam.description
+        limits = tuple(float(desc[key]) for key in
+                       ("min delay time", "max delay time", "min delay step"))
+        if not all(math.isfinite(v) for v in limits) or not (0 <= limits[0] <= limits[1] and limits[2] > 0):
+            raise RuntimeError(f"Invalid SDK delay limits: {limits}")
+        return limits
+
+    def get_delay_time(self) -> float:
+        """Read actual exposure-start delay seconds from the PCO SDK."""
+        if self._cam is None or not self.is_connected:
+            raise RuntimeError("Camera is not connected.")
+        return float(self._cam.delay_time)
+
+    def set_delay_time(self, delay_s: float) -> None:
+        """Set delay seconds on the device timing grid, verifying delay and unchanged exposure."""
+        self.validate_delay_time(delay_s)
+        if getattr(self._cam, "is_recording", False) or getattr(self, "_live_active", False):
+            raise RuntimeError("Stop recording before changing camera delay.")
+        try:
+            exposure = self.get_exposure_time()
+            # pco 2.2.1 converts seconds to ns with int(), so nudge away from
+            # binary floating-point values just below an integer nanosecond.
+            maximum = self.get_delay_limits()[1]
+            self._cam.delay_time = min(maximum, math.nextafter(float(delay_s), math.inf))
+            if not math.isclose(self.get_delay_time(), delay_s, rel_tol=0, abs_tol=1e-12):
+                raise RuntimeError("Camera delay readback differs from request.")
+            if not math.isclose(self.get_exposure_time(), exposure, rel_tol=0, abs_tol=1e-9):
+                raise RuntimeError("Exposure changed while setting camera delay.")
+        except Exception:
+            self.state_unknown = True
+            raise
+
     def set_trigger_mode(self, mode: TriggerMode) -> None:
         """Select Auto Sequence or fixed-duration external exposure starts.
 

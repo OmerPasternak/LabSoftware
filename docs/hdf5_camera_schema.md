@@ -36,6 +36,15 @@ marked host/simulated fallback. A scan parameter's unit is currently part of
 its display name, such as `Delay Stage (mm)`; a dedicated machine-readable
 unit field should be added before automated cross-instrument analysis.
 
+Camera-delay characterization additionally stores `frame_acquisition_context_json`
+at the root and the matching `acquisition_context` object in each frame's JSON.
+It records `run_id`, `delay_point_index`, `actual_delay_ns`, `trigger_mode`, and
+`delay_assignment`. The delay is read back before an isolated recording and
+held fixed until its frames and writer finish; it is not inferred from host
+receipt timestamps. Recorder IDs may restart in a new recording, so interpret
+them together with the run and point IDs. This optional metadata does not change
+the raw pixel payload or the schema-2.0 dataset layout.
+
 For MATLAB, inspect the dataset size and attributes with `h5info`, then read
 `/images` with `h5read`. MATLAB and Python may present HDF5 dimensions in a
 different order, so verify the resulting array shape against the stored axis

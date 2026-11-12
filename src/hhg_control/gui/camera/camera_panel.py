@@ -17,7 +17,7 @@ from datetime import datetime
 import numpy as np
 
 from PyQt6 import sip
-from PyQt6.QtCore import Qt, QPointF, QEvent
+from PyQt6.QtCore import Qt, QPointF, QEvent, QProcess, QProcessEnvironment
 from PyQt6.QtGui import QColor, QPainter
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -36,6 +36,8 @@ from hhg_control.camera.drivers.base_camera import BaseCamera, ReadoutMode, Trig
 from hhg_control.camera.drivers.camera_defaults import DEFAULT_CAMERA_SERIAL
 from hhg_control.camera.drivers.mock_camera import MockPcoCamera
 from hhg_control.camera.sequencer.scan_manager import CameraScanManager
+from hhg_control.project_paths import project_root
+from .diagnostics import build_diagnostics_window
 from .workers import (
     CameraConnectTask,
     CameraDisconnectTask,
@@ -48,6 +50,7 @@ from .workers import (
     ScanSequenceTask,
     StorageDirectoryTask,
 )
+from .diagnostics import build_diagnostics_window
 
 IMAGE_AXIS_RECT = (0.12, 0.08, 0.83, 0.86)
 COLOR_AXIS_RECT = (0.95, 0.08, 0.05, 0.86)
@@ -236,6 +239,8 @@ class CameraMainWindow(QMainWindow):
         self._is_dragging_roi: bool = False
         self._preview_edit_until = 0.0
         self._numeric_editors = set()
+        self._analysis_processes: list[QProcess] = []
+        self.delay_diagnostic = None
 
         self._build_ui()
         # Block competing edits without greying out the entire settings area.
@@ -707,6 +712,10 @@ class CameraMainWindow(QMainWindow):
         folder_buttons.addWidget(self.btn_open_folder)
         folder_buttons.addStretch(1)
         folder_buttons.addWidget(self.btn_fundamental_analysis)
+        self.diagnostics_window = build_diagnostics_window(self)
+        self.btn_diagnostics = QPushButton("Diagnostics…")
+        self.btn_diagnostics.clicked.connect(self._show_diagnostics)
+        folder_buttons.addWidget(self.btn_diagnostics)
         store_grid.addLayout(folder_buttons, 1, 0, 1, 2)
 
         store_grid.addWidget(QLabel("Header:"), 2, 0)
@@ -739,6 +748,66 @@ class CameraMainWindow(QMainWindow):
         """Show the separate analysis window without coupling it to acquisition state."""
         from hhg_control.hhg_analysis.window import main
         main()
+    def _show_diagnostics(self) -> None:
+        """Show and raise the reusable diagnostics window without blocking live acquisition."""
+        self.diagnostics_window.show()
+        self.diagnostics_window.raise_()
+        self.diagnostics_window.activateWindow()
+
+    def _launch_analysis_script(
+        self, script_name: str, input_path: Path, extra_args: Optional[list[str]] = None
+    ) -> None:
+        """Run a GUI analysis script asynchronously, leaving the acquisition UI responsive."""
+        script_path = project_root() / "scripts" / script_name
+        if not script_path.is_file():
+            QMessageBox.warning(self, "Analysis Tool Missing", f"Could not find analysis script:\n{script_path}")
+            return
+
+        process = QProcess(self)
+        environment = QProcessEnvironment.systemEnvironment()
+        environment.insert("PYTHONPATH", str(project_root() / "src") + os.pathsep + environment.value("PYTHONPATH"))
+        process.setProcessEnvironment(environment)
+        process.setProgram(sys.executable)
+        process.setArguments([str(script_path), str(input_path), *(extra_args or [])])
+        process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        process.readyReadStandardOutput.connect(
+            lambda proc=process: self._read_analysis_output(proc)
+        )
+        process.finished.connect(
+            lambda exit_code, _status, proc=process, name=script_name:
+                self._on_analysis_finished(proc, name, exit_code)
+        )
+        process.errorOccurred.connect(
+            lambda error, proc=process, name=script_name:
+                self._on_analysis_process_error(proc, name, error)
+        )
+        self._analysis_processes.append(process)
+        self._append_log(f"[ANALYSIS] Starting {script_name} for {input_path}.")
+        process.start()
+
+    def _read_analysis_output(self, process: QProcess) -> None:
+        """Forward child-process output into the existing activity log."""
+        output = bytes(process.readAllStandardOutput()).decode("utf-8", errors="replace").strip()
+        if output:
+            for line in output.splitlines():
+                self._append_log(f"[ANALYSIS] {line}")
+
+    def _on_analysis_finished(self, process: QProcess, script_name: str, exit_code: int) -> None:
+        """Record the completion status and release the process wrapper."""
+        self._read_analysis_output(process)
+        status = "completed" if exit_code == 0 else f"failed (exit code {exit_code})"
+        self._append_log(f"[ANALYSIS] {script_name} {status}.")
+        if process in self._analysis_processes:
+            self._analysis_processes.remove(process)
+        process.deleteLater()
+
+    def _on_analysis_process_error(self, process: QProcess, script_name: str, error) -> None:
+        """Report failed script startup or an unexpected child-process error."""
+        self._append_log(f"[ANALYSIS ERROR] {script_name}: {process.errorString()} ({error}).")
+        if error == QProcess.ProcessError.FailedToStart:
+            if process in self._analysis_processes:
+                self._analysis_processes.remove(process)
+            process.deleteLater()
 
     def _set_go_button_style(self, active: bool) -> None:
         if self._go_visual_active == active:
@@ -766,7 +835,8 @@ class CameraMainWindow(QMainWindow):
 
     def _configuration_busy(self) -> bool:
         """Check worker ownership without waiting for a hardware lock."""
-        return bool(self.active_mode_task or self.active_trigger_task or self.active_roi_task
+        return bool((self.delay_diagnostic and self.delay_diagnostic.active)
+                    or self.active_mode_task or self.active_trigger_task or self.active_roi_task
                     or self.active_exposure_task or self.active_connect_task or self.active_disconnect_task
                     or self._roi_change_pending or self._trigger_change_pending or self._exposure_change_pending
                     or self._mode_change_pending)
@@ -856,6 +926,9 @@ class CameraMainWindow(QMainWindow):
             task.deleteLater()
         callback = self._after_live_stopped
         self._after_live_stopped = None
+        if self.delay_diagnostic.active and self._hardware_state_unknown:
+            self.delay_diagnostic.stop()
+            return
         if self._closing:
             self.close()
         elif callback is not None:
@@ -868,6 +941,9 @@ class CameraMainWindow(QMainWindow):
         """Global Stop: halts live view or gracefully aborts in-progress scan."""
         self._append_log("[STOP] Stop button pressed.")
         self._stop_generation += 1
+        if self.delay_diagnostic.active:
+            self.delay_diagnostic.stop()
+            return
         if self._configuration_display_preserved:
             self._configuration_display_preserved = False
             self._set_go_button_style(active=False)
@@ -2455,6 +2531,11 @@ class CameraMainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         """Cooperatively stop workers before disconnecting the camera."""
+        if self.delay_diagnostic.active:
+            self._closing = True
+            event.ignore()
+            self.delay_diagnostic.stop()
+            return
         self._is_live_active = False
         self._resume_live_after_scan = False
         self._after_live_stopped = None
