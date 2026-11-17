@@ -245,8 +245,11 @@ class CameraScanManager:
             except Exception:
                 self.camera.state_unknown = True
                 raise
-        with self._state_lock:
-            self._state = "IDLE"
+            finally:
+                # The live owner has finished even if the hardware did not stop.
+                # Keep state_unknown on the driver, but allow disconnect cleanup.
+                with self._state_lock:
+                    self._state = "IDLE"
 
     def acquire_preview(self) -> tuple[np.ndarray, dict]:
         """Acquire one unsaved preview frame while the camera is idle."""

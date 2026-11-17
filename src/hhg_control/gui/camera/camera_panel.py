@@ -172,6 +172,10 @@ class CameraMainWindow(QMainWindow):
         self._mode_change_succeeded = False
         self._roi_change_succeeded = False
         self._hardware_state_unknown = False
+        self._stop_disconnect_pending = False
+        self._stop_disconnect_timer = QTimer(self)
+        self._stop_disconnect_timer.setInterval(25)
+        self._stop_disconnect_timer.timeout.connect(self._finish_stop_disconnect)
         self._close_disconnect_done = False
         self.active_exposure_task = None
         self._exposure_change_pending = False
@@ -318,7 +322,7 @@ class CameraMainWindow(QMainWindow):
             "background-color: #dc3545; border: 2px solid #dc3545; color: white; "
             "font-weight: bold; font-size: 12px; padding: 4px 14px; border-radius: 4px;"
         )
-        self.btn_stop.setToolTip("Stop all operations immediately.")
+        self.btn_stop.setToolTip("Stop acquisition; disconnect the camera if its state is unknown.")
         self.btn_stop.clicked.connect(self._on_stop_clicked)
         top_bar.addWidget(self.btn_stop)
 
@@ -770,7 +774,9 @@ class CameraMainWindow(QMainWindow):
         return bool(self.active_mode_task or self.active_trigger_task or self.active_roi_task
                     or self.active_exposure_task or self.active_connect_task or self.active_disconnect_task
                     or self._roi_change_pending or self._trigger_change_pending or self._exposure_change_pending
-                    or self._mode_change_pending)
+                    or self._mode_change_pending
+                    or (self._stop_disconnect_pending and (
+                        self._hardware_state_unknown or getattr(self.camera, "state_unknown", False))))
 
     def _configuration_controls(self, busy: bool) -> None:
         """Block competing input without flashing disabled widget styles; STOP stays usable."""
@@ -866,8 +872,13 @@ class CameraMainWindow(QMainWindow):
             self.cmb_camera_source.setEnabled(not self._roi_change_pending)
 
     def _on_stop_clicked(self) -> None:
-        """Global Stop: halts live view or gracefully aborts in-progress scan."""
+        """Stop acquisition and disconnect an unknown camera after workers exit."""
         self._append_log("[STOP] Stop button pressed.")
+        if self.active_disconnect_task is not None:
+            return
+        self._stop_disconnect_pending = True
+        self._stop_disconnect_timer.start()
+        self._after_live_stopped = None
         if self._configuration_display_preserved:
             self._configuration_display_preserved = False
             self._set_go_button_style(active=False)
@@ -876,6 +887,9 @@ class CameraMainWindow(QMainWindow):
         self._resume_live_after_exposure = False
         self._resume_live_after_mode = False
         self._resume_live_after_trigger = False
+        self._roi_change_pending = False
+        self._exposure_change_pending = False
+        self._mode_change_pending = False
         if self._trigger_change_pending:
             self._trigger_change_pending = False
             self._after_live_stopped = None
@@ -887,7 +901,7 @@ class CameraMainWindow(QMainWindow):
             self._resume_live_after_scan = False
             self._after_live_stopped = None
         self._after_connect = None
-        if self._is_live_active:
+        if self._is_live_active or self.active_live_task is not None:
             self._stop_live()
 
         if self.active_scan_task is not None and self.active_scan_task.isRunning():
@@ -896,6 +910,29 @@ class CameraMainWindow(QMainWindow):
             self.btn_take_measurement.setText("Stopping...")
             self.btn_take_measurement.setEnabled(False)
             self.active_scan_task.request_abort()
+
+        self._finish_stop_disconnect()
+
+    def _finish_stop_disconnect(self) -> None:
+        """Wait without blocking Qt, preserving scan cleanup before fault disconnect."""
+        if self._closing or not self._stop_disconnect_pending:
+            self._stop_disconnect_pending = False
+            self._stop_disconnect_timer.stop()
+            return
+        # Wait for finished handlers too: they release references and may discover
+        # a failed stop. Never close an SDK handle under an active read or writer.
+        if any(task is not None for task in (
+            self.active_live_task, self.active_scan_task, self.active_preview_task,
+            self.active_connect_task, self.active_mode_task, self.active_trigger_task,
+            self.active_roi_task, self.active_exposure_task, self.active_disconnect_task,
+        )):
+            return
+        self._stop_disconnect_pending = False
+        self._stop_disconnect_timer.stop()
+        if self._hardware_state_unknown or getattr(self.camera, "state_unknown", False):
+            self._hardware_state_unknown = True
+            self._append_log("[STOP] Disconnecting camera after unknown-state error.")
+            self._begin_camera_disconnect()
 
     def _connect_camera(self, after_connect: Optional[Callable[[], None]] = None) -> None:
         """Connect the explicitly selected camera source in a worker thread."""
