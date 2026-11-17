@@ -239,6 +239,8 @@ class CameraMainWindow(QMainWindow):
         self._is_dragging_roi: bool = False
         self._preview_edit_until = 0.0
         self._numeric_editors = set()
+        self._mode_first_frame_pending = False
+        self._mode_switch_started_at = None
         self._analysis_processes: list[QProcess] = []
         self.delay_diagnostic = None
 
@@ -894,7 +896,9 @@ class CameraMainWindow(QMainWindow):
         self._set_go_button_style(active=True)
         self.cmb_camera_source.setEnabled(False)
         if not self._configuration_display_preserved:
-            self.lbl_system_status.setText("Status: Live View Active (Streaming)")
+            self.lbl_system_status.setText(
+                "Status: Shutter configured; showing previous frame until a new frame arrives..."
+                if self._mode_first_frame_pending else "Status: Live View Active (Streaming)")
             self.lbl_system_status.setStyleSheet("font-weight: bold; font-size: 13px; color: #198754; padding-left: 8px;")
 
         self.active_live_task = LiveStreamTask(scan_manager=self.scan_manager, target_fps=20.0)
@@ -1191,6 +1195,7 @@ class CameraMainWindow(QMainWindow):
         if hasattr(self.camera, "get_readout_mode") and self.camera._readout_mode == mode:
             return
 
+        self._mode_switch_started_at = perf_counter()
         was_live = self._is_live_active
         if was_live:
             self._mode_change_pending = True
@@ -1214,14 +1219,24 @@ class CameraMainWindow(QMainWindow):
         self._mode_change_succeeded = False
         self._configuration_controls(True)
         self.active_mode_task = CameraModeTask(self.scan_manager, mode)
+        self.lbl_system_status.setText("Status: Switching shutter mode — camera reboot and settings restore...")
+        self.active_mode_task.timing_ready.connect(self._on_mode_switch_timing)
         self.active_mode_task.mode_applied.connect(self._on_mode_applied)
         self.active_mode_task.error_occurred.connect(self._on_mode_error)
         self.active_mode_task.finished.connect(self._on_mode_task_finished)
         self.active_mode_task.start()
 
+    def _on_mode_switch_timing(self, timing: dict) -> None:
+        """Show measured reboot/reconnect costs; do not guess device readiness."""
+        stages = ", ".join(f"{key.removesuffix('_s')}: {value:.2f} s" for key, value in timing.items())
+        self._append_log(f"[READOUT TIMING] {stages}")
+
     def _on_mode_applied(self, mode: ReadoutMode) -> None:
         self._mode_change_succeeded = True
         self._set_exposure_mode_limit(mode)
+        self._mode_first_frame_pending = True
+        self._plot_background = None
+        self.lbl_system_status.setText("Status: Shutter configured; waiting for first new frame...")
         self._append_log(f"[READOUT MODE] Camera successfully configured to {mode.name}.")
 
     def _set_exposure_mode_limit(self, mode: ReadoutMode) -> None:
@@ -1526,11 +1541,19 @@ class CameraMainWindow(QMainWindow):
         if self._is_dragging_roi:
             return
 
+        first_after_mode = self._mode_first_frame_pending
+        if first_after_mode:
+            self._mode_first_frame_pending = False
+            self.lbl_system_status.setText("Status: Live View Active (Streaming)" if self._is_live_active
+                                           else "Status: Shutter configured; preview ready")
+            if self._mode_switch_started_at is not None:
+                self._append_log(f"[READOUT TIMING] First new frame after {perf_counter() - self._mode_switch_started_at:.2f} s total (including live stop/start and trigger wait).")
+                self._mode_switch_started_at = None
         self._last_frame = frame
         self._frame_count += 1
 
         # Metrics are intentionally throttled; saturation still checks every pixel.
-        if self._frame_count == 1 or self._frame_count % 5 == 0:
+        if first_after_mode or self._frame_count == 1 or self._frame_count % 5 == 0:
             sample = frame[::2, ::2] if frame.size > 500000 else frame
             c_min = int(sample.min())
             c_max = int(frame.max())

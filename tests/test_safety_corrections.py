@@ -233,7 +233,19 @@ def test_configuration_pauses_live_without_label_flicker(qtbot, tmp_path, change
     assert window.spn_exposure.value() == committed_value
     qtbot.waitUntil(lambda: not window._configuration_busy() and window.scan_manager.state == "LIVE")
     timer.stop()
-    assert len(observed) >= 10 and all(item == original for item in observed)
+    assert len(observed) >= 10
+    if change == "mode":
+        # A shutter reboot reports progress, while GO/STOP appearance and
+        # competing-command protection remain stable for the whole handoff.
+        assert all(item[:2] == original[:2] for item in observed)
+        allowed = {original[2],
+                   "Status: Switching shutter mode — camera reboot and settings restore...",
+                   "Status: Shutter configured; waiting for first new frame...",
+                   "Status: Shutter configured; showing previous frame until a new frame arrives..."}
+        assert all(item[2] in allowed for item in observed)
+        assert any("Switching shutter mode" in item[2] for item in observed)
+    else:
+        assert all(item == original for item in observed)
     assert appearances.changes == []
     if change == "exposure":
         assert camera._exposure_time_s == 0.02

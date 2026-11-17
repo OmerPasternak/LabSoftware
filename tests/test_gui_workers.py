@@ -867,3 +867,23 @@ def test_cancelled_scan_cleanup_also_locks_unknown_camera_controls(qtbot):
         assert not window.btn_go.isEnabled() and not window.btn_take_measurement.isEnabled()
     finally:
         window._hardware_state_unknown=False;window.camera.state_unknown=False;window.close()
+
+
+def test_first_shutter_frame_refreshes_metrics_without_changing_display_scale(qtbot):
+    from hhg_control.drivers.base_camera import ReadoutMode
+    window = CameraMainWindow()
+    qtbot.addWidget(window)
+    try:
+        window._set_clim(100, 2000)
+        window._frame_count = 2  # Previously metrics waited for frame five.
+        window._on_mode_applied(ReadoutMode.GLOBAL_SHUTTER)
+        pixels = np.zeros((16, 64), dtype=np.uint16)
+        pixels[0, 0] = 65535
+        window._update_display(pixels, {"roi": (0, 0, 64, 16)})
+        assert "65,535" in window.lbl_intensity_metrics.text()
+        assert "SATURATION" in window.lbl_intensity_metrics.text()
+        assert window._image_artist.get_clim() == (100, 2000)
+        assert pixels[0, 0] == 65535
+        assert not window._mode_first_frame_pending
+    finally:
+        window.close()

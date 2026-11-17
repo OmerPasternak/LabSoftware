@@ -4,6 +4,7 @@ Wraps the official `pco` Python SDK (pco.Camera).
 """
 
 import time
+import copy
 import math
 import sys
 from collections.abc import Callable, Iterator
@@ -411,6 +412,64 @@ class PcoEdgeCamera(BaseCamera):
             raise RuntimeError(f"Could not verify PCO shutter mode: {exc}") from exc
         return self._readout_mode
 
+    def _snapshot_reboot_settings(self):
+        """Freeze user settings before the SDK constructor resets its defaults.
+
+        Pixel rate belongs to the selected sensor mode and is not forced across
+        modes. Exposure/ROI/trigger are restored through their existing setters.
+        No image buffers or correction arrays are accessed here.
+        """
+        configuration = copy.deepcopy(self._cam.configuration)
+        keys = ("timestamp", "acquire", "metadata", "binning", "noise filter")
+        saved = {"configuration": {k: configuration[k] for k in keys if k in configuration},
+                 "timing": None, "signals": []}
+        sdk = self._cam.sdk
+        if callable(getattr(sdk, "get_delay_exposure_time", None)):
+            saved["timing"] = dict(sdk.get_delay_exposure_time())
+        if callable(getattr(sdk, "get_hwio_signal", None)):
+            count = (sdk.get_hwio_signal_count()["hwio signal count"]
+                     if callable(getattr(sdk, "get_hwio_signal_count", None)) else 1)
+            saved["signals"] = [copy.deepcopy(sdk.get_hwio_signal(i)) for i in range(count)]
+        return saved
+
+    def _restore_reboot_settings(self, saved):
+        """Restore and verify timing/input settings without changing raw pixels.
+
+        Delay is seconds at verification; integer SDK units avoid float truncation.
+        Unsupported settings fail the switch instead of silently reverting them.
+        """
+        sdk = self._cam.sdk
+        if saved["configuration"]:
+            self._cam.configuration = saved["configuration"]
+            actual = self._cam.configuration
+            for key, expected in saved["configuration"].items():
+                value = actual.get(key)
+                if isinstance(expected, (tuple, list)):
+                    value, expected = tuple(value), tuple(expected)
+                if value != expected:
+                    raise RuntimeError(f"{key} readback changed after shutter reboot.")
+        timing = saved["timing"]
+        if timing is not None:
+            current = sdk.get_delay_exposure_time()
+            sdk.set_delay_exposure_time(timing["delay"], timing["delay timebase"],
+                                       current["exposure"], current["exposure timebase"])
+            actual = sdk.get_delay_exposure_time()
+            units = {"ns": 1e-9, "us": 1e-6, "ms": 1e-3}
+            expected_delay = timing["delay"] * units[timing["delay timebase"]]
+            actual_delay = actual["delay"] * units[actual["delay timebase"]]
+            if not math.isclose(actual_delay, expected_delay, rel_tol=0, abs_tol=1e-12):
+                raise RuntimeError("Camera delay changed after shutter reboot.")
+            if not math.isclose(self.get_exposure_time(), self._exposure_time_s, rel_tol=0, abs_tol=1e-9):
+                raise RuntimeError("Exposure changed while restoring camera delay.")
+        keys = ("enabled", "type", "polarity", "filter", "selected", "parameter")
+        for index, expected in enumerate(saved["signals"]):
+            sdk.set_hwio_signal(index, *(expected[key] for key in keys))
+            actual = sdk.get_hwio_signal(index)
+            if any(actual.get(key) != expected[key] for key in keys):
+                raise RuntimeError(f"HWIO {index + 1} changed after shutter reboot.")
+        if saved["signals"] or timing is not None:
+            sdk.arm_camera()
+
     def set_readout_mode(self, mode: ReadoutMode) -> None:
         """Switch the sensor readout mode via the PCO SDK.
 
@@ -438,6 +497,8 @@ class PcoEdgeCamera(BaseCamera):
         if mode == ReadoutMode.GLOBAL_SHUTTER and self._exposure_time_s > 0.1:
             raise CameraSafetyError("Reduce exposure to at most 0.1 s before Global Shutter.")
 
+        started = time.perf_counter()
+        self.last_mode_switch_timing = {}
         current = self.get_readout_mode()
         if current == mode:
             return   # Already in requested mode; skip reboot
@@ -449,6 +510,9 @@ class PcoEdgeCamera(BaseCamera):
 
             previous_roi = self.get_roi()
             previous_trigger = self.get_trigger_mode()
+            saved = self._snapshot_reboot_settings()
+            self.last_mode_switch_timing["save_settings_s"] = time.perf_counter() - started
+            phase = time.perf_counter()
 
             # ---- Step 2: write the new shutter mode and request firmware reboot
             setup_name = {
@@ -465,6 +529,7 @@ class PcoEdgeCamera(BaseCamera):
             self._cam.close()
             self._cam = None
             self._is_connected = False
+            self.last_mode_switch_timing["reboot_command_and_close_s"] = time.perf_counter() - phase
 
         except AttributeError as exc:
             self.state_unknown = True
@@ -478,11 +543,17 @@ class PcoEdgeCamera(BaseCamera):
             ) from exc
 
         # ---- Step 4: wait for firmware reboot (~3–5 s typical) ---------------
+        phase = time.perf_counter()
         time.sleep(4.5)
+        self.last_mode_switch_timing["reboot_wait_s"] = time.perf_counter() - phase
 
         # ---- Step 5: reconnect and restore previous settings ------------------
         try:
+            phase = time.perf_counter()
             self.connect()
+            self.last_mode_switch_timing["reconnect_s"] = time.perf_counter() - phase
+            phase = time.perf_counter()
+            self._restore_reboot_settings(saved)
             self.set_roi(previous_roi)
             self.set_trigger_mode(previous_trigger)
             actual_setup = self._cam.sdk.get_camera_setup()["setup"][0]
@@ -497,6 +568,8 @@ class PcoEdgeCamera(BaseCamera):
             ) from exc
 
         self._readout_mode = mode
+        self.last_mode_switch_timing["restore_and_verify_s"] = time.perf_counter() - phase
+        self.last_mode_switch_timing["total_s"] = time.perf_counter() - started
 
     def acquire_frames(self, num_frames: int) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
         """Acquire a RAM-checked uint16 stack; long saved runs use iter_frames."""

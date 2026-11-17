@@ -111,6 +111,7 @@ class CameraModeTask(QThread):
     """Apply a camera readout mode, including any required firmware reboot."""
 
     mode_applied = pyqtSignal(object)
+    timing_ready = pyqtSignal(dict)
     error_occurred = pyqtSignal(str)
 
     def __init__(self, scan_manager: CameraScanManager, mode: ReadoutMode) -> None:
@@ -120,7 +121,11 @@ class CameraModeTask(QThread):
 
     def run(self) -> None:
         try:
+            started = time.perf_counter()
             self.scan_manager.set_readout_mode(self.mode)
+            timing = dict(getattr(self.scan_manager.camera, "last_mode_switch_timing", {}))
+            timing["worker_total_s"] = time.perf_counter() - started
+            self.timing_ready.emit(timing)
             self.mode_applied.emit(self.mode)
         except Exception as exc:
             self.error_occurred.emit(str(exc))

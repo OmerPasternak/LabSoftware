@@ -545,3 +545,107 @@ def test_restored_exposure_does_not_lose_sdk_ticks(monkeypatch, exposure):
     with pytest.raises(RuntimeError, match="differs from request"):
         camera.set_exposure_time(exposure)
     assert camera.state_unknown
+
+
+@pytest.mark.parametrize("fault", [None, "delay", "signal", "metadata"])
+def test_shutter_reboot_restores_settings_and_raw_image(monkeypatch, fault):
+    """Model a real SDK reset on every reopen, including input polarity and delay."""
+    import copy
+    created = []
+    class ResetCamera(FakePcoCamera):
+        @property
+        def configuration(self):
+            return copy.deepcopy(self._configuration)
+        @configuration.setter
+        def configuration(self, value):
+            self._configuration = {**getattr(self, "_configuration", {}), **value}
+            if fault == "metadata" and len(created) > 1:
+                self._configuration["metadata"] = "off"
+
+    def factory(interface, serial):
+        fake = ResetCamera(interface)
+        if created:
+            fake.sdk.setup = created[-1].sdk.setup
+        fake.signal = dict(enabled="off", type="TTL", polarity="rising edge",
+                           filter="off", selected=0, parameter=[0, 0, 0, 0])
+        fake.timing = {"delay": 0, "delay timebase": "us", "exposure": 10000, "exposure timebase": "us"}
+        fake.sdk.get_delay_exposure_time = lambda: dict(fake.timing)
+        def timing(delay, delay_unit, exposure, exposure_unit):
+            if not (fault == "delay" and len(created) > 1):
+                fake.timing.update(delay=delay, **{"delay timebase": delay_unit})
+            fake.timing.update(exposure=exposure, **{"exposure timebase": exposure_unit})
+            fake.exposure_time = exposure * {"ns": 1e-9, "us": 1e-6, "ms": 1e-3}[exposure_unit]
+        fake.sdk.set_delay_exposure_time = timing
+        fake.sdk.get_hwio_signal_count = lambda: {"hwio signal count": 1}
+        fake.sdk.get_hwio_signal = lambda _: copy.deepcopy(fake.signal)
+        def signal(index, enabled, kind, polarity, filter_value, selected, parameters):
+            if not (fault == "signal" and len(created) > 1):
+                fake.signal.update(enabled=enabled, type=kind, polarity=polarity,
+                                   filter=filter_value, selected=selected, parameter=list(parameters))
+        fake.sdk.set_hwio_signal = signal
+        created.append(fake)
+        return fake
+
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=factory))
+    monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
+    monkeypatch.setattr(pco_edge.time, "sleep", lambda _: None)
+    camera = pco_edge.PcoEdgeCamera(serial="12345")
+    camera.connect()
+    camera.set_trigger_mode(pco_edge.TriggerMode.EXTERNAL_EXPOSURE_START)
+    camera._cam.signal.update(enabled="on", polarity="falling edge", parameter=[4, 3, 2, 1])
+    camera._cam.timing.update(delay=1234)
+    camera._cam.configuration = {"metadata": "on", "timestamp": "off", "acquire": "auto", "binning": (1, 1, "sum"), "noise filter": "off"}
+    expected_signal = copy.deepcopy(camera._cam.signal)
+    expected_roi = camera.get_roi()
+    if fault:
+        with pytest.raises(RuntimeError, match="not verified"):
+            camera.set_readout_mode(pco_edge.ReadoutMode.GLOBAL_SHUTTER)
+        assert camera.state_unknown
+        return
+    image = np.arange(1024, dtype=np.uint16).reshape(16, 64)
+    image[0, 0] = 65535
+    for mode in (pco_edge.ReadoutMode.GLOBAL_SHUTTER, pco_edge.ReadoutMode.ROLLING_SHUTTER):
+        camera.set_readout_mode(mode)
+        assert camera._cam.signal == expected_signal
+        assert camera._cam.timing["delay"] == 1234
+        assert camera.get_roi() == expected_roi
+        assert camera.get_trigger_mode() == pco_edge.TriggerMode.EXTERNAL_EXPOSURE_START
+        assert camera.get_exposure_time() == pytest.approx(.01)
+        assert camera._cam.configuration["metadata"] == "on"
+        camera._cam.image = lambda **_: (image.copy(), {"recorder image number": 8})
+        camera.start_live()
+        frame, _ = camera.acquire_live_frame()
+        camera.stop_live()
+        np.testing.assert_array_equal(frame, image)
+        assert set(camera.last_mode_switch_timing) >= {"reboot_wait_s", "reconnect_s", "restore_and_verify_s", "total_s"}
+    assert len(created) == 3
+    camera.close()
+
+
+def test_mock_round_trip_shutter_preserves_user_settings(tmp_path, qtbot):
+    from hhg_control.camera.drivers.mock_camera import MockPcoCamera
+    from hhg_control.camera.sequencer.scan_manager import CameraScanManager
+    from hhg_control.gui.camera.workers import CameraModeTask
+    class TinyMock(MockPcoCamera):
+        WIDTH, HEIGHT = 64, 32
+    camera = TinyMock()
+    camera.connect()
+    camera.set_exposure_time(.01)
+    camera.set_delay_time(2000e-9)
+    camera.set_trigger_mode(pco_edge.TriggerMode.EXTERNAL_EXPOSURE_START)
+    camera.set_external_trigger_input_enabled(True)
+    manager = CameraScanManager(camera, tmp_path)
+    reports = []
+    try:
+        for mode in (pco_edge.ReadoutMode.GLOBAL_SHUTTER, pco_edge.ReadoutMode.ROLLING_SHUTTER):
+            task = CameraModeTask(manager, mode)
+            task.timing_ready.connect(reports.append)
+            task.run()
+            assert camera.get_readout_mode() == mode
+            assert camera.get_exposure_time() == .01
+            assert camera.get_delay_time() == 2000e-9
+            assert camera.get_external_trigger_input_enabled()
+            assert camera.get_trigger_mode() == pco_edge.TriggerMode.EXTERNAL_EXPOSURE_START
+        assert len(reports) == 2 and all(r["worker_total_s"] >= 0 for r in reports)
+    finally:
+        camera.close()
