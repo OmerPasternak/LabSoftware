@@ -505,3 +505,43 @@ def test_failed_setup_and_close_retains_handle_before_retry(monkeypatch):
     camera.close(); camera.connect()
     assert len(factories) == 2
     camera.close()
+
+
+@pytest.mark.parametrize("exposure", [0.000523, 0.09999, 0.1, 0.999999])
+def test_restored_exposure_does_not_lose_sdk_ticks(monkeypatch, exposure):
+    """Repeated readback restoration must preserve SDK ticks and trigger delay."""
+    class QuantizedCamera(FakePcoCamera):
+        @property
+        def exposure_time(self):
+            return self._exposure
+
+        @exposure_time.setter
+        def exposure_time(self, value):
+            scale = 1e9 if value <= .004 else 1e6 if value <= 4 else 1e3
+            self._exposure = int(value * scale) * (1 / scale)
+
+    fake = QuantizedCamera("USB 3.0")
+    delay = {"delay": 37, "delay timebase": "us"}
+    fake.sdk.get_delay_exposure_time = lambda: dict(delay)
+    def set_timing(count, unit, exposure_ticks, exposure_unit):
+        assert (count, unit) == (37, "us")
+        fake._exposure = exposure_ticks * {"ns": 1e-9, "us": 1e-6, "ms": 1e-3}[exposure_unit]
+    fake.sdk.set_delay_exposure_time = set_timing
+    monkeypatch.setattr(pco_edge, "pco", SimpleNamespace(Camera=lambda **_: fake))
+    monkeypatch.setattr(pco_edge, "PCO_AVAILABLE", True)
+    camera = pco_edge.PcoEdgeCamera(serial="12345")
+    camera.connect()
+    camera.set_exposure_time(exposure)
+    first = camera.get_exposure_time()
+    for _ in range(5):
+        camera.set_exposure_time(camera.get_exposure_time())
+        camera._cam = None
+        camera._is_connected = False
+        camera.connect()  # Same restoration path used after a shutter reboot.
+        assert camera.get_exposure_time() == first
+    assert first == pytest.approx(exposure, rel=0, abs=1e-15)
+    # A factor-of-ten hardware mismatch remains an error.
+    fake.sdk.set_delay_exposure_time = lambda *_: setattr(fake, "_exposure", exposure / 10)
+    with pytest.raises(RuntimeError, match="differs from request"):
+        camera.set_exposure_time(exposure)
+    assert camera.state_unknown

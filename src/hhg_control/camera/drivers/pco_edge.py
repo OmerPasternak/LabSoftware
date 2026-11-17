@@ -182,7 +182,23 @@ class PcoEdgeCamera(BaseCamera):
             if getattr(self._cam, "is_recording", False):
                 raise RuntimeError("Stop recording before changing exposure.")
             try:
-                self._cam.exposure_time = float(exposure_s)
+                # PCO 2.2.1 truncates seconds to integer ns/us/ms. A value
+                # read back as e.g. 0.09999 can multiply to 99989.999999 us,
+                # losing another tick every time connect() restores it.
+                # Preserve exact grid points via the SDK's integer interface;
+                # off-grid requests retain the vendor's truncation semantics.
+                sdk = getattr(self._cam, "sdk", None)
+                if (callable(getattr(sdk, "get_delay_exposure_time", None))
+                        and callable(getattr(sdk, "set_delay_exposure_time", None))):
+                    scale, unit = ((1e9, "ns") if exposure_s <= 0.004 else
+                                   (1e6, "us") if exposure_s <= 4 else (1e3, "ms"))
+                    ticks = float(exposure_s) * scale
+                    nearest = round(ticks)
+                    count = nearest if math.isclose(ticks, nearest, rel_tol=0, abs_tol=4 * math.ulp(ticks)) else int(ticks)
+                    timing = sdk.get_delay_exposure_time()
+                    sdk.set_delay_exposure_time(timing["delay"], timing["delay timebase"], count, unit)
+                else:
+                    self._cam.exposure_time = float(exposure_s)
                 actual = float(self._cam.exposure_time)
                 if not math.isclose(actual, exposure_s, rel_tol=1e-5, abs_tol=1e-9):
                     raise RuntimeError(f"Exposure readback {actual} s differs from request {exposure_s} s.")
