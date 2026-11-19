@@ -887,3 +887,48 @@ def test_first_shutter_frame_refreshes_metrics_without_changing_display_scale(qt
         assert not window._mode_first_frame_pending
     finally:
         window.close()
+
+
+def test_round_trip_shutter_preserves_all_editable_gui_settings(qtbot, tmp_path):
+    from PyQt6.QtWidgets import QAbstractSpinBox, QLineEdit
+    from hhg_control.drivers.base_camera import ReadoutMode
+    camera = MockPcoCamera()
+    camera.connect()
+    camera.set_roi((800, 800, 864, 816))
+    camera.set_delay_time(2000e-9)
+    camera.set_external_trigger_input_enabled(True)
+    window = CameraMainWindow()
+    qtbot.addWidget(window)
+    window._on_camera_connected(camera, True, 0)
+    window.txt_storage_dir.setText(str(tmp_path))
+    window.txt_file_header.setText("preserve_settings")
+    window.txt_scan_param.setText("delay fs")
+    window.spn_frames.setValue(23)
+    window.spn_num_steps.setValue(4)
+    window._set_clim(42, 4000)
+    for spin, value in zip((window.spn_roi_x0, window.spn_roi_y0, window.spn_roi_x1, window.spn_roi_y1),
+                            (800, 800, 864, 816)):
+        spin.setValue(value)
+    window._update_display(np.zeros((16, 64), dtype=np.uint16), {"roi": (800, 800, 864, 816)})
+    window.axis.set_xlim(810, 850)
+    window.axis.set_ylim(815, 805)
+    qtbot.waitUntil(lambda: not window._configuration_busy(), timeout=5000)
+    def snapshot():
+        spins = [w for w in window.findChildren(QAbstractSpinBox)]
+        edits = [w for w in window.findChildren(QLineEdit) if not isinstance(w.parentWidget(), QAbstractSpinBox)]
+        return ([w.value() for w in spins], [w.text() for w in edits],
+                window.chk_external_trigger.isChecked(), window.cmb_camera_source.currentData(),
+                window.axis.get_xlim(), window.axis.get_ylim())
+    original = snapshot()
+    try:
+        for mode in (ReadoutMode.GLOBAL_SHUTTER, ReadoutMode.ROLLING_SHUTTER):
+            window.cmb_readout_mode.setCurrentIndex(window.cmb_readout_mode.findData(mode))
+            qtbot.waitUntil(lambda: window.active_mode_task is None and window.active_preview_task is None,
+                            timeout=10000)
+            assert camera.get_readout_mode() == mode
+            assert snapshot() == original
+            assert camera.get_roi() == (800, 800, 864, 816)
+            assert camera.get_delay_time() == 2000e-9
+            assert camera.get_external_trigger_input_enabled()
+    finally:
+        window.close()

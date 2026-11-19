@@ -73,6 +73,7 @@ class PcoEdgeCamera(BaseCamera):
         self._cam: Any = None
         self._info: Dict[str, Any] = {}
         self._description: Dict[str, Any] = {}
+        self._mode_pixel_rates = {}
 
     @property
     def yields_owned_batches(self) -> bool:
@@ -420,9 +421,15 @@ class PcoEdgeCamera(BaseCamera):
         No image buffers or correction arrays are accessed here.
         """
         configuration = copy.deepcopy(self._cam.configuration)
-        keys = ("timestamp", "acquire", "metadata", "binning", "noise filter")
+        known = {"exposure time", "delay time", "roi", "timestamp", "pixel rate", "trigger",
+                 "acquire", "noise filter", "metadata", "binning", "auto exposure"}
+        unknown = set(configuration) - known
+        if unknown:
+            raise RuntimeError(f"Cannot preserve unreviewed SDK configuration keys: {sorted(unknown)}")
+        keys = ("timestamp", "acquire", "metadata", "binning", "noise filter", "auto exposure")
         saved = {"configuration": {k: configuration[k] for k in keys if k in configuration},
-                 "timing": None, "signals": []}
+                 "timing": None, "signals": [], "pixel_rate": configuration.get("pixel rate"),
+                 "auto_exposure_enabled": getattr(self._cam, "_auto_exp_state", None)}
         sdk = self._cam.sdk
         if callable(getattr(sdk, "get_delay_exposure_time", None)):
             saved["timing"] = dict(sdk.get_delay_exposure_time())
@@ -470,6 +477,38 @@ class PcoEdgeCamera(BaseCamera):
         if saved["signals"] or timing is not None:
             sdk.arm_camera()
 
+    def _verify_reboot_settings(self, saved, roi, trigger, exposure):
+        """Check the complete restored configuration after the final SDK arm.
+
+        Later setters/arm calls must not invalidate earlier successful readbacks.
+        All requested settings use exact comparison except seconds tolerances.
+        """
+        if self.get_roi() != roi or self.get_trigger_mode() != trigger:
+            raise RuntimeError("ROI/trigger changed during final shutter verification.")
+        if not math.isclose(self.get_exposure_time(), exposure, rel_tol=0, abs_tol=1e-9):
+            raise RuntimeError("Exposure changed during final shutter verification.")
+        actual = self._cam.configuration
+        if saved.get("expected_pixel_rate") is not None and actual.get("pixel rate") != saved["expected_pixel_rate"]:
+            raise RuntimeError("Pixel rate changed during final shutter verification.")
+        for key, expected in saved["configuration"].items():
+            value = actual.get(key)
+            if isinstance(expected, (tuple, list)):
+                value, expected = tuple(value), tuple(expected)
+            if value != expected:
+                raise RuntimeError(f"{key} changed during final shutter verification.")
+        if saved["timing"] is not None:
+            timing = self._cam.sdk.get_delay_exposure_time()
+            units = {"ns": 1e-9, "us": 1e-6, "ms": 1e-3}
+            old = saved["timing"]
+            if not math.isclose(timing["delay"] * units[timing["delay timebase"]],
+                                old["delay"] * units[old["delay timebase"]], rel_tol=0, abs_tol=1e-12):
+                raise RuntimeError("Delay changed during final shutter verification.")
+        keys = ("enabled", "type", "polarity", "filter", "selected", "parameter")
+        for index, expected in enumerate(saved["signals"]):
+            actual = self._cam.sdk.get_hwio_signal(index)
+            if any(actual.get(key) != expected[key] for key in keys):
+                raise RuntimeError(f"HWIO {index + 1} changed during final shutter verification.")
+
     def set_readout_mode(self, mode: ReadoutMode) -> None:
         """Switch the sensor readout mode via the PCO SDK.
 
@@ -494,8 +533,10 @@ class PcoEdgeCamera(BaseCamera):
             raise ValueError("mode must be a ReadoutMode value.")
         if self._cam is None:
             raise RuntimeError("Camera is not connected — cannot change readout mode.")
-        if mode == ReadoutMode.GLOBAL_SHUTTER and self._exposure_time_s > 0.1:
+        exposure = self.get_exposure_time()
+        if mode == ReadoutMode.GLOBAL_SHUTTER and exposure > 0.1:
             raise CameraSafetyError("Reduce exposure to at most 0.1 s before Global Shutter.")
+        self._exposure_time_s = exposure
 
         started = time.perf_counter()
         self.last_mode_switch_timing = {}
@@ -511,6 +552,8 @@ class PcoEdgeCamera(BaseCamera):
             previous_roi = self.get_roi()
             previous_trigger = self.get_trigger_mode()
             saved = self._snapshot_reboot_settings()
+            if saved["pixel_rate"] is not None:
+                self._mode_pixel_rates[current] = saved["pixel_rate"]
             self.last_mode_switch_timing["save_settings_s"] = time.perf_counter() - started
             phase = time.perf_counter()
 
@@ -553,9 +596,24 @@ class PcoEdgeCamera(BaseCamera):
             self.connect()
             self.last_mode_switch_timing["reconnect_s"] = time.perf_counter() - phase
             phase = time.perf_counter()
+            if mode in self._mode_pixel_rates:
+                rate = self._mode_pixel_rates[mode]
+                self._cam.configuration = {"pixel rate": rate}
+                if self._cam.configuration.get("pixel rate") != rate:
+                    raise RuntimeError("Pixel rate readback differs from the saved mode setting.")
+            saved["expected_pixel_rate"] = self._cam.configuration.get("pixel rate")
             self._restore_reboot_settings(saved)
             self.set_roi(previous_roi)
             self.set_trigger_mode(previous_trigger)
+            enabled = saved["auto_exposure_enabled"]
+            if enabled is not None:
+                if enabled:
+                    self._cam.auto_exposure_on()
+                else:
+                    self._cam.auto_exposure_off()
+                if self._cam._auto_exp_state != enabled:
+                    raise RuntimeError("Auto exposure state changed after shutter reboot.")
+            self._verify_reboot_settings(saved, previous_roi, previous_trigger, exposure)
             actual_setup = self._cam.sdk.get_camera_setup()["setup"][0]
             if int(actual_setup) != mode.value:
                 raise RuntimeError(

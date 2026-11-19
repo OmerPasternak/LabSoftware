@@ -9,11 +9,19 @@ immediately. No startup frames are hidden, discarded or altered.
 The driver snapshots exposure, ROI, trigger mode, programmable camera delay,
 available hardware I/O lines (enable, electrical type, polarity, filter, selection
 and parameters), and compatible SDK configuration (timestamp, acquisition mode,
-metadata, binning and noise-filter setting). It restores and verifies these after
+metadata, binning, noise-filter setting, and auto-exposure configuration and state). It restores and verifies these after
 reconnect. This preserves existing settings; it does not enable new corrections.
 A failed restoration locks acquisition instead of silently using camera defaults.
-Pixel clock/rate is mode-specific and stays selected by the firmware; copying the
-rolling pixel clock into global mode is not appropriate. Exposure must satisfy
+Pixel clock/rate is mode-specific. The first visit to a mode uses its firmware
+clock; returning to a previously used mode restores that mode's recorded clock,
+with readback verification. A rolling-mode clock is never forced into global mode.
+The final verification repeats all setting checks after the last setter/arm call;
+a late side effect cannot be hidden by an earlier successful readback. Unknown
+future SDK configuration keys block switching until their preservation is reviewed.
+The preservation contract covers every GUI setting and every field in the pinned
+PCO Camera.configuration API, plus its delay and hardware I/O settings. It does not
+claim preservation of unrelated, unexposed SDK controls such as a separately
+configured cooling controller or arbitrary vendor extension. Exposure must satisfy
 the target mode limits; Global Shutter remains capped at 100 ms.
 
 `[READOUT TIMING]` in Storage & Log reports settings snapshot, reboot command/close,
