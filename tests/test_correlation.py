@@ -43,8 +43,15 @@ def test_compute_g2_map_shape_and_validation():
         compute_g2_map(np.ones((1, 10, 10), dtype=np.uint16))
 
 
-def test_acquire_and_compute_g2_mock_camera():
+def test_acquire_and_compute_g2_mock_camera(monkeypatch):
     """Verify acquire_and_compute_g2 works seamlessly with MockPcoCamera."""
+    # The live-view mock modulates brightness at 2 Hz from wall-clock time.
+    # Hold that simulated phase fixed: this test checks shot noise at constant
+    # intensity, not scheduler-dependent intensity changes between batches.
+    import time
+    from types import SimpleNamespace
+    from hhg_control.camera.drivers import mock_camera
+    monkeypatch.setattr(mock_camera, "time", SimpleNamespace(time=lambda: .125, sleep=time.sleep))
     cam = MockPcoCamera()
     cam.connect()
 
