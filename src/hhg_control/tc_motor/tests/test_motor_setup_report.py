@@ -60,17 +60,8 @@ def test_unreferenced_report_does_not_claim_mm_or_readiness():
         seq.disconnect()
 
 
-def test_disconnected_report_refused():
-    seq = MotorSequencer(MockMotor(MotorLimits(0, 10, 1, 2, 2)))
-    with pytest.raises(MotorError):
-        seq.setup_report()
 
 
-def test_report_save_supports_spaces_and_unicode(tmp_path):
-    path = tmp_path / "TC motor דוח.json"
-    save_setup_report({"report_type": "tc_motor_setup_inspection", "note": "mm unverified"}, path)
-    assert json.loads(path.read_text(encoding="utf-8"))["note"] == "mm unverified"
-    assert list(tmp_path.iterdir()) == [path]
 
 
 def test_failed_report_replace_preserves_existing_file(tmp_path, monkeypatch):

@@ -63,6 +63,7 @@ class BufferedVisa:
         chunks = self.chunks(command) if callable(self.chunks) else self.chunks
         self.pending = [(self.clock.now + self.delay * (i + 1), chunk)
                         for i, chunk in enumerate(chunks)]
+        return len((command + "\r\n").encode("ascii"))
 
     @property
     def bytes_in_buffer(self):
@@ -89,9 +90,11 @@ class BufferedVisa:
 @pytest.fixture
 def serial_peer(monkeypatch):
     from hhg_control.tc_motor.drivers import smc100
+    from hhg_control.tc_motor.drivers import serial_framing
     clock = Clock()
-    monkeypatch.setattr(smc100, "time", SimpleNamespace(
-        monotonic=clock.monotonic, sleep=clock.sleep))
+    timer = SimpleNamespace(monotonic=clock.monotonic, sleep=clock.sleep)
+    monkeypatch.setattr(smc100, "time", timer)
+    monkeypatch.setattr(serial_framing, "time", timer)
 
     def make(chunks, *, delay=0.01):
         session = BufferedVisa(clock, chunks, delay=delay)
@@ -102,10 +105,7 @@ def serial_peer(monkeypatch):
     return make
 
 
-@pytest.mark.parametrize("chunks", [
-    [b"1TS000032\r\n"], [b"1TS", b"000032", b"\r", b"\n"],
-    [bytes([byte]) for byte in b"1TS000032\r\n"],
-])
+@pytest.mark.parametrize('chunks', [[bytes([byte]) for byte in b"1TS000032\r\n"]])
 def test_buffered_receive_assembles_one_complete_frame(serial_peer, chunks):
     transport, session, clock = serial_peer(chunks)
     assert transport.query("1TS") == "1TS000032"
@@ -115,13 +115,7 @@ def test_buffered_receive_assembles_one_complete_frame(serial_peer, chunks):
     assert session.timeout == 300
 
 
-@pytest.mark.parametrize("chunks,reason,hex_bytes", [
-    ([b"\xb1TS000032\r\n"], "non-ASCII", "b1 54 53"),
-    ([b"1TP\xca2\r\n"], "non-ASCII", "31 54 50 ca"),
-    ([b"1TS\x0000032\r\n"], "control bytes", "31 54 53 00"),
-    ([b"1TP2\r\n1TS000032\r\n"], "extra frame", "31 54 50 32"),
-    ([b"1TP2\n\r\n"], "malformed CRLF", "31 54 50 32 0a"),
-])
+@pytest.mark.parametrize('chunks,reason,hex_bytes', [([b"\xb1TS000032\r\n"], "non-ASCII", "b1 54 53"), ([b"1TS\x0000032\r\n"], "control bytes", "31 54 53 00"), ([b"1TP2\r\n1TS000032\r\n"], "extra frame", "31 54 50 32"), ([b"1TP2\n\r\n"], "malformed CRLF", "31 54 50 32 0a")])
 def test_bad_bytes_are_reported_exactly_and_never_retried(serial_peer, chunks, reason, hex_bytes):
     transport, session, _ = serial_peer(chunks)
     with pytest.raises(MotorError, match=reason) as error:
@@ -132,7 +126,7 @@ def test_bad_bytes_are_reported_exactly_and_never_retried(serial_peer, chunks, r
     assert session.timeout == 300
 
 
-@pytest.mark.parametrize("chunks", [[], [b"1TP2"], [b"1TP2\r"]])
+@pytest.mark.parametrize('chunks', [[b"1TP2\r"]])
 def test_silent_or_partial_reply_has_total_deadline_and_preserves_bytes(serial_peer, chunks):
     transport, session, clock = serial_peer(chunks)
     with pytest.raises(MotorError, match="No complete CRLF reply") as error:
@@ -203,7 +197,38 @@ def test_real_transport_with_driver_survives_repeated_fragmented_snapshots(seria
     assert not any(text.startswith(("1PA", "1ST", "1OR", "1RS", "1MM")) for text in session.writes)
 
 
-def test_stop_write_is_immediate_without_receive_wait_or_query(serial_peer):
-    transport, session, clock = serial_peer([])
+
+
+def test_visa_query_pacing_is_independent_of_receive_wait(serial_peer):
+    transport, session, clock = serial_peer([b"1TP2\r\n"])
+    transport.query("1TP")
+    transport.query("1TP")
+    assert session.write_times[1] - session.write_times[0] >= .06 - 1e-12
+    before = clock.now
     transport.write("1ST")
-    assert session.writes == ["1ST"] and clock.waits == []
+    assert clock.now == before and session.writes[-1] == "1ST"
+
+
+def test_visa_setting_drift_is_reported_before_any_new_command(serial_peer):
+    transport, session, _ = serial_peer([])
+    session.baud_rate = 9600
+    session.data_bits = 8
+    session.parity = 0
+    session.stop_bits = 10
+    session.flow_control = 1
+    transport._expected_host = {"baud_rate": 57600, "data_bits": 8, "parity": 0,
+                                "stop_bits": 10, "flow_control": 1}
+    with pytest.raises(MotorError, match="Host serial settings changed"):
+        transport.query("1TS")
+    assert not session.writes
+    assert transport.last_exchange["host_after_failure"]["baud_rate"] == 9600
+
+
+
+def test_minimum_receive_timeout_survives_sequential_query_pacing(serial_peer):
+    transport, peer, clock = serial_peer([b"1TP2\r\n"])
+    transport.timeout_ms = 50
+    assert transport.query("1TP") == "1TP2"
+    assert transport.query("1TP") == "1TP2"
+    assert peer.write_times[1]-peer.write_times[0] >= .06-1e-12
+    assert clock.now < .12

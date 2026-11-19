@@ -73,6 +73,10 @@ class MotorPanel(QWidget):
         self.mode_combo.addItems(["Mock", "Physical"])
         self.mode_combo.currentTextChanged.connect(self._mode_changed)
         form.addRow("Mode", self.mode_combo)
+        self.transport_combo = QComboBox()
+        self.transport_combo.addItem("VISA", "visa")
+        self.transport_combo.addItem("Direct serial (pySerial)", "serial")
+        form.addRow("Physical connection", self.transport_combo)
         self.com_port_spin = QSpinBox()
         self.com_port_spin.setRange(1, 65535)
         self.com_port_spin.setValue(21)
@@ -195,7 +199,8 @@ class MotorPanel(QWidget):
     def _connect_motor(self) -> None:
         """Submit the explicit selection, with no device discovery or auto-connect."""
         settings = ConnectionSettings(self.mode_combo.currentText(), f"COM{self.com_port_spin.value()}",
-                                      self.axis_spin.value(), self.profile_edit.text())
+                                      self.axis_spin.value(), self.profile_edit.text(),
+                                      self.transport_combo.currentData())
         self.worker.submit("connect", settings)
 
     def _move(self, operation, value) -> None:
@@ -314,7 +319,7 @@ class MotorPanel(QWidget):
         """Display worker progress without filling the log with periodic polling."""
         if message != "Snapshot":
             self.activity_label.setText(message)
-            if message.startswith("Inspected native controller settings:"):
+            if message.startswith(("Inspected native controller settings:", "Serial transport:")):
                 self._append_log(message)
             elif message.startswith("Setup report saved:"):
                 self._append_log(message)
@@ -333,7 +338,7 @@ class MotorPanel(QWidget):
         state = self._connection
         editable = not self._busy and not state.has_session and not self._closing
         physical = self.mode_combo.currentText() == "Physical"
-        for widget in (self.mode_combo, self.com_port_spin, self.axis_spin,
+        for widget in (self.mode_combo, self.transport_combo, self.com_port_spin, self.axis_spin,
                        self.profile_edit, self.profile_button):
             widget.setEnabled(editable and (widget is self.mode_combo or physical))
         self.connect_button.setEnabled(editable)

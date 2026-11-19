@@ -3,7 +3,7 @@
 import sys
 
 
-def main() -> int:
+def main(transport="visa") -> int:
     """Check this Python's PyVISA and load the system VISA runtime, without I/O.
 
     Run in its own process, not inside an instrument-owning GUI: closing its
@@ -11,12 +11,21 @@ def main() -> int:
     A pass establishes backend loading only, not serial-port access or motion.
     """
     print(f"Python: {sys.executable}")
+    if transport in ("serial", "both"):
+        try:
+            import serial
+            print(f"pySerial: {serial.VERSION}; no port opened.")
+        except ImportError as exc:
+            print(f"pySerial is unavailable: {exc}. Run setup_physical_mode.vbs.")
+            return 1
+        if transport == "serial":
+            return 0
     try:
         import pyvisa
     except ImportError as exc:
         print(f"PyVISA is unavailable: {exc}")
         print('From the project root, run .venv\\Scripts\\python.exe -m pip install ".[hardware-smc100]"')
-        return 1
+        return 0 if transport == "both" else 1
     print(f"PyVISA: {pyvisa.__version__}")
     try:
         manager = pyvisa.ResourceManager("")
@@ -24,6 +33,9 @@ def main() -> int:
         print(f"The VISA runtime could not be loaded: {exc}")
         print("Install or repair the native VISA runtime (normally NI-VISA on the LabVIEW PC), then retry.")
         print("Installing the Python package alone does not install NI-VISA.")
+        if transport == "both":
+            print("Direct serial is available; select it explicitly in the GUI. VISA is unavailable.")
+            return 0
         return 1
     try:
         print(f"VISA backend: {manager.visalib}")
@@ -34,4 +46,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--transport", choices=("visa", "serial", "both"), default="visa")
+    raise SystemExit(main(parser.parse_args().transport))

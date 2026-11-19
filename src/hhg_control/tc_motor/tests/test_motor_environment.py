@@ -31,3 +31,15 @@ def test_dependency_check_loads_library_without_opening_ports(monkeypatch, capsy
     assert main() == 0
     assert calls == ["close"]
     assert "fake native VISA" in capsys.readouterr().out
+
+
+def test_direct_dependency_check_does_not_instantiate_serial(monkeypatch, capsys):
+    monkeypatch.setitem(sys.modules, "serial", SimpleNamespace(VERSION="test"))
+    assert main("serial") == 0
+    assert "no port opened" in capsys.readouterr().out
+
+
+def test_both_check_allows_explicit_direct_mode_when_visa_runtime_missing(monkeypatch):
+    monkeypatch.setitem(sys.modules, "serial", SimpleNamespace(VERSION="test"))
+    monkeypatch.setitem(sys.modules, "pyvisa", None)
+    assert main("both") == 0

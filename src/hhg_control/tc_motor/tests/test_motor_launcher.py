@@ -46,7 +46,7 @@ def test_setup_launcher_uses_project_python_and_checks_only_after_install(tmp_pa
     shutil.copyfile(Path(__file__).resolve().parents[1] / launcher.name, launcher)
     (checkout / "src" / "pip.py").write_text(
         "import json, sys\nfrom pathlib import Path\n"
-        "assert sys.argv[1:] == ['install', 'pyvisa>=1.14,<2']\n"
+        "assert sys.argv[1:] == ['install', 'pyvisa>=1.14,<2', 'pyserial>=3.5,<4']\n"
         "Path('installer.json').write_text(json.dumps({'python':sys.executable}))\n"
         f"raise SystemExit({pip_exit})\n", encoding="utf-8")
     (package / "check_environment.py").write_text(
@@ -62,11 +62,19 @@ def test_setup_launcher_uses_project_python_and_checks_only_after_install(tmp_pa
 
 
 def wait_for_file(path):
-    """Bound the wait for a detached, harmless VBS-launched stub to finish."""
+    """Wait boundedly for complete JSON or nonempty text from a detached stub."""
     deadline = time.monotonic() + 10
-    while not path.exists() and time.monotonic() < deadline:
-        time.sleep(.05)
-    assert path.exists(), f"Launcher did not produce {path}"
+    last_error = "not published"
+    while time.monotonic() < deadline:
+        try:
+            content = path.read_text()
+            if path.suffix == ".json": json.loads(content)
+            elif not content.strip(): raise ValueError("empty output")
+            return
+        except (OSError, ValueError) as exc:
+            last_error = str(exc)
+            time.sleep(.05)
+    raise AssertionError(f"Launcher did not finish {path}: {last_error}")
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows VBS launcher")
@@ -141,5 +149,26 @@ def test_bat_link_check_uses_project_python_with_spaces(tmp_path):
                             cwd=tmp_path, capture_output=True, input="\n", text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     data = json.loads((checkout / "link-result.json").read_text())
-    assert data["args"] == ["--physical", "--port", "21"]
+    assert data["args"] == ["--physical", "--port", "21", "--transport", "compare"]
     assert Path(data["python"]).resolve() == (checkout / ".venv/Scripts/python.exe").resolve()
+
+
+
+def test_detached_result_waits_for_complete_json(tmp_path):
+    import threading
+    created,release,finished=threading.Event(),threading.Event(),threading.Event()
+    path=tmp_path/'paused.json';errors=[]
+    def child():
+        path.touch();created.set()
+        assert release.wait(3);path.write_text('{"complete": true}')
+    def waiter():
+        try:wait_for_file(path)
+        except BaseException as exc:errors.append(exc)
+        finally:finished.set()
+    writer=threading.Thread(target=child);writer.start();assert created.wait(3)
+    waiting=threading.Thread(target=waiter);waiting.start()
+    try:
+        assert not finished.wait(.1)
+        release.set();assert finished.wait(3);assert not errors
+    finally:
+        release.set();writer.join(3);waiting.join(3)

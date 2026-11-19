@@ -15,7 +15,7 @@ if errorlevel 1 pause
 exit /b
 
 :check_link
-".venv\Scripts\python.exe" -m hhg_control.tc_motor.check_serial_link --physical --port "%~2"
+".venv\Scripts\python.exe" -m hhg_control.tc_motor.check_serial_link --physical --port "%~2" --transport compare
 set "check_result=%errorlevel%"
 pause
 exit /b %check_result%
@@ -23,9 +23,9 @@ exit /b %check_result%
 :setup
 echo Installing TC motor physical-mode Python dependencies into the project .venv...
 rem Keep this requirement aligned with the hardware-smc100 extra in pyproject.toml.
-".venv\Scripts\python.exe" -m pip install "pyvisa>=1.14,<2"
+".venv\Scripts\python.exe" -m pip install "pyvisa>=1.14,<2" "pyserial>=3.5,<4"
 if errorlevel 1 goto setup_failed
-".venv\Scripts\python.exe" -m hhg_control.tc_motor.check_environment
+".venv\Scripts\python.exe" -m hhg_control.tc_motor.check_environment --transport both
 if errorlevel 1 goto setup_failed
 echo Setup passed. No serial ports were opened. Launch TC motor normally to continue.
 pause

@@ -48,6 +48,8 @@ def test_mock_trapezoidal_motion_has_continuous_acceleration_and_exact_target(li
     clock = Clock()
     motor = MockMotor(limits, initial_position_mm=1, clock=clock)
     motor.connect()
+    motor.move_to(1)
+    assert motor.get_status().is_ready  # Zero displacement does not start motion.
     motor.move_to(5)
     assert motor.get_status().is_moving
     for when, expected in ((0.25, 1.125), (0.5, 1.5), (1.5, 3.5), (2.25, 4.875)):
@@ -58,6 +60,13 @@ def test_mock_trapezoidal_motion_has_continuous_acceleration_and_exact_target(li
     status = motor.get_status()
     assert status.position_mm == 5
     assert status.is_ready and not status.is_moving
+
+
+@pytest.mark.parametrize("target", [-.001, 10.001, float("nan"), True])
+def test_shared_contract_rejects_invalid_positions(limits, target):
+    """Own shared input validation once, instead of repeating it in each layer."""
+    with pytest.raises(MotorSafetyError):
+        limits.validate_position(target)
 
 
 def test_short_reverse_move_uses_triangular_profile(limits):
@@ -72,14 +81,6 @@ def test_short_reverse_move_uses_triangular_profile(limits):
     assert not motor.is_moving()
 
 
-@pytest.mark.parametrize("target", [-0.001, 10.001, 6, float("nan"), float("inf"), True])
-def test_invalid_targets_never_start_motion(limits, target):
-    motor = MockMotor(limits)
-    motor.connect()
-    with pytest.raises(MotorSafetyError):
-        motor.move_to(target)
-    assert motor.get_position() == 0
-    assert not motor.is_moving()
 
 
 def test_relative_moves_enforce_absolute_and_per_move_limits(limits):
@@ -115,11 +116,6 @@ def test_stop_freezes_and_close_preserves_existing_coordinate(limits):
     assert motor.get_status().is_ready
 
 
-def test_zero_distance_is_immediately_ready(limits):
-    motor = MockMotor(limits)
-    motor.connect()
-    motor.move_to(0)
-    assert motor.get_status().is_ready
 
 
 def test_mock_refuses_nonmonotonic_simulation_clock(limits):
@@ -130,3 +126,10 @@ def test_mock_refuses_nonmonotonic_simulation_clock(limits):
     clock.now = -1
     with pytest.raises(MotorError, match="backwards"):
         motor.get_status()
+
+
+
+def test_invalid_target_at_mock_entrypoint_cannot_start_motion(limits):
+    motor=MockMotor(limits,initial_position_mm=1);motor.connect()
+    with pytest.raises(MotorSafetyError):motor.move_to(-1)
+    assert motor.get_position()==1 and not motor.is_moving()

@@ -16,6 +16,7 @@ import time
 
 from .drivers.base import MotorError
 from .drivers.smc100 import VisaSerialTransport
+from .drivers.direct_serial import DirectSerialTransport
 from .reporting import save_setup_report
 
 
@@ -116,6 +117,7 @@ def main(argv=None) -> int:
     parser.add_argument("--port", type=int, required=True, help="COM number, for example 21.")
     parser.add_argument("--axis", type=int, default=1)
     parser.add_argument("--duration", type=float, default=30.0)
+    parser.add_argument("--transport", choices=("visa", "serial", "compare"), default="visa")
     parser.add_argument("--output", type=Path, help="JSON destination; default: reports/ beside this module.")
     args = parser.parse_args(argv)
     if not args.physical:
@@ -127,12 +129,32 @@ def main(argv=None) -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
     print(f"Query-only check: COM{args.port}, address {args.axis}, {args.duration:g} seconds.", flush=True)
     print("Close LabVIEW and TC motor first. No move, STOP, home, or configuration command is sent.", flush=True)
-    report = inspect_serial_link(VisaSerialTransport(f"COM{args.port}"), axis=args.axis,
-                                 duration_s=args.duration)
+    modes = ("visa", "serial") if args.transport == "compare" else (args.transport,)
+    runs = []
+    for mode in modes:
+        print(f"Testing {mode} explicitly...", flush=True)
+        factory = VisaSerialTransport if mode == "visa" else DirectSerialTransport
+        result = inspect_serial_link(factory(f"COM{args.port}"), axis=args.axis, duration_s=args.duration)
+        result["requested_transport"] = mode
+        runs.append(result)
+        print(f"{mode}: {'PASS' if result['ok'] else 'FAILED'}; port released: {result['port_released']}", flush=True)
+        if not result["port_released"]:
+            print("Further checks cancelled: previous port cleanup failed.")
+            break
+    if args.transport == "compare":
+        usable = [r["requested_transport"] for r in runs if r["ok"] and r["port_released"]]
+        released = all(r["port_released"] for r in runs)
+        report = {"schema_version": 1, "report_type": "tc_motor_serial_transport_comparison",
+                  "simulation": False, "runs": runs, "passing_transports": usable,
+                  "ok": bool(usable) and released, "port_released": released,
+                  "note": "Separate query-only checks, not an automatic GUI fallback or motion validation."}
+    else:
+        report = runs[0]
     save_setup_report(report, output)
-    print(f"{'PASS' if report['ok'] else 'FAILED'}: {report['successful_snapshots']} complete status/position snapshots.")
-    if report["error"]:
-        print(report["error"])
+    for result in runs:
+        print(f"{result['requested_transport']}: {result['successful_snapshots']} complete status/position snapshots.")
+        if result["error"]:
+            print(result["error"])
     print(f"Port released: {report['port_released']}. This does not verify motor standstill or safety.")
     print(f"Report saved: {output.resolve()}")
     return 0 if report["ok"] else 1
