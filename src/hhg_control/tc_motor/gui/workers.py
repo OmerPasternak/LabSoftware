@@ -180,6 +180,8 @@ class MotorWorker(QThread):
         if operation == "connect":
             if self._sequencer is not None:
                 raise RuntimeError("Disconnect the existing session before connecting another.")
+            if args[0].mode == "Physical":
+                self.activity.emit("Serial transport: " + args[0].transport)
             seq = self._factory(args[0])
             self._connection_settings = args[0]
             with self._condition:
@@ -190,7 +192,6 @@ class MotorWorker(QThread):
             self.status_ready.emit(seq.snapshot())
             self._poll_faulted = False
             if args[0].mode == "Physical":
-                self.activity.emit("Serial transport: " + args[0].transport)
                 settings = getattr(seq, "inspection_settings", {})
                 if settings:
                     self.activity.emit("Inspected native controller settings: " + repr(settings))

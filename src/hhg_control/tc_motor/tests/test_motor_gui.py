@@ -349,9 +349,12 @@ def test_rejected_connect_cleans_session_and_allows_new_attempt(qtbot, motor_win
 
     panel = motor_window(factory)
     panel.mode_combo.setCurrentText("Physical")
+    panel.transport_combo.setCurrentIndex(1)
     qtbot.mouseClick(panel.connect_button, Qt.MouseButton.LeftButton)
     qtbot.waitUntil(lambda: "Controller command error M" in panel.log.toPlainText()
                     and not panel.worker.is_busy)
+    log = panel.log.toPlainText()
+    assert log.index("Serial transport: serial") < log.index("Controller command error M")
     assert serials[0].closed and not panel._connection.has_session
     assert panel.connect_button.isEnabled()
     qtbot.mouseClick(panel.connect_button, Qt.MouseButton.LeftButton)
