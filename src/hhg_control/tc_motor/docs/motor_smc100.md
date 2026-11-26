@@ -8,25 +8,33 @@ location; it does not depend on the directory from which it was double-clicked.
 
 ## First setup on the lab PC
 
-If replacing LabVIEW currently produces a serial decoding error, first close
-LabVIEW and TC motor. Run `setup_physical_mode.vbs` once after pulling the update
-to install pySerial alongside PyVISA. Then double-click `check_serial_link.vbs`
-beside the motor launcher and enter **21**. It uses address 1. Choose **1**
-for the short comparison, which checks VISA, closes its port, then checks
-Direct serial for up to 30 seconds each. Choose **2** to check Direct serial
-for ten minutes using the same driver startup and status reads as the GUI in
-inspection mode. The JSON includes the query sequence and controller replies.
-The console stays open while it collects replies and
-stops the run on the first communication error. If setup already passed in the
-same environment, run the check directly. Choose **3** for the two-minute
-LabVIEW reference test over VISA. It sends only TS and TP, and reports each
-received chunk separately.
+Close the TC motor GUI, NI MAX, and any other application using COM21. Leave
+the controller powered and the stage stationary. If setup has already passed,
+use the existing environment. Otherwise run `setup_physical_mode.vbs` once.
+Double-click `check_serial_link.vbs` and enter **21**. It uses controller address 1.
 
-Choose **4** for a five-minute run of the same reference test with a one-second
-minimum gap between sends. Compare the number of valid exchanges, not just
-elapsed time. If the slower run passes beyond the earlier failure count, that
-supports a timing-dependent effect, but does not prove the link is reliable
-or identify the failing component.
+1. **Quick comparison:** checks VISA and Direct serial for up to 30 seconds each.
+2. **Reference VISA:** runs only the captured TS and TP query workload for two minutes.
+3. **Full investigation:** checks standard VISA and direct Windows COM for up
+   to one minute each, then runs the same reference workload at 130 ms and
+   1 s minimum send spacing. The slower phase runs for up to five minutes.
+
+Choose **3** for unresolved corruption. It saves one
+`TC_motor_comprehensive_*.json` in `reports` after each probe. The report
+includes the selected port's Windows driver metadata, active Direct COM
+settings, available Windows serial error flags, raw receive bytes and chunks,
+VISA return codes where available, native identity/settings and status words,
+valid-reply counts and the stage at which a failure occurred. Closing,
+opening and every query are recorded as separate failure stages. Each probe
+stops at its first communication error. A mismatched instrument, operator
+cancel, or unconfirmed port release stops the whole investigation.
+
+Compare the normal and slower phases at similar valid-reply counts. A clean
+slower phase after the normal phase fails supports a timing-dependent effect.
+An empty Windows flags list only means no flags were sampled. The driver may
+omit flags, and pySerial's read also clears flags. This report cannot measure
+the signal on the cable, establish safe motion, or identify every electrical
+cause. All checks preserve the existing coordinate reference.
 
 ### What the LabVIEW trace showed
 

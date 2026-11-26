@@ -1,5 +1,6 @@
 """Direct COM transport regressions using a synthetic pySerial module only."""
 
+import ctypes
 import sys
 from types import SimpleNamespace
 
@@ -8,6 +9,7 @@ import pytest
 from hhg_control.tc_motor.drivers import direct_serial, serial_framing, smc100
 from hhg_control.tc_motor.drivers.base import MotorError
 from hhg_control.tc_motor.drivers.direct_serial import DirectSerialTransport
+from hhg_control.tc_motor.windows_serial_evidence import WindowsEvidenceSerial
 from test_motor_serial_transport import BufferedVisa, Clock
 
 
@@ -105,6 +107,35 @@ def test_exact_lab_corruption_is_rejected_without_a_retry(direct_peer, payload):
     assert payload.hex(" ") in str(error.value)
     assert peer.writes == ["1TP"] and peer.resets == 1
     assert transport.last_exchange["host_after_failure"]["baud_rate"] == 57600
+    transport.close()
+
+
+def test_windows_evidence_keeps_framing_flag_with_corrupt_reply(direct_peer, monkeypatch):
+    frame = bytes.fromhex("b1 d5 05 82 82 82 9a 9a 6a 0a")
+    ordinary, peer, _ = direct_peer([frame])
+    transport = WindowsEvidenceSerial("COM21")
+    transport._session = peer
+    transport._expected_host = ordinary._expected_host
+    peer._port_handle = 42
+
+    class ComStat(ctypes.Structure):
+        _fields_ = [("cbInQue", ctypes.c_uint32)]
+
+    def check(handle, flags, status):
+        assert handle == 42
+        status._obj.cbInQue = peer.in_waiting
+        flags._obj.value = 8 if status._obj.cbInQue else 0
+        return True
+
+    transport._win32 = SimpleNamespace(DWORD=ctypes.c_uint32, COMSTAT=ComStat, ClearCommError=check)
+    monkeypatch.setattr(transport, "_dcb", lambda: {"BaudRate": 57600})
+    with pytest.raises(MotorError, match="non-ASCII"):
+        transport.query("1TS")
+    wire = transport.last_exchange
+    assert wire["rx_hex"] == frame.hex(" ")
+    assert wire["windows_serial_errors"] == {"mask": 8, "flags": ["framing"]}
+    assert wire["windows_dcb_after_error"] == {"BaudRate": 57600}
+    assert peer.writes == ["1TS"]
     transport.close()
 
 

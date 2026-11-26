@@ -128,6 +128,54 @@ def test_labview_reference_cli_runs_only_status_and_position_queries(monkeypatch
     assert peer.calls == (["1TP"] + ["1TS"] * 8 + ["1TP"]) * report["completed_visa_windows"]
 
 
+def test_comprehensive_report_keeps_failures_and_compares_matched_reference_pacing(monkeypatch, tmp_path):
+    peers, attempts, checkpoints = [], [], []
+    output = tmp_path / "combined.json"
+    save = check.save_setup_report
+
+    def make(mode):
+        def factory(resource):
+            assert resource == "COM21"
+            peer = LinkPeer(fail_at=1 if mode == "visa" else 0)
+            peer.mode = mode
+            peers.append(peer)
+            return peer
+        return factory
+
+    inspect = check.inspect_serial_link
+
+    def investigate(transport, *, duration_s, **kwargs):
+        assert len(peers) == 1 or peers[-2].closed
+        attempts.append((transport.mode, duration_s, getattr(transport, "QUERY_GAP_S", None)))
+        return inspect(transport, duration_s=1, **kwargs)
+
+    def checkpoint(report, path):
+        checkpoints.append((len(report["runs"]), report["complete"]))
+        save(report, path)
+
+    monkeypatch.setattr(check, "VisaSerialTransport", make("visa"))
+    monkeypatch.setattr(check, "WindowsEvidenceSerial", make("serial"))
+    monkeypatch.setattr(check, "LabviewReferenceTransport", make("reference"))
+    monkeypatch.setattr(check, "host_evidence", lambda port: {"test_port": port})
+    monkeypatch.setattr(check, "inspect_serial_link", investigate)
+    monkeypatch.setattr(check, "save_setup_report", checkpoint)
+
+    assert check.main(["--physical", "--port", "21", "--transport", "comprehensive",
+                       "--output", str(output)]) == 1
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["complete"] and report["port_released"] and not report["ok"]
+    assert report["host"] == {"test_port": 21}
+    assert [run["probe"] for run in report["runs"]] == report["planned_probes"]
+    assert attempts == [("visa", 60, None), ("serial", 60, None),
+                        ("reference", 60, .13), ("reference", 300, 1.)]
+    assert checkpoints == [(1, False), (2, False), (3, False), (4, False), (4, True)]
+    failed = report["runs"][0]
+    assert failed["failure_stage"] == "identity" and failed["valid_replies"] == 0
+    assert failed["exchanges"][0]["expected_tx_hex"] == "31 56 45 0d 0a"
+    assert "synthetic corrupt reply" in failed["error"]
+    assert report["runs"][1]["observed_status_words"] == {"000032": 2}
+
+
 @pytest.mark.parametrize('failure', [1])
 def test_failed_link_always_returns_report_closes_and_does_not_retry(failure):
     peer = LinkPeer(fail_at=failure)
