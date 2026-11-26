@@ -347,15 +347,16 @@ def test_labview_inspection_recovers_once_and_then_pauses(qtbot, motor_window, m
     class InspectionPeer(SyntheticSerial):
         opens = 0
         last_exchange = {}
+        corrupt_status = False
 
         def open(self):
             self.opens += 1
             super().open()
 
         def query(self, text):
-            if text == "1TS" and self.corrupt_position:
+            if text == "1TS" and self.corrupt_status:
                 self.commands.append(text)
-                self.corrupt_position = False
+                self.corrupt_status = False
                 self.last_exchange = {"command": text, "rx_hex": frame}
                 raise InvalidSerialBytes(f"RX hex={frame}")
             return super().query(text)
@@ -366,33 +367,28 @@ def test_labview_inspection_recovers_once_and_then_pauses(qtbot, motor_window, m
     peer = InspectionPeer()
     monkeypatch.setattr(labview_inspection, "LabviewInspectionTransport", lambda _: peer)
     monkeypatch.setattr(LabviewInspectionMotor, "FAULT_QUIET_S", 0)
-    monkeypatch.setattr(LabviewInspectionMotor, "SNAPSHOTS_PER_WINDOW", 2)
     panel = motor_window()
     panel.poll_timer.setInterval(60_000)
     panel.mode_combo.setCurrentText("Physical")
     panel.transport_combo.setCurrentIndex(panel.transport_combo.findData(LABVIEW_INSPECTION))
     qtbot.mouseClick(panel.connect_button, Qt.MouseButton.LeftButton)
     qtbot.waitUntil(lambda: panel._connection.connected and not panel.worker.is_busy)
-    assert peer.opens == 1 and not panel.move_button.isEnabled() and not panel.stop_button.isEnabled()
+    assert peer.opens == 2 and not panel.move_button.isEnabled() and not panel.stop_button.isEnabled()
+    burst = ["1VE", "1ZX?", "1TP"] + ["1TS"] * 8 + ["1TP"]
+    assert peer.commands[-len(burst):] == burst
 
-    for _ in range(2):
-        assert panel.worker.submit("snapshot")
-        qtbot.waitUntil(lambda: not panel.worker.is_busy)
-    assert peer.opens == 2
-    assert peer.commands[-4:] == ["1VE", "1ZX?", "1TS", "1TP"]
-
-    peer.corrupt_position = True
+    peer.corrupt_status = True
     peer.responses["TP"] = "2.125"
     assert panel.worker.submit("snapshot")
     qtbot.waitUntil(lambda: "Inspection recovered on a fresh session:" in panel.log.toPlainText())
-    assert peer.opens == 3 and "2.125000 controller units" in panel.position_label.text()
+    assert peer.opens == 4 and "2.125000 controller units" in panel.position_label.text()
     assert frame in panel.log.toPlainText()
     qtbot.waitUntil(lambda: not panel.worker.is_busy)
 
-    peer.corrupt_position = True
+    peer.corrupt_status = True
     assert panel.worker.submit("snapshot")
     qtbot.waitUntil(lambda: panel._connection.communication_uncertain and not panel.worker.is_busy)
-    assert peer.opens == 3 and not panel.poll_timer.isActive()
+    assert peer.opens == 5 and not panel.poll_timer.isActive()
     assert "Position unknown" in panel.position_label.text()
     assert not panel.worker.submit("snapshot")
     qtbot.mouseClick(panel.disconnect_button, Qt.MouseButton.LeftButton)
@@ -400,7 +396,7 @@ def test_labview_inspection_recovers_once_and_then_pauses(qtbot, motor_window, m
     assert peer.closed
     qtbot.mouseClick(panel.connect_button, Qt.MouseButton.LeftButton)
     qtbot.waitUntil(lambda: panel._connection.connected and not panel.worker.is_busy)
-    assert peer.opens == 4 and panel.poll_timer.isActive()
+    assert peer.opens == 7 and panel.poll_timer.isActive()
     panel.close()
     qtbot.waitUntil(lambda: not panel.worker.isRunning())
     assert peer.closed and not panel.isVisible()
@@ -440,11 +436,10 @@ def test_disconnect_interrupts_labview_inspection_recovery(qtbot, motor_window, 
     assert peer.closed and peer.commands == commands
 
 
-def test_labview_inspection_renewal_refuses_changed_identity(monkeypatch):
+def test_labview_inspection_renewal_refuses_changed_identity():
     peer = SyntheticSerial()
     driver = LabviewInspectionMotor("COM21", transport_factory=lambda: peer)
     seq = MotorSequencer(driver)
-    monkeypatch.setattr(driver, "SNAPSHOTS_PER_WINDOW", 1)
     seq.connect()
     seq.snapshot()
     peer.responses["ZX?"] = "OTHER"

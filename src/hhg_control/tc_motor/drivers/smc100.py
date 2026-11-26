@@ -116,12 +116,7 @@ class VisaSerialTransport(FramedSerialTransport):
                 self.resource, access_mode=constants.AccessModes.exclusive_lock,
                 open_timeout=self.timeout_ms,
             )
-            self._session.timeout = self.timeout_ms
-            self._session.baud_rate = 57600
-            self._session.data_bits = 8
-            self._session.parity = constants.Parity.none
-            self._session.stop_bits = constants.StopBits.one
-            self._session.flow_control = constants.ControlFlow.xon_xoff
+            self._configure_port(constants)
             receive_method = self._configure_receive(constants)
             self._session.write_termination = "\r\n"
             self._session.encoding = "ascii"
@@ -149,6 +144,15 @@ class VisaSerialTransport(FramedSerialTransport):
         except Exception:
             self.close()
             raise
+
+    def _configure_port(self, constants) -> None:
+        """Configure the host serial port for the standard VISA transport."""
+        self._session.timeout = self.timeout_ms
+        self._session.baud_rate = 57600
+        self._session.data_bits = 8
+        self._session.parity = constants.Parity.none
+        self._session.stop_bits = constants.StopBits.one
+        self._session.flow_control = constants.ControlFlow.xon_xoff
 
     def _configure_receive(self, constants) -> str:
         """Configure the standard transport's raw serial reads."""
@@ -411,34 +415,43 @@ class SMC100Motor(BaseMotor):
         """Read TS then TP; mm is withheld when calibration has not been reviewed."""
         with self._lock:
             self.require_connected()
-            body = self._query("TS")
-            if not re.fullmatch(r"[0-9a-fA-F]{6}", body):
-                self._fail("Malformed controller status", stream=True)
-                raise MotorError(f"Malformed TS response: {body!r}")
-            error = int(body[:4], 16)
-            state = body[4:].upper()
-            known_states = {f"{code:02X}" for code in range(0x0A, 0x12)} | {"14", "3C", "3D", "3E"} | self.READY | self.MOVING
-            if state not in known_states:
-                self._last_status_moving = True
-                self._fail(f"Unknown controller state {state}", stream=True)
-                raise MotorError(f"Unknown controller state {state}; standstill is unconfirmed.")
-            self._last_status_moving = state in self.MOVING
-            if error:
-                self._fail(f"Positioner error 0x{error:04X}")
-            if self._motion_enabled and state not in self.READY:
-                if state != "28" or not self._owned_motion:
-                    self._fail(f"Unexpected state/reference change ({state}); reconnect and review coordinates.")
-                    if state in self.MOVING:
-                        self.stop()
-            if state in self.READY:
-                self._owned_motion = False
-            position = self._number("TP")
-            verified = self._units_verified
-            label = "READY" if state in self.READY else "MOVING" if state in self.MOVING else "NOT READY"
-            return MotorStatus(position if verified else None,
-                               (self._fault or label), state, error,
-                               state in self.MOVING, state in self.READY and not error and not self._fault,
-                               native_position=position)
+            state, error = self._read_controller_state()
+            return self._status_with_position(state, error)
+
+    def _read_controller_state(self) -> tuple[str, int]:
+        """Read and latch a TS result immediately under the owner's lock."""
+        body = self._query("TS")
+        if not re.fullmatch(r"[0-9a-fA-F]{6}", body):
+            self._fail("Malformed controller status", stream=True)
+            raise MotorError(f"Malformed TS response: {body!r}")
+        error = int(body[:4], 16)
+        state = body[4:].upper()
+        known_states = {f"{code:02X}" for code in range(0x0A, 0x12)} | {"14", "3C", "3D", "3E"} | self.READY | self.MOVING
+        if state not in known_states:
+            self._last_status_moving = True
+            self._fail(f"Unknown controller state {state}", stream=True)
+            raise MotorError(f"Unknown controller state {state}; standstill is unconfirmed.")
+        self._last_status_moving = state in self.MOVING
+        if error:
+            self._fail(f"Positioner error 0x{error:04X}")
+        if self._motion_enabled and state not in self.READY:
+            if state != "28" or not self._owned_motion:
+                self._fail(f"Unexpected state/reference change ({state}); reconnect and review coordinates.")
+                if state in self.MOVING:
+                    self.stop()
+        if state in self.READY:
+            self._owned_motion = False
+        return state, error
+
+    def _status_with_position(self, state: str, error: int) -> MotorStatus:
+        """Read a fresh native position, exposing mm only when already verified."""
+        position = self._number("TP")
+        verified = self._units_verified
+        label = "READY" if state in self.READY else "MOVING" if state in self.MOVING else "NOT READY"
+        return MotorStatus(position if verified else None,
+                           (self._fault or label), state, error,
+                           state in self.MOVING, state in self.READY and not error and not self._fault,
+                           native_position=position)
 
     def move_to(self, target_mm: float) -> None:
         """Start one PA move after fresh identity/settings/readiness/rounded-target checks."""

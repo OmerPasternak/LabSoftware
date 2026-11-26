@@ -40,8 +40,14 @@ does not replay these moves.
 
 The reference mode uses a 100 ms first-read delay, 130 ms minimum send
 spacing, VISA CR termination, and the strict shared CRLF frame parser.
-It keeps exclusive port ownership and a 300 ms receive deadline, and
-alternates TS and TP. The trace did not show writes to the end-mode or
+Each exclusive session issues TP, eight consecutive TS queries, then TP
+again before closing. The reference keeps the NI-VISA timeout at 300 ms
+throughout each session rather than rewriting a host timeout before each
+chunk. It reads only the available count and rejects any reply completed
+after the software deadline. If the native read unexpectedly blocks, the
+fixed VISA timeout bounds that last call. The report records each read's
+requested count, returned count and native completion code. The trace did
+not show writes to the end-mode or
 termination-enable attributes, so the explicit VISA end mode is an
 inference from the observed read split. The other VISA and Direct serial
 modes read raw chunks without CR termination and start checking after
@@ -73,9 +79,10 @@ give us a short-session pattern to test on the same hardware.
 
 Use **Physical → VISA (LabVIEW inspection)** with COM **21**, axis **1**, and
 a blank profile. This mode uses the reference read timing and opens a new
-exclusive VISA session after eight successful status/position reads while
-stationary. Each new window checks controller identity before publishing
-another position. The first corrupt-byte failure may be followed by one
+exclusive VISA session for each stationary-monitoring burst. Each new window
+checks controller identity, reads TP, polls TS up to eight times, and reads
+TP again before publishing the fresh position. Status polling ends early on
+a reported positioner fault or non-ready state. The first corrupt-byte failure may be followed by one
 fresh connection or one fresh snapshot on the same backend, after a 300 ms
 quiet period. It logs the original error and raw bytes if it recovers.
 A second corrupt reply pauses polling. Timeouts, serial configuration drift,

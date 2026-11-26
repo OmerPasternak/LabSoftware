@@ -93,7 +93,27 @@ def test_gui_inspection_records_first_post_connect_tp_failure_and_releases_port(
 
 
 def test_labview_reference_cli_runs_only_status_and_position_queries(monkeypatch, tmp_path):
-    peer = LinkPeer()
+    class WindowPeer(LinkPeer):
+        opened = 0
+        closed_windows = 0
+        active = False
+
+        def open(self):
+            assert not self.active
+            self.active = True
+            self.opened += 1
+
+        def query(self, command):
+            assert self.active
+            return super().query(command)
+
+        def close(self):
+            assert self.active
+            self.active = False
+            self.closed_windows += 1
+            super().close()
+
+    peer = WindowPeer()
     monkeypatch.setattr(check, "LabviewReferenceTransport", lambda resource: peer)
     output = tmp_path / "labview-reference.json"
     assert check.main(["--physical", "--port", "21", "--transport", "labview-reference",
@@ -102,7 +122,9 @@ def test_labview_reference_cli_runs_only_status_and_position_queries(monkeypatch
     assert report["query_sequence"] == "labview_reference" and report["port_released"]
     assert peer.closed and report["completed_duration_s"] == 1
     assert report["successful_snapshots"] > 0
-    assert peer.calls == ["1TS", "1TP"] * report["successful_snapshots"]
+    assert report["completed_visa_windows"] == report["successful_snapshots"]
+    assert peer.opened == peer.closed_windows == report["completed_visa_windows"]
+    assert peer.calls == (["1TP"] + ["1TS"] * 8 + ["1TP"]) * report["completed_visa_windows"]
 
 
 @pytest.mark.parametrize('failure', [1])

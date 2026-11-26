@@ -1,7 +1,7 @@
 """Short VISA sessions for read-only TC motor inspection in the GUI."""
 
 from .base import MotorError, MotorInfo, MotorSafetyError, MotorStatus
-from .labview_reference import LabviewReferenceTransport
+from .labview_reference import TRACE_STATUS_POLLS, LabviewReferenceTransport
 from .serial_framing import InvalidSerialBytes
 from .smc100 import SMC100Motor
 
@@ -26,7 +26,6 @@ class LabviewInspectionMotor(SMC100Motor):
     """
 
     query_only = True
-    SNAPSHOTS_PER_WINDOW = 8
     FAULT_QUIET_S = 0.300
 
     def __init__(self, resource: str, axis: int = 1, *, transport_factory=None):
@@ -35,7 +34,6 @@ class LabviewInspectionMotor(SMC100Motor):
             transport_factory or (lambda: LabviewInspectionTransport(resource))
         ))
         self._monitoring = False
-        self._snapshots = 0
         self._renewals = 0
         self._failed_exchange = None
         self.recovered_exchange = None
@@ -52,7 +50,7 @@ class LabviewInspectionMotor(SMC100Motor):
             if self.is_connected:
                 raise MotorError("Already connected; disconnect before reconnecting.")
             self._monitoring = False
-            self._snapshots = self._renewals = 0
+            self._renewals = 0
             self._failed_exchange = None
             self.recovered_exchange = None
             try:
@@ -107,7 +105,6 @@ class LabviewInspectionMotor(SMC100Motor):
             self._stream_uncertain = True
             raise
         self._renewals += 1
-        self._snapshots = 0
 
     def get_status(self) -> MotorStatus:
         """Return fresh status, with at most one recovered corrupt-byte exchange."""
@@ -116,11 +113,10 @@ class LabviewInspectionMotor(SMC100Motor):
                 return super().get_status()
             if self.stop_requested:
                 raise MotorError("Inspection read cancelled.")
-            if (self._snapshots >= self.SNAPSHOTS_PER_WINDOW and not self._fault
-                    and not self.communication_uncertain and not self._last_status_moving):
-                self._renew_window()
             try:
-                status = super().get_status()
+                if not self._fault and not self.communication_uncertain and not self._last_status_moving:
+                    self._renew_window()
+                status = self._read_trace_snapshot()
             except MotorError as original:
                 if self._last_status_moving or not self._can_recover(original):
                     raise
@@ -128,13 +124,22 @@ class LabviewInspectionMotor(SMC100Motor):
                 try:
                     self._renew_window(after_fault=True)
                     self._fault = ""
-                    status = super().get_status()
+                    status = self._read_trace_snapshot()
                 except Exception as recovery:
                     self._fail(str(recovery), stream=True)
                     raise MotorError(f"{original}; fresh inspection read failed: {recovery}") from recovery
                 self.recovered_exchange = self._failed_exchange
-            self._snapshots += 1
             return status
+
+    def _read_trace_snapshot(self) -> MotorStatus:
+        """Follow TP, a status burst, then fresh TP without an intervening write."""
+        self.require_connected()
+        self._number("TP")
+        for _ in range(TRACE_STATUS_POLLS):
+            state, error = self._read_controller_state()
+            if error or state not in self.READY:
+                break
+        return self._status_with_position(state, error)
 
     def _query(self, command: str) -> str:
         """Abort between read queries when the user requests disconnect."""

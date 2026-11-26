@@ -49,8 +49,8 @@ class BufferedVisa:
         self.count_warning_ignored = False
 
     @contextmanager
-    def ignore_warning(self, status):
-        assert status in (0x3FFF0005, 0x3FFF0006)
+    def ignore_warning(self, *statuses):
+        assert 0x3FFF0006 in statuses and set(statuses) <= {0x3FFF0005, 0x3FFF0006}
         self.count_warning_ignored = True
         try:
             yield
@@ -115,8 +115,11 @@ def test_labview_reference_waits_and_assembles_cr_split_without_allowing_moves(s
 
     def terminate_at_cr(session, count):
         read_times.append(clock.now)
+        assert peer.timeout == 300  # The reference retains the fixed VISA timeout.
         stop = peer.buffer.find(b"\r")
-        return read(session, min(count, stop + 1) if stop >= 0 else count)
+        if stop >= 0:
+            return read(session, min(count, stop + 1))[0], 0
+        return read(session, count)
 
     peer.visalib.read = terminate_at_cr
     for command in ("1PA20", "1ST", "1OR", "1VA?"):
@@ -127,6 +130,10 @@ def test_labview_reference_waits_and_assembles_cr_split_without_allowing_moves(s
     assert read_times == pytest.approx([0.10, 0.11])
     assert transport.last_exchange["rx_chunks_hex"] == [
         "31 54 53 30 30 30 30 33 33 0d", "0a",
+    ]
+    assert transport.last_exchange["visa_reads"] == [
+        {"requested": 11, "returned": 10, "status": 0},
+        {"requested": 1, "returned": 1, "status": 0x3FFF0006},
     ]
 
 

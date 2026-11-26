@@ -18,7 +18,7 @@ from types import SimpleNamespace
 from .drivers.base import MotorError
 from .drivers.smc100 import SMC100Motor, VisaSerialTransport
 from .drivers.direct_serial import DirectSerialTransport
-from .drivers.labview_reference import LabviewReferenceTransport
+from .drivers.labview_reference import TRACE_STATUS_POLLS, LabviewReferenceTransport
 from .reporting import save_setup_report
 
 
@@ -63,6 +63,7 @@ def inspect_serial_link(transport, *, axis: int = 1, duration_s: float = 30.0,
         "ok": False, "error": None, "port_released": False,
         "standstill_verified": False,
     }
+    reference_window_open = False
 
     def record_query(addressed):
         """Capture the wire exchange before the caller interprets its reply."""
@@ -109,16 +110,29 @@ def inspect_serial_link(transport, *, axis: int = 1, duration_s: float = 30.0,
                                   "stage_reference": info.stage_reference}
             report["native_settings"] = dict(motor.inspection_settings)
             poll = motor.get_status
+        elif labview_reference:
+            report["completed_visa_windows"] = 0
+
+            def poll():
+                nonlocal reference_window_open
+                reference_window_open = True  # A partially opened window still needs cleanup.
+                transport.open()
+                query("TP")
+                for _ in range(TRACE_STATUS_POLLS):
+                    query("TS")
+                query("TP")
+                transport.close()
+                reference_window_open = False
+                report["completed_visa_windows"] += 1
         else:
             transport.open()
-            if not labview_reference:
-                report["identity"]["controller_version"] = query("VE")
-                report["identity"]["stage_reference"] = query("ZX?")
-                if ("SMC" not in report["identity"]["controller_version"].upper()
-                        or report["identity"]["stage_reference"] != "LTA-HS"):
-                    raise MotorError("Unexpected controller/stage; link check aborted.")
-                for key in ("SU", "VA", "AC", "SL", "SR", "BA", "BH"):
-                    report["native_settings"][key] = query(key + "?")
+            report["identity"]["controller_version"] = query("VE")
+            report["identity"]["stage_reference"] = query("ZX?")
+            if ("SMC" not in report["identity"]["controller_version"].upper()
+                    or report["identity"]["stage_reference"] != "LTA-HS"):
+                raise MotorError("Unexpected controller/stage; link check aborted.")
+            for key in ("SU", "VA", "AC", "SL", "SR", "BA", "BH"):
+                report["native_settings"][key] = query(key + "?")
 
             def poll():
                 query("TS")
@@ -143,7 +157,8 @@ def inspect_serial_link(transport, *, axis: int = 1, duration_s: float = 30.0,
     finally:
         report["transport"] = dict(getattr(transport, "session_details", {}))
         try:
-            transport.close()
+            if not labview_reference or reference_window_open:
+                transport.close()
             report["port_released"] = True
         except Exception as exc:
             report["ok"] = False
@@ -200,7 +215,10 @@ def main(argv=None) -> int:
         report = runs[0]
     save_setup_report(report, output)
     for result in runs:
-        print(f"{result['requested_transport']}: {result['successful_snapshots']} complete status/position snapshots.")
+        if "completed_visa_windows" in result:
+            print(f"{result['requested_transport']}: {result['completed_visa_windows']} complete VISA windows.")
+        else:
+            print(f"{result['requested_transport']}: {result['successful_snapshots']} complete status/position snapshots.")
         if result["error"]:
             print(result["error"])
     print(f"Port released: {report['port_released']}. This does not verify motor standstill or safety.")
