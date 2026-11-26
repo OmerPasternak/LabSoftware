@@ -13,9 +13,10 @@ from pathlib import Path
 import re
 import sys
 import time
+from types import SimpleNamespace
 
 from .drivers.base import MotorError
-from .drivers.smc100 import VisaSerialTransport
+from .drivers.smc100 import SMC100Motor, VisaSerialTransport
 from .drivers.direct_serial import DirectSerialTransport
 from .reporting import save_setup_report
 
@@ -24,7 +25,7 @@ MAX_DURATION_S = 600
 
 
 def inspect_serial_link(transport, *, axis: int = 1, duration_s: float = 30.0,
-                        interval_s: float = 0.5) -> dict:
+                        interval_s: float = 0.5, gui_resource: str | None = None) -> dict:
     """Inspect one explicit axis for up to duration_s seconds, with no retries.
 
     Native positions/settings are uncalibrated controller units. Always close
@@ -41,6 +42,7 @@ def inspect_serial_link(transport, *, axis: int = 1, duration_s: float = 30.0,
         "report_type": "tc_motor_serial_link_check",
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "simulation": False,
+        "query_sequence": "gui_inspection" if gui_resource else "link_check",
         "axis": axis,
         "python": sys.version,
         "platform": platform.platform(),
@@ -53,12 +55,25 @@ def inspect_serial_link(transport, *, axis: int = 1, duration_s: float = 30.0,
         "standstill_verified": False,
     }
 
+    def record_query(addressed):
+        """Capture the wire exchange before the caller interprets its reply."""
+        row = {"command": addressed}
+        try:
+            response = transport.query(addressed)
+            row["response"] = response
+            return response
+        except Exception as exc:
+            row["error"] = str(exc)
+            raise
+        finally:
+            row["wire"] = dict(getattr(transport, "last_exchange", {}))
+            report["exchanges"].append(row)
+
     def query(command):
         """Retain each reply/error and check its exact address and command prefix."""
-        row = {"command": f"{axis}{command}"}
+        response = record_query(f"{axis}{command}")
+        row = report["exchanges"][-1]
         try:
-            response = transport.query(row["command"])
-            row["response"] = response
             prefix = f"{axis}{command[:2]}"
             if not isinstance(response, str) or not response.startswith(prefix) or not response[len(prefix):]:
                 raise MotorError(f"Unexpected reply for {prefix}: {response!r}")
@@ -72,27 +87,39 @@ def inspect_serial_link(transport, *, axis: int = 1, duration_s: float = 30.0,
         except Exception as exc:
             row["error"] = str(exc)
             raise
-        finally:
-            row["wire"] = dict(getattr(transport, "last_exchange", {}))
-            report["exchanges"].append(row)
 
     try:
-        transport.open()
-        report["identity"]["controller_version"] = query("VE")
-        report["identity"]["stage_reference"] = query("ZX?")
-        if ("SMC" not in report["identity"]["controller_version"].upper()
-                or report["identity"]["stage_reference"] != "LTA-HS"):
-            raise MotorError("Unexpected controller/stage; link check aborted.")
-        for key in ("SU", "VA", "AC", "SL", "SR", "BA", "BH"):
-            report["native_settings"][key] = query(key + "?")
+        if gui_resource:
+            # No write method is exposed. This check owns cleanup in finally,
+            # even if the driver's connect-time failure path also asks to close.
+            peer = SimpleNamespace(open=transport.open, query=record_query, close=lambda: None)
+            motor = SMC100Motor(gui_resource, axis=axis, transport="serial",
+                                transport_factory=lambda: peer)
+            info = motor.connect()
+            report["identity"] = {"controller_version": info.controller_version,
+                                  "stage_reference": info.stage_reference}
+            report["native_settings"] = dict(motor.inspection_settings)
+            poll = motor.get_status
+        else:
+            transport.open()
+            report["identity"]["controller_version"] = query("VE")
+            report["identity"]["stage_reference"] = query("ZX?")
+            if ("SMC" not in report["identity"]["controller_version"].upper()
+                    or report["identity"]["stage_reference"] != "LTA-HS"):
+                raise MotorError("Unexpected controller/stage; link check aborted.")
+            for key in ("SU", "VA", "AC", "SL", "SR", "BA", "BH"):
+                report["native_settings"][key] = query(key + "?")
+
+            def poll():
+                query("TS")
+                query("TP")
         started = time.monotonic()
         deadline = started + duration_s
         try:
             while time.monotonic() < deadline:
                 # These are queries only. A reported moving/error state is kept
                 # verbatim, never acted on by issuing a motor command.
-                query("TS")
-                query("TP")
+                poll()
                 report["successful_snapshots"] += 1
                 remaining = deadline - time.monotonic()
                 if remaining > 0:
@@ -121,12 +148,15 @@ def main(argv=None) -> int:
     parser.add_argument("--axis", type=int, default=1)
     parser.add_argument("--duration", type=float, default=30.0)
     parser.add_argument("--transport", choices=("visa", "serial", "compare"), default="visa")
+    parser.add_argument("--gui-inspection", action="store_true", help="Use the GUI's inspection driver over direct serial.")
     parser.add_argument("--output", type=Path, help="JSON destination; default: reports/ beside this module.")
     args = parser.parse_args(argv)
     if not args.physical:
         parser.error("No port opened. Add --physical to authorize this query-only check.")
     if args.port <= 0 or not 1 <= args.axis <= 31 or not 1 <= args.duration <= MAX_DURATION_S:
         parser.error(f"Use a positive COM number, axis 1–31, and duration 1–{MAX_DURATION_S} seconds.")
+    if args.gui_inspection and args.transport != "serial":
+        parser.error("--gui-inspection requires --transport serial.")
     output = args.output or (Path(__file__).resolve().parent / "reports" /
                             ("TC_motor_serial_check_" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + ".json"))
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -137,7 +167,9 @@ def main(argv=None) -> int:
     for mode in modes:
         print(f"Testing {mode} explicitly...", flush=True)
         factory = VisaSerialTransport if mode == "visa" else DirectSerialTransport
-        result = inspect_serial_link(factory(f"COM{args.port}"), axis=args.axis, duration_s=args.duration)
+        resource = f"COM{args.port}"
+        result = inspect_serial_link(factory(resource), axis=args.axis, duration_s=args.duration,
+                                     gui_resource=resource if args.gui_inspection else None)
         result["requested_transport"] = mode
         runs.append(result)
         print(f"{mode}: {'PASS' if result['ok'] else 'FAILED'}; port released: {result['port_released']}", flush=True)

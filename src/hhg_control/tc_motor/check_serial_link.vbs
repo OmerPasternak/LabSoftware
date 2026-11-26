@@ -25,7 +25,7 @@ End If
 
 mode = "check-link"
 If WScript.Arguments.Count = 0 Then
-    choice = MsgBox("Yes: 10-minute Direct serial check." & vbCrLf & _
+    choice = MsgBox("Yes: 10-minute Direct serial check using GUI inspection startup." & vbCrLf & _
         "No: short VISA versus Direct serial comparison." & vbCrLf & _
         "Both checks only read controller information.", vbYesNoCancel + vbQuestion, "Choose TC motor link check")
     If choice = vbCancel Then WScript.Quit 0

@@ -136,7 +136,7 @@ def test_vbs_link_check_passes_numeric_com_to_own_bat(tmp_path, options, mode):
 @pytest.mark.skipif(os.name != "nt", reason="Windows BAT launcher")
 @pytest.mark.parametrize(("mode", "transport_args"), [
     ("check-link", ["--transport", "compare"]),
-    ("check-link-extended", ["--transport", "serial", "--duration", "600"]),
+    ("check-link-extended", ["--transport", "serial", "--duration", "600", "--gui-inspection"]),
 ])
 def test_bat_link_check_uses_project_python_with_spaces(tmp_path, mode, transport_args):
     """No hardware: a stub captures module arguments and interpreter identity."""

@@ -20,7 +20,7 @@ exit /b
 goto check_link_done
 
 :check_link_extended
-".venv\Scripts\python.exe" -m hhg_control.tc_motor.check_serial_link --physical --port "%~2" --transport serial --duration 600
+".venv\Scripts\python.exe" -m hhg_control.tc_motor.check_serial_link --physical --port "%~2" --transport serial --duration 600 --gui-inspection
 
 :check_link_done
 set "check_result=%errorlevel%"

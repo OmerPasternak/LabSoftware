@@ -28,7 +28,7 @@ class LinkPeer:
         self.last_exchange = {"command": command, "rx_hex": "synthetic only"}
         if len(self.calls) == self.fail_at:
             raise OSError("synthetic corrupt reply: b1 54 53")
-        values = {"VE": "SMC_CC synthetic", "ZX?": "LTA-HS", "TS": self.status,
+        values = {"VE": "SMC_CC synthetic", "ZX?": "LTA-HS", "TS": self.status, "TE": "@",
                   "TP": "2", "SU?": "0.0000353932", "VA?": "5", "AC?": "20",
                   "SL?": "0", "SR?": "50", "BA?": "0", "BH?": "0"}
         return "1" + command[1:3] + values[command[1:]]
@@ -70,12 +70,26 @@ def test_extended_cli_uses_only_direct_serial_and_saves_full_run(monkeypatch, tm
     monkeypatch.setattr(check, "VisaSerialTransport", lambda resource: pytest.fail("VISA must stay closed"))
     output = tmp_path / "extended.json"
     result = check.main(["--physical", "--port", "21", "--transport", "serial",
-                         "--duration", "600", "--output", str(output)])
+                         "--duration", "600", "--gui-inspection", "--output", str(output)])
     report = json.loads(output.read_text(encoding="utf-8"))
     assert result == 0 and peer.closed and report["port_released"]
     assert report["requested_transport"] == "serial"
+    assert report["query_sequence"] == "gui_inspection"
     assert report["completed_duration_s"] == 600
     assert report["successful_snapshots"] == 1200
+    assert peer.calls[:14] == ["1VE", "1ZX?", "1TS", "1TP", "1TE", "1SU?", "1VA?",
+                              "1AC?", "1SL?", "1SR?", "1BA?", "1BH?", "1TE", "1TS"]
+    assert peer.calls[13:] == ["1TS", "1TP"] * 1200
+
+
+def test_gui_inspection_records_first_post_connect_tp_failure_and_releases_port():
+    peer = LinkPeer(fail_at=15)
+    report = check.inspect_serial_link(peer, duration_s=1, gui_resource="COM21")
+    assert not report["ok"] and report["port_released"] and peer.closed
+    assert report["successful_snapshots"] == 0
+    assert "SMC100 query TP failed" in report["error"]
+    assert peer.calls[-2:] == ["1TS", "1TP"]
+    assert "b1 54 53" in report["exchanges"][-1]["error"]
 
 
 @pytest.mark.parametrize('failure', [1])

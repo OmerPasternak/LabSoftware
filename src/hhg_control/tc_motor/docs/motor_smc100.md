@@ -14,7 +14,9 @@ to install pySerial alongside PyVISA. Then double-click `check_serial_link.vbs`
 beside the motor launcher and enter **21**. It uses address 1. Choose **No**
 for the short comparison, which checks VISA, closes its port, then checks
 Direct serial for up to 30 seconds each. Choose **Yes** to check Direct serial
-only for ten minutes. The console stays open while it collects replies and
+for ten minutes using the same driver startup and status reads as the GUI in
+inspection mode. The JSON includes the query sequence and controller replies.
+The console stays open while it collects replies and
 stops the run on the first communication error. If setup already passed in the
 same environment, run the check directly.
 The second check is cancelled if the first port cannot be released.
