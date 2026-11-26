@@ -92,6 +92,19 @@ def test_gui_inspection_records_first_post_connect_tp_failure_and_releases_port(
     assert "b1 54 53" in report["exchanges"][-1]["error"]
 
 
+def test_labview_reference_cli_runs_only_status_and_position_queries(monkeypatch, tmp_path):
+    peer = LinkPeer()
+    monkeypatch.setattr(check, "LabviewReferenceTransport", lambda resource: peer)
+    output = tmp_path / "labview-reference.json"
+    assert check.main(["--physical", "--port", "21", "--transport", "labview-reference",
+                       "--duration", "1", "--output", str(output)]) == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["query_sequence"] == "labview_reference" and report["port_released"]
+    assert peer.closed and report["completed_duration_s"] == 1
+    assert report["successful_snapshots"] > 0
+    assert peer.calls == ["1TS", "1TP"] * report["successful_snapshots"]
+
+
 @pytest.mark.parametrize('failure', [1])
 def test_failed_link_always_returns_report_closes_and_does_not_retry(failure):
     peer = LinkPeer(fail_at=failure)

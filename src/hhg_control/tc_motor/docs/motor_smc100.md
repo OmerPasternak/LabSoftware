@@ -11,14 +11,42 @@ location; it does not depend on the directory from which it was double-clicked.
 If replacing LabVIEW currently produces a serial decoding error, first close
 LabVIEW and TC motor. Run `setup_physical_mode.vbs` once after pulling the update
 to install pySerial alongside PyVISA. Then double-click `check_serial_link.vbs`
-beside the motor launcher and enter **21**. It uses address 1. Choose **No**
+beside the motor launcher and enter **21**. It uses address 1. Choose **1**
 for the short comparison, which checks VISA, closes its port, then checks
-Direct serial for up to 30 seconds each. Choose **Yes** to check Direct serial
+Direct serial for up to 30 seconds each. Choose **2** to check Direct serial
 for ten minutes using the same driver startup and status reads as the GUI in
 inspection mode. The JSON includes the query sequence and controller replies.
 The console stays open while it collects replies and
 stops the run on the first communication error. If setup already passed in the
-same environment, run the check directly.
+same environment, run the check directly. Choose **3** for the two-minute
+LabVIEW reference test over VISA. It sends only TS and TP, and reports each
+received chunk separately.
+
+### What the LabVIEW trace showed
+
+The two captured COM21 sessions opened and closed separately. The VISA
+attribute writes were timeout `0x3FFF001A=300` ms, baud
+`0x3FFF0021=57600`, data bits `0x3FFF0022=8`, flow control
+`0x3FFF0025=1` (XON/XOFF), parity `0x3FFF0023=0`, stop bits
+`0x3FFF0024=10` (one bit), and term character `0x3FFF0018=13` (CR).
+No COM21 buffer resize or flush was captured. The `1TS\r\n` and
+`1TP\r\n` writes match Python's wire bytes. LabVIEW first checked byte
+availability (`0x3FFF00AC`) about 99–103 ms after issuing a query. Its
+first read requested 11 bytes for status or 13 for position and returned
+one fewer, ending in CR. The second read requested and returned LF about
+7–12 ms later. During status polling, query starts were about 130 ms apart.
+Both recorded moves returned plausible positions. The reference check
+does not replay these moves.
+
+The reference mode uses a 100 ms first-read delay, 130 ms minimum send
+spacing, VISA CR termination, and the strict shared CRLF frame parser.
+It keeps exclusive port ownership and a 300 ms receive deadline, and
+alternates TS and TP. The trace did not show writes to the end-mode or
+termination-enable attributes, so the explicit VISA end mode is an
+inference from the observed read split. The other VISA and Direct serial
+modes read raw chunks without CR termination and start checking after
+10 ms, with a 60 ms minimum send gap and an input flush at open. The
+reference check compares those behaviors without changing GUI defaults.
 The second check is cancelled if the first port cannot be released.
 The console stays visible and names
 the JSON file saved under `tc_motor/reports/`, including when communication fails.

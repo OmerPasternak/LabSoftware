@@ -10,6 +10,7 @@ class FramedSerialTransport:
     """Common request/reply contract for explicit VISA and direct COM sessions."""
 
     POLL_INTERVAL_S = 0.01
+    FIRST_POLL_DELAY_S = POLL_INTERVAL_S
     QUERY_GAP_S = 0.06
     MAX_REPLY_BYTES = 256
 
@@ -41,6 +42,10 @@ class FramedSerialTransport:
         """Read at most one available chunk, without a hidden retry loop."""
         raise NotImplementedError
 
+    def _valid_read_count(self, chunk: bytes, count: int) -> bool:
+        """Require the complete counted chunk unless the transport uses CR termination."""
+        return len(chunk) == count
+
     def query(self, command: str) -> str:
         """Validate one ASCII CRLF reply within a receive deadline after bounded pacing.
 
@@ -52,6 +57,7 @@ class FramedSerialTransport:
         if self._session is None:
             raise MotorError("Serial port is not open.")
         received = bytearray()
+        chunks = []
         started = time.monotonic()
         failure = None
         before = {}
@@ -70,11 +76,13 @@ class FramedSerialTransport:
             if self._available():
                 raise MotorError("Unexpected input before request; response stream is not synchronized.")
             self.write(command)
+            poll_delay = self.FIRST_POLL_DELAY_S
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError(f"No complete CRLF reply within {self.timeout_ms} ms.")
-                time.sleep(min(self.POLL_INTERVAL_S, remaining))
+                time.sleep(min(poll_delay, remaining))
+                poll_delay = self.POLL_INTERVAL_S
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError(f"No complete CRLF reply within {self.timeout_ms} ms.")
@@ -84,10 +92,11 @@ class FramedSerialTransport:
                 if count > self.MAX_REPLY_BYTES - len(received):
                     raise MotorError(f"Reply exceeds {self.MAX_REPLY_BYTES} bytes.")
                 chunk = self._read_count(count, max(1, int(remaining * 1000)))
+                chunks.append(chunk.hex(" "))
                 received.extend(chunk)
                 if time.monotonic() > deadline:
                     raise TimeoutError(f"Reply arrived after the {self.timeout_ms} ms deadline.")
-                if len(chunk) != count:
+                if not self._valid_read_count(chunk, count):
                     raise MotorError("Serial backend returned an incomplete counted read.")
                 if any(byte > 127 or (byte < 32 and byte not in (10, 13)) for byte in chunk):
                     raise MotorError("Reply contains non-ASCII or unexpected control bytes.")
@@ -111,6 +120,7 @@ class FramedSerialTransport:
                 except Exception as exc:
                     after = {"unavailable": str(exc)}
             self.last_exchange = {"command": command, "rx_hex": received.hex(" "),
+                                  "rx_chunks_hex": chunks,
                                   "elapsed_s": time.monotonic() - started, "error": failure,
                                   "host_before": before, "host_after_failure": after}
 

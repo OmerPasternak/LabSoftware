@@ -5,7 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from hhg_control.tc_motor.drivers.base import MotorError
+from hhg_control.tc_motor.drivers.base import MotorError, MotorSafetyError
+from hhg_control.tc_motor.drivers.labview_reference import LabviewReferenceTransport
 from hhg_control.tc_motor.drivers.smc100 import SMC100Motor, VisaSerialTransport
 
 
@@ -49,7 +50,7 @@ class BufferedVisa:
 
     @contextmanager
     def ignore_warning(self, status):
-        assert status == 0x3FFF0006  # Only the expected full-count status.
+        assert status in (0x3FFF0005, 0x3FFF0006)
         self.count_warning_ignored = True
         try:
             yield
@@ -103,6 +104,30 @@ def serial_peer(monkeypatch):
         return transport, session, clock
 
     return make
+
+
+def test_labview_reference_waits_and_assembles_cr_split_without_allowing_moves(serial_peer):
+    _, peer, clock = serial_peer([b"1TS000033\r\n"])
+    transport = LabviewReferenceTransport("COM21")
+    transport._session = peer
+    read_times = []
+    read = peer.read_available
+
+    def terminate_at_cr(session, count):
+        read_times.append(clock.now)
+        stop = peer.buffer.find(b"\r")
+        return read(session, min(count, stop + 1) if stop >= 0 else count)
+
+    peer.visalib.read = terminate_at_cr
+    for command in ("1PA20", "1ST", "1OR", "1VA?"):
+        with pytest.raises(MotorSafetyError):
+            transport.write(command)
+    assert peer.writes == []
+    assert transport.query("1TS") == "1TS000033"
+    assert read_times == pytest.approx([0.10, 0.11])
+    assert transport.last_exchange["rx_chunks_hex"] == [
+        "31 54 53 30 30 30 30 33 33 0d", "0a",
+    ]
 
 
 @pytest.mark.parametrize('chunks', [[bytes([byte]) for byte in b"1TS000032\r\n"]])

@@ -81,6 +81,8 @@ class VisaSerialTransport(FramedSerialTransport):
     when installed); ``@py`` can be selected explicitly by Python callers.
     """
 
+    FLUSH_ON_OPEN = True
+
     def __init__(self, resource: str, *, backend: str = "", timeout_ms: int = 300):
         """Remember an explicit COM/ASRL resource and bounded I/O timeout in ms."""
         super().__init__(resource, timeout_ms=timeout_ms)
@@ -120,22 +122,15 @@ class VisaSerialTransport(FramedSerialTransport):
             self._session.parity = constants.Parity.none
             self._session.stop_bits = constants.StopBits.one
             self._session.flow_control = constants.ControlFlow.xon_xoff
-            self._session.xon_char = "\x11"
-            self._session.xoff_char = "\x13"
-            self._session.discard_null = False
-            # Counted raw reads own CRLF framing. Explicitly disable both VISA
-            # termination mechanisms so split CR/LF and stale serial attributes
-            # cannot silently truncate a counted read.
-            self._session.read_termination = None
-            self._session.end_input = constants.SerialTermination.none
-            self._session.end_output = constants.SerialTermination.none
+            receive_method = self._configure_receive(constants)
             self._session.write_termination = "\r\n"
             self._session.encoding = "ascii"
             self._expected_host = {"baud_rate": 57600, "data_bits": 8, "parity": 0,
                                    "stop_bits": 10, "flow_control": 1}
             if self._host_settings() != self._expected_host:
                 raise MotorError("VISA did not apply the requested serial settings.")
-            self._session.flush(constants.BufferOperation.discard_read_buffer)
+            if self.FLUSH_ON_OPEN:
+                self._session.flush(constants.BufferOperation.discard_read_buffer)
             self.session_details = {
                 "transport": "visa", "query_gap_s": self.QUERY_GAP_S,
                 "host_settings_source": "VISA serial attributes",
@@ -143,7 +138,7 @@ class VisaSerialTransport(FramedSerialTransport):
                 "driver_file": str(Path(__file__).resolve()),
                 "pyvisa_version": getattr(pyvisa, "__version__", "unknown"),
                 "visa_library": str(getattr(self._manager, "visalib", "unknown")),
-                "receive_method": "available-byte-count / strict ASCII CRLF",
+                "receive_method": receive_method,
                 "timeout_ms": self.timeout_ms,
                 "baud_rate": self._session.baud_rate,
                 "data_bits": self._session.data_bits,
@@ -154,6 +149,16 @@ class VisaSerialTransport(FramedSerialTransport):
         except Exception:
             self.close()
             raise
+
+    def _configure_receive(self, constants) -> str:
+        """Configure the standard transport's raw serial reads."""
+        self._session.xon_char = "\x11"
+        self._session.xoff_char = "\x13"
+        self._session.discard_null = False
+        self._session.read_termination = None
+        self._session.end_input = constants.SerialTermination.none
+        self._session.end_output = constants.SerialTermination.none
+        return "available-byte-count / strict ASCII CRLF"
 
     def _host_settings(self) -> dict:
         """Read live VISA serial attributes, never controller settings."""

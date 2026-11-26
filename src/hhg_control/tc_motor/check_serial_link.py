@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from .drivers.base import MotorError
 from .drivers.smc100 import SMC100Motor, VisaSerialTransport
 from .drivers.direct_serial import DirectSerialTransport
+from .drivers.labview_reference import LabviewReferenceTransport
 from .reporting import save_setup_report
 
 
@@ -25,7 +26,8 @@ MAX_DURATION_S = 600
 
 
 def inspect_serial_link(transport, *, axis: int = 1, duration_s: float = 30.0,
-                        interval_s: float = 0.5, gui_resource: str | None = None) -> dict:
+                        interval_s: float = 0.5, gui_resource: str | None = None,
+                        labview_reference: bool = False) -> dict:
     """Inspect one explicit axis for up to duration_s seconds, with no retries.
 
     Native positions/settings are uncalibrated controller units. Always close
@@ -37,12 +39,19 @@ def inspect_serial_link(transport, *, axis: int = 1, duration_s: float = 30.0,
         raise ValueError("Controller address must be 1–31.")
     if not 1 <= duration_s <= MAX_DURATION_S or not 0.05 <= interval_s <= 5:
         raise ValueError(f"Use 1–{MAX_DURATION_S} seconds and a 0.05–5 second polling interval.")
+    if gui_resource and labview_reference:
+        raise ValueError("Choose one inspection query sequence.")
+    sequence = "link_check"
+    if gui_resource:
+        sequence = "gui_inspection"
+    elif labview_reference:
+        sequence = "labview_reference"
     report = {
         "schema_version": 1,
         "report_type": "tc_motor_serial_link_check",
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "simulation": False,
-        "query_sequence": "gui_inspection" if gui_resource else "link_check",
+        "query_sequence": sequence,
         "axis": axis,
         "python": sys.version,
         "platform": platform.platform(),
@@ -102,13 +111,14 @@ def inspect_serial_link(transport, *, axis: int = 1, duration_s: float = 30.0,
             poll = motor.get_status
         else:
             transport.open()
-            report["identity"]["controller_version"] = query("VE")
-            report["identity"]["stage_reference"] = query("ZX?")
-            if ("SMC" not in report["identity"]["controller_version"].upper()
-                    or report["identity"]["stage_reference"] != "LTA-HS"):
-                raise MotorError("Unexpected controller/stage; link check aborted.")
-            for key in ("SU", "VA", "AC", "SL", "SR", "BA", "BH"):
-                report["native_settings"][key] = query(key + "?")
+            if not labview_reference:
+                report["identity"]["controller_version"] = query("VE")
+                report["identity"]["stage_reference"] = query("ZX?")
+                if ("SMC" not in report["identity"]["controller_version"].upper()
+                        or report["identity"]["stage_reference"] != "LTA-HS"):
+                    raise MotorError("Unexpected controller/stage; link check aborted.")
+                for key in ("SU", "VA", "AC", "SL", "SR", "BA", "BH"):
+                    report["native_settings"][key] = query(key + "?")
 
             def poll():
                 query("TS")
@@ -123,7 +133,8 @@ def inspect_serial_link(transport, *, axis: int = 1, duration_s: float = 30.0,
                 report["successful_snapshots"] += 1
                 remaining = deadline - time.monotonic()
                 if remaining > 0:
-                    time.sleep(min(interval_s, remaining))
+                    # The reference transport already spaces sends by 130 ms.
+                    time.sleep(min(0.01 if labview_reference else interval_s, remaining))
         finally:
             report["completed_duration_s"] = time.monotonic() - started
         report["ok"] = True
@@ -147,7 +158,7 @@ def main(argv=None) -> int:
     parser.add_argument("--port", type=int, required=True, help="COM number, for example 21.")
     parser.add_argument("--axis", type=int, default=1)
     parser.add_argument("--duration", type=float, default=30.0)
-    parser.add_argument("--transport", choices=("visa", "serial", "compare"), default="visa")
+    parser.add_argument("--transport", choices=("visa", "serial", "compare", "labview-reference"), default="visa")
     parser.add_argument("--gui-inspection", action="store_true", help="Use the GUI's inspection driver over direct serial.")
     parser.add_argument("--output", type=Path, help="JSON destination; default: reports/ beside this module.")
     args = parser.parse_args(argv)
@@ -166,10 +177,12 @@ def main(argv=None) -> int:
     runs = []
     for mode in modes:
         print(f"Testing {mode} explicitly...", flush=True)
-        factory = VisaSerialTransport if mode == "visa" else DirectSerialTransport
+        factory = {"visa": VisaSerialTransport, "serial": DirectSerialTransport,
+                   "labview-reference": LabviewReferenceTransport}[mode]
         resource = f"COM{args.port}"
         result = inspect_serial_link(factory(resource), axis=args.axis, duration_s=args.duration,
-                                     gui_resource=resource if args.gui_inspection else None)
+                                     gui_resource=resource if args.gui_inspection else None,
+                                     labview_reference=mode == "labview-reference")
         result["requested_transport"] = mode
         runs.append(result)
         print(f"{mode}: {'PASS' if result['ok'] else 'FAILED'}; port released: {result['port_released']}", flush=True)
