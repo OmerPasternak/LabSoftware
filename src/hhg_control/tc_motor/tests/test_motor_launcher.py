@@ -120,6 +120,7 @@ def test_vbs_setup_passes_setup_to_own_bat_with_spaces(tmp_path):
     ([], "check-link"),
     (["reference"], "check-link-reference"),
     (["full"], "check-link-software"),
+    (["sequence"], "check-link-sequence"),
 ])
 def test_vbs_link_check_passes_numeric_com_to_own_bat(tmp_path, options, mode):
     """Run only harmless launcher stubs; a numeric argument avoids InputBox UI."""
@@ -165,23 +166,26 @@ def test_bat_link_check_uses_project_python_with_spaces(tmp_path, mode, transpor
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows BAT launcher")
-def test_software_comparison_bat_invokes_native_script_without_python(tmp_path):
+@pytest.mark.parametrize("mode", ["software", "sequence"])
+def test_software_comparison_bat_invokes_native_script_without_python(tmp_path, mode):
     """Exercise the mode 3 path through a harmless PowerShell stub."""
     package = tmp_path / "TC lab checkout" / "src" / "hhg_control" / "tc_motor"
     package.mkdir(parents=True)
     launcher = package / "run_TC_motor.bat"
     shutil.copyfile(Path(__file__).resolve().parents[1] / launcher.name, launcher)
     (package / "check_ni_max_comparison.ps1").write_text(
-        "param([int]$Port, [switch]$Physical, [switch]$FullComparison)\n"
-        "@{port=$Port; physical=[bool]$Physical; full=[bool]$FullComparison} | ConvertTo-Json -Compress\n",
+        "param([int]$Port, [switch]$Physical, [switch]$FullComparison, [switch]$SequenceComparison)\n"
+        "@{port=$Port; physical=[bool]$Physical; full=[bool]$FullComparison; sequence=[bool]$SequenceComparison} | ConvertTo-Json -Compress\n",
         encoding="ascii",
     )
     result = subprocess.run(
-        ["cmd.exe", "/d", "/c", "call", str(launcher), "check-link-software", "21"],
+        ["cmd.exe", "/d", "/c", "call", str(launcher), f"check-link-{mode}", "21"],
         cwd=tmp_path, capture_output=True, input="\n", text=True, timeout=15,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert json.loads(result.stdout.splitlines()[0]) == {"port": 21, "physical": True, "full": True}
+    assert json.loads(result.stdout.splitlines()[0]) == {
+        "port": 21, "physical": True, "full": mode == "software", "sequence": mode == "sequence",
+    }
 
 
 def test_detached_result_waits_for_complete_json(tmp_path):

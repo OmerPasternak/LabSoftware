@@ -15,16 +15,40 @@ Double-click `check_serial_link.vbs` and enter **21**. It uses controller addres
 
 1. **Quick comparison:** checks VISA and Direct serial for up to 30 seconds each.
 2. **Reference VISA:** runs only the captured TS and TP query workload for two minutes.
-3. **Full VISA software comparison.** Compares the session open order,
-   receive procedure, and synchronous versus asynchronous native VISA calls
-   on the selected COM port. Allow about 15 minutes if every phase completes.
+3. **Query order comparison.** Compares three status and position query
+   sequences on the same VISA path. Allow about 10 minutes if all phases finish.
 
-Choose **3** for the software investigation. It saves one
-`reports/TC_motor_visa_software_*.json` and prints the path. It uses Windows
+Choose **3** to investigate the recurring burst failure. It saves one
+`reports/TC_motor_visa_sequence_*.json` and prints the path. It uses Windows
 PowerShell and the installed VISA runtime. Modes 1 and 2 use the project Python
 environment. The earlier Python full investigation is still available via
 `check_serial_link --physical --port 21 --transport comprehensive` when
 invoked as a module using the project Python environment.
+
+### Compare query order
+
+The previous full VISA comparison reproduced corrupt status replies with
+either lock order, LF or counted CR/LF reads, and either native I/O mode.
+All three lock-after-open phases failed on the sixth `TS` in a session,
+which was command 7 because `TP` came first. Those observations left the
+command order and the elapsed time or number of commands since open coupled.
+
+Mode 3 keeps synchronous LF reads, lock-after-open, one-second query spacing,
+and up to 20 ten-query sessions per phase. It sends these sequences:
+
+| Phase | Sequence | Sixth `TS` occurs at |
+| --- | --- | --- |
+| `position_first` | `TP`, eight `TS`, `TP` | Command 7 |
+| `status_only` | Ten `TS` | Command 6 |
+| `position_late` | Seven `TS`, `TP`, `TS`, `TP` | Command 6 |
+
+Each failure records the raw bytes, `query_index` within the session, and
+`ts_index` within that session's status reads. The diagnostic closes the
+session after a bad reply and moves to the next phase if release succeeds.
+Compare whether the fault follows the sixth `TS`, command 7, or only occurs
+when `TP` leads the burst. A single clean run establishes that exposure only.
+It sends only `1TS` and `1TP` queries. `TS` reads and clears the controller's
+error buffer. The results do not qualify the link for motion.
 
 ### Automated NI MAX comparison
 
@@ -109,9 +133,9 @@ command bytes and baud settings.
   MOVING). That can affect reply content and firmware timing. The diagnostic
   stays stationary and never replays the moves.
 
-**Run option 3.** Use the same lab PC, port, and adapter with the stage
-stationary and the controller powered. Close other applications using COM21.
-Double-click `check_serial_link.vbs`, enter **21**, and choose **3**.
+**Rerun the previous full VISA comparison.** With the controller powered,
+stage stationary, and other COM applications closed, run
+`wscript.exe .\check_serial_link.vbs 21 full` from the TC motor folder.
 
 | Phase | VISA calls | Receive procedure |
 | --- | --- | --- |

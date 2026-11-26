@@ -29,7 +29,9 @@ $api = @{
         if ($manager -ne 100 -or $resource -ne 'ASRL21::INSTR' -or $wire.open) {
             throw 'Unexpected resource or overlapping sessions'
         }
-        $expectedMode = if ($case -like 'full*') { @(1, 1, 0, 0, 0)[$wire.opens] } elseif ($lockAfterOpen) { 0 } else { 1 }
+        $expectedMode = if ($case -like 'full*') { @(1, 1, 0, 0, 0)[$wire.opens] }
+                        elseif ($lockAfterOpen -or $case -eq 'sequence') { 0 }
+                        else { 1 }
         $expectedTimeout = if ($expectedMode -eq 0) { 0 } else { 300 }
         if ($accessMode -ne $expectedMode -or $timeoutMs -ne $expectedTimeout) {
             throw 'Unexpected VISA open arguments'
@@ -38,6 +40,7 @@ $api = @{
         $wire.locked = $accessMode -eq 1
         $wire.async = $false
         $wire.opens++
+        $wire.writes = 0
         @{ code = 0; handle = 200 }
     }
     Lock = {
@@ -79,9 +82,11 @@ $api = @{
             default { throw 'Unexpected instrument command' }
         }
         $reply = [Text.Encoding]::ASCII.GetBytes($response)
+        $wire.writes++
         if (($case -eq 'lf_fault' -and $wire.term -eq 10) -or
             ($case -eq 'counted_fault' -and $wire.term -eq 13) -or
-            ($case -eq 'full_recovery' -and $wire.opens -eq 2)) {
+            ($case -eq 'full_recovery' -and $wire.opens -eq 2) -or
+            ($case -eq 'sequence' -and $wire.opens -eq 1 -and $wire.writes -eq 7)) {
             $reply = [byte[]](0xB1, 0xD5, 0x05, 0x0A)
         }
         $wire.rx.AddRange($reply)
@@ -112,11 +117,12 @@ $api = @{
 }
 
 foreach ($case in @('success', 'lf_fault', 'counted_fault', 'close_fault', 'locked_after_open', 'lock_fault',
-                    'full_recovery', 'full_close_fault')) {
+                    'full_recovery', 'full_close_fault', 'sequence')) {
     $wire = @{ open = $false; opens = 0; rx = [Collections.Generic.List[byte]]::new() }
     $lockAfterOpen = $case -in @('locked_after_open', 'lock_fault')
     $full = $case -like 'full*'
-    $null = Invoke-NiMaxComparison $api 21 (Join-Path $Folder "$case.json") 2 1 0 -LockAfterOpen:$lockAfterOpen -FullComparison:$full
+    $sequence = $case -eq 'sequence'
+    $null = Invoke-NiMaxComparison $api 21 (Join-Path $Folder "$case.json") 2 1 0 -LockAfterOpen:$lockAfterOpen -FullComparison:$full -SequenceComparison:$sequence
 }
 """,
         encoding="utf-8",
@@ -194,3 +200,15 @@ foreach ($case in @('success', 'lf_fault', 'counted_fault', 'close_fault', 'lock
     assert runs[4]["exchanges"][0]["reads"][0]["submit_status"] == "0x3FFF009B"
     blocked = report("full_close_fault")
     assert not blocked["port_released"] and len(blocked["runs"]) == 1
+
+    sequence = report("sequence")
+    assert sequence["port_released"] and not sequence["ok"]
+    first, status, late = sequence["runs"]
+    assert sequence["planned_runs"] == ["position_first", "status_only", "position_late"]
+    assert [run["visa_open"]["access_mode"] for run in sequence["runs"]] == [0, 0, 0]
+    assert first["query_sequence"] == ["1TP"] + ["1TS"] * 8 + ["1TP"]
+    assert first["exchanges"][-1]["query_index"] == 7 and first["exchanges"][-1]["ts_index"] == 6
+    assert status["query_sequence"] == ["1TS"] * 10
+    assert late["query_sequence"] == ["1TS"] * 7 + ["1TP", "1TS", "1TP"]
+    assert late["exchanges"][5]["query_index"] == late["exchanges"][5]["ts_index"] == 6
+    assert status["ok"] and late["ok"]

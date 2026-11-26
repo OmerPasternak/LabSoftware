@@ -31,13 +31,13 @@ mode = "check-link"
 If WScript.Arguments.Count = 0 Then
     choice = InputBox("1 - Short VISA versus Direct serial comparison" & vbCrLf & _
         "2 - Repeat the reference VISA workload for two minutes" & vbCrLf & _
-        "3 - Full VISA software comparison (up to about 15 minutes)" & vbCrLf & _
+        "3 - Compare query order (up to about 10 minutes)" & vbCrLf & _
         "All checks only read controller information.", "Choose TC motor link check", "3")
     Select Case choice
         Case "": WScript.Quit 0
         Case "1": mode = "check-link"
         Case "2": mode = "check-link-reference"
-        Case "3": mode = "check-link-software"
+        Case "3": mode = "check-link-sequence"
         Case Else
             MsgBox "Enter 1, 2, or 3.", vbExclamation, "TC motor link check"
             WScript.Quit 1
@@ -46,6 +46,7 @@ ElseIf WScript.Arguments.Count = 2 Then
     Select Case WScript.Arguments(1)
         Case "reference": mode = "check-link-reference"
         Case "full": mode = "check-link-software"
+        Case "sequence": mode = "check-link-sequence"
         Case Else: WScript.Quit 1
     End Select
 End If

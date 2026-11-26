@@ -2,7 +2,8 @@ param(
     [ValidateRange(1, 65535)][int]$Port = 21,
     [switch]$Physical,
     [switch]$LockAfterOpen,
-    [switch]$FullComparison
+    [switch]$FullComparison,
+    [switch]$SequenceComparison
 )
 
 $ErrorActionPreference = 'Stop'
@@ -275,11 +276,15 @@ function Save-NiMaxReport($Report, [string]$OutputPath) {
 
 function Invoke-NiMaxComparison($Api, [int]$PortNumber, [string]$OutputPath,
                                 [int]$StatusReads = 20, [int]$Windows = 20, [int]$GapMs = 1000,
-                                [switch]$LockAfterOpen, [switch]$FullComparison) {
+                                [switch]$LockAfterOpen, [switch]$FullComparison, [switch]$SequenceComparison) {
     # The only instrument writes are the fixed TS and TP queries below.
     $resource = "ASRL${PortNumber}::INSTR"
+    $compare = $FullComparison -or $SequenceComparison
+    $reportType = if ($SequenceComparison) { 'tc_motor_visa_sequence_comparison' }
+                  elseif ($FullComparison) { 'tc_motor_visa_software_comparison' }
+                  else { 'tc_motor_native_visa_comparison' }
     $report = [ordered]@{
-        report_type = $(if ($FullComparison) { 'tc_motor_visa_software_comparison' } else { 'tc_motor_native_visa_comparison' })
+        report_type = $reportType
         schema_version = 1
         created_utc = [DateTime]::UtcNow.ToString('o')
         resource = $resource
@@ -292,9 +297,22 @@ function Invoke-NiMaxComparison($Api, [int]$PortNumber, [string]$OutputPath,
         port_released = $true
         ok = $false
     }
+    $mixedCommands = @('1TP') + (@('1TS') * 8) + @('1TP')
     $phases = @(@{ name = 'status_only_lf'; commands = @('1TS') * $StatusReads; windows = 1; counted = $false;
                    deferred = [bool]$LockAfterOpen; async = $false })
-    if ($FullComparison) {
+    if ($SequenceComparison) {
+        # Match the mode 3 LF lock-after-open run and vary only command order/content.
+        $phases = @(
+            @{ name = 'position_first'; commands = $mixedCommands }
+            @{ name = 'status_only'; commands = @('1TS') * 10 }
+            @{ name = 'position_late'; commands = (@('1TS') * 7) + @('1TP', '1TS', '1TP') }
+        )
+        foreach ($phase in $phases) {
+            $phase.deferred = $true
+            $phase.counted = $false
+            $phase.async = $false
+        }
+    } elseif ($FullComparison) {
         $phases += @(
             @{ name = 'mixed_lf_lock_at_open'; counted = $false; deferred = $false; async = $false }
             @{ name = 'mixed_lf_lock_after_open'; counted = $false; deferred = $true; async = $false }
@@ -308,10 +326,9 @@ function Invoke-NiMaxComparison($Api, [int]$PortNumber, [string]$OutputPath,
             @{ name = 'mixed_counted_cr'; counted = $true; deferred = [bool]$LockAfterOpen; async = $false }
         )
     }
-    $mixedCommands = @('1TP') + (@('1TS') * 8) + @('1TP')
-    foreach ($phase in $phases | Select-Object -Skip 1) {
-        $phase.commands = $mixedCommands
-        $phase.windows = $Windows
+    foreach ($phase in $phases) {
+        if (-not $phase.ContainsKey('commands')) { $phase.commands = $mixedCommands }
+        if (-not $phase.ContainsKey('windows')) { $phase.windows = $Windows }
     }
     $report.planned_runs = @($phases | ForEach-Object { $_.name })
     $manager = 0
@@ -338,12 +355,13 @@ function Invoke-NiMaxComparison($Api, [int]$PortNumber, [string]$OutputPath,
             $openTimeoutMs = if ($phase.deferred) { 0 } else { 300 }
             $visaOpen = @{ access_mode = $accessMode; timeout_ms = $openTimeoutMs
                            lock_after_open = $phase.deferred; exclusive_during_io = $true }
-            if (-not $FullComparison) {
+            if (-not $compare) {
                 $report.visa_open = $visaOpen
                 if ($phase.counted) { $report.follow_up = 'started' }
             }
             $run = [ordered]@{ name = $phase.name; ok = $false; valid_replies = 0; completed_windows = 0
                                visa_open = $visaOpen; async_api = $phase.async
+                               query_sequence = $phase.commands; planned_windows = $phase.windows
                                trace_attributes = [bool]$phase.trace_attributes
                                exchanges = [Collections.Generic.List[object]]::new() }
             $report.runs.Add($run)
@@ -368,11 +386,17 @@ function Invoke-NiMaxComparison($Api, [int]$PortNumber, [string]$OutputPath,
                         Assert-VisaSuccess (& $Api.EnableAsync $handle) 'Enable VISA I/O completion queue'
                     }
                     $stage = 'query'
+                    $queryIndex = 0
+                    $statusIndex = 0
                     foreach ($command in $phase.commands) {
+                        $queryIndex++
+                        if ($command -eq '1TS') { $statusIndex++ }
                         $delay = $GapMs - ($clock.ElapsedMilliseconds - $lastSend)
                         if ($delay -gt 0) { Start-Sleep -Milliseconds $delay }
                         $lastSend = $clock.ElapsedMilliseconds
-                        $row = [ordered]@{ command = $command; window = $window; send_offset_ms = $lastSend
+                        $row = [ordered]@{ command = $command; window = $window; query_index = $queryIndex
+                                           ts_index = $(if ($command -eq '1TS') { $statusIndex })
+                                           send_offset_ms = $lastSend
                                            reads = [Collections.Generic.List[object]]::new() }
                         $run.exchanges.Add($row)
                         try {
@@ -404,7 +428,7 @@ function Invoke-NiMaxComparison($Api, [int]$PortNumber, [string]$OutputPath,
                 }
             }
             $run.ok = $report.port_released -and $run.completed_windows -eq $phase.windows -and -not $run.error
-            if ($phase.counted -and -not $FullComparison) {
+            if ($phase.counted -and -not $compare) {
                 $report.follow_up = if ($run.ok) { 'passed' } else { 'failed' }
             }
             Write-Host "  $($run.valid_replies) valid replies. Pass: $($run.ok)."
@@ -413,7 +437,7 @@ function Invoke-NiMaxComparison($Api, [int]$PortNumber, [string]$OutputPath,
             Save-NiMaxReport $report $OutputPath
             # A query failure is data for the comparison. Always release its handle
             # before moving to the next fixed phase. Setup or cleanup failure aborts.
-            if (-not $run.ok -and (-not $FullComparison -or -not $report.port_released -or
+            if (-not $run.ok -and (-not $compare -or -not $report.port_released -or
                                     $run.failure_stage -ne 'query')) { break }
         }
     } catch {
@@ -436,22 +460,27 @@ function Invoke-NiMaxComparison($Api, [int]$PortNumber, [string]$OutputPath,
 
 if ($MyInvocation.InvocationName -ne '.') {
     if (-not $Physical) { throw 'Explicit -Physical authorization required for the query-only test.' }
-    if ($FullComparison -and $LockAfterOpen) { throw 'The full comparison sets its own open sequence.' }
+    if (($FullComparison -and $SequenceComparison) -or (($FullComparison -or $SequenceComparison) -and $LockAfterOpen)) {
+        throw 'Choose only one comparison option.'
+    }
     $folder = Join-Path $PSScriptRoot 'reports'
     [IO.Directory]::CreateDirectory($folder) | Out-Null
     $stamp = [DateTime]::UtcNow.ToString("yyyyMMddTHHmmssfffffff'Z'")
-    $prefix = if ($FullComparison) { 'TC_motor_visa_software' } else { 'TC_motor_native_visa' }
+    $prefix = if ($SequenceComparison) { 'TC_motor_visa_sequence' }
+              elseif ($FullComparison) { 'TC_motor_visa_software' }
+              else { 'TC_motor_native_visa' }
     $output = Join-Path $folder "${prefix}_${stamp}.json"
-    $minutes = if ($FullComparison) { 15 } else { 7 }
+    $minutes = if ($SequenceComparison) { 10 } elseif ($FullComparison) { 15 } else { 7 }
     Write-Host "Query-only comparison on COM$Port, axis 1. Allow up to about $minutes minutes."
     try {
-        $result = Invoke-NiMaxComparison $null $Port $output -LockAfterOpen:$LockAfterOpen -FullComparison:$FullComparison
+        $result = Invoke-NiMaxComparison $null $Port $output -LockAfterOpen:$LockAfterOpen `
+            -FullComparison:$FullComparison -SequenceComparison:$SequenceComparison
         if ($result.error) { Write-Host $result.error }
         if ($result.manager_cleanup_error) { Write-Host $result.manager_cleanup_error }
         Write-Host "Report saved: $output"
-        if ($FullComparison -and -not $result.ok) { exit 1 }
+        if (($FullComparison -or $SequenceComparison) -and -not $result.ok) { exit 1 }
     } catch {
         Write-Host "Diagnostic error: $($_.Exception.Message)"
-        if ($FullComparison) { exit 1 }
+        if ($FullComparison -or $SequenceComparison) { exit 1 }
     }
 }
