@@ -399,7 +399,9 @@ def test_labview_inspection_recovers_once_and_then_pauses(qtbot, motor_window, m
     assert peer.opens == 7 and panel.poll_timer.isActive()
     panel.close()
     qtbot.waitUntil(lambda: not panel.worker.isRunning())
-    assert peer.closed and not panel.isVisible()
+    # Qt can deliver the queued finished signal after the worker has stopped.
+    qtbot.waitUntil(lambda: not panel.isVisible())
+    assert peer.closed
 
 
 def test_disconnect_interrupts_labview_inspection_recovery(qtbot, motor_window, monkeypatch):

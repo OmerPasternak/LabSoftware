@@ -18,4 +18,14 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install --upgrade pip
       - run: python -m pip install ".[test]"
-      - run: python -m pytest -q
+      - run: python -m pytest -q --junitxml="$env:RUNNER_TEMP/pytest-results.xml"
+      - name: Annotate failed offline tests
+        if: failure()
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP 'pytest-results.xml'
+          if (Test-Path -LiteralPath $report) {
+            [xml]$results = Get-Content -Raw -LiteralPath $report
+            foreach ($test in $results.SelectNodes('//testcase[failure or error]')) {
+              Write-Output "::error title=pytest::$($test.classname).$($test.name)"
+            }
+          }
