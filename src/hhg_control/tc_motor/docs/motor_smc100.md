@@ -15,26 +15,16 @@ Double-click `check_serial_link.vbs` and enter **21**. It uses controller addres
 
 1. **Quick comparison:** checks VISA and Direct serial for up to 30 seconds each.
 2. **Reference VISA:** runs only the captured TS and TP query workload for two minutes.
-3. **Full investigation:** checks standard VISA and direct Windows COM for up
-   to one minute each, then runs the same reference workload at 130 ms and
-   1 s minimum send spacing. The slower phase runs for up to five minutes.
+3. **Full VISA software comparison.** Compares the session open order,
+   receive procedure, and synchronous versus asynchronous native VISA calls
+   on the selected COM port. Allow about 15 minutes if every phase completes.
 
-Choose **3** for unresolved corruption. It saves one
-`TC_motor_comprehensive_*.json` in `reports` after each probe. The report
-includes the selected port's Windows driver metadata, active Direct COM
-settings, available Windows serial error flags, raw receive bytes and chunks,
-VISA return codes where available, native identity/settings and status words,
-valid-reply counts and the stage at which a failure occurred. Closing,
-opening and every query are recorded as separate failure stages. Each probe
-stops at its first communication error. A mismatched instrument, operator
-cancel, or unconfirmed port release stops the whole investigation.
-
-Compare the normal and slower phases at similar valid-reply counts. A clean
-slower phase after the normal phase fails supports a timing-dependent effect.
-An empty Windows flags list only means no flags were sampled. The driver may
-omit flags, and pySerial's read also clears flags. This report cannot measure
-the signal on the cable, establish safe motion, or identify every electrical
-cause. All checks preserve the existing coordinate reference.
+Choose **3** for the software investigation. It saves one
+`reports/TC_motor_visa_software_*.json` and prints the path. It uses Windows
+PowerShell and the installed VISA runtime. Modes 1 and 2 use the project Python
+environment. The earlier Python full investigation is still available via
+`check_serial_link --physical --port 21 --transport comprehensive` when
+invoked as a module using the project Python environment.
 
 ### Automated NI MAX comparison
 
@@ -119,30 +109,35 @@ command bytes and baud settings.
   MOVING). That can affect reply content and firmware timing. The diagnostic
   stays stationary and never replays the moves.
 
-**Test the open sequence.** Use the same lab PC, port, and adapter with the
-stage stationary and the controller powered. Close other applications using
-COM21. From the `src\hhg_control\tc_motor` folder run this in PowerShell.
+**Run option 3.** Use the same lab PC, port, and adapter with the stage
+stationary and the controller powered. Close other applications using COM21.
+Double-click `check_serial_link.vbs`, enter **21**, and choose **3**.
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\check_ni_max_comparison.ps1 -Physical -Port 21 -LockAfterOpen
-```
+| Phase | VISA calls | Receive procedure |
+| --- | --- | --- |
+| `status_only_lf` | Synchronous, lock during open | 20 `TS` queries with a 64-byte LF-terminated read |
+| `mixed_lf_lock_at_open` | Synchronous, lock during open | 64-byte LF read |
+| `mixed_lf_lock_after_open` | Synchronous, open with mode `0` and timeout `0`, then lock | Same LF read |
+| `mixed_trace_cr_sync` | Synchronous, lock after open | Read back timeout and CR terminator, wait about 100 ms, count available bytes, and read through CR then LF |
+| `mixed_trace_cr_async` | Native async calls, lock after open | Same counted CR/LF procedure |
 
-`-LockAfterOpen` uses `viOpen` with mode `0` and timeout `0`, then calls
-`viLock` for exclusive access before setting attributes or sending any
-query. A failed lock closes the session and stops. This tests the change
-in initialization order while retaining an exclusive lock for all I/O.
-The legacy trace contains no explicit VISA lock call, so this experiment
-covers the open path without reproducing its lock policy.
+Each mixed phase runs up to 20 sessions of `TP`, eight `TS`, and `TP`, at
+the same nominal 1 s send spacing. Every phase holds the exclusive lock
+through configuration and I/O. The legacy trace contains no explicit lock
+call. This checks the open arguments and timing of acquisition while keeping
+the lock in place. Each phase stops at the first failed query, saves the raw
+bytes and VISA codes, and closes its session before the next phase. An open,
+lock, configuration, or cleanup failure stops the comparison. Progress
+and the partial report are saved during long phases.
 
-The existing VBS launcher still runs the lock-at-open baseline. Each run
-logs its `visa_open` parameters in the same timestamped JSON format. Compare
-the mixed LF phase across both reports using the same workload and nominal
-1 s spacing. If only the lock-at-open runs reproduce the fault, repeat the
-pair before attributing it to the open path. If both fail with the same
-signature, deprioritize this open-sequence difference. An open or lock
-error establishes no communication result. The next one-variable VISA
-comparison would hold the open mode and framing fixed while switching
-synchronous versus asynchronous calls.
+Compare the two mixed LF phases for the open sequence, then the second
+LF phase against synchronous counted CR/LF for the receive procedure.
+The two counted phases compare the async API against the sync API. The
+report logs async submission and completion codes separately. VISA can
+report `0x3FFF009B` (`VI_SUCCESS_SYNC`) for an async request completed
+synchronously. In that case the calls exercise the async API, but that
+operation does not distinguish actual asynchronous scheduling.
+[NI viReadAsync reference](https://www.ni.com/docs/en-US/bundle/ni-visa-api-ref/page/ni-visa-api-ref/vireadasync.html).
 
 The diagnostic sends only `1TS` and `1TP`, with no motion, STOP, homing, zero,
 or controller configuration commands. `TS` reads and clears the controller

@@ -22,18 +22,22 @@ If Not pattern.Test(port) Then
     MsgBox "Enter a positive COM number only, for example 21.", vbExclamation, "TC motor link check"
     WScript.Quit 1
 End If
+If CLng(port) > 65535 Then
+    MsgBox "Enter a COM number from 1 to 65535.", vbExclamation, "TC motor link check"
+    WScript.Quit 1
+End If
 
 mode = "check-link"
 If WScript.Arguments.Count = 0 Then
     choice = InputBox("1 - Short VISA versus Direct serial comparison" & vbCrLf & _
         "2 - Repeat the reference VISA workload for two minutes" & vbCrLf & _
-        "3 - Full fault investigation with one report (up to about eight minutes)" & vbCrLf & _
+        "3 - Full VISA software comparison (up to about 15 minutes)" & vbCrLf & _
         "All checks only read controller information.", "Choose TC motor link check", "3")
     Select Case choice
         Case "": WScript.Quit 0
         Case "1": mode = "check-link"
         Case "2": mode = "check-link-reference"
-        Case "3": mode = "check-link-full"
+        Case "3": mode = "check-link-software"
         Case Else
             MsgBox "Enter 1, 2, or 3.", vbExclamation, "TC motor link check"
             WScript.Quit 1
@@ -41,7 +45,7 @@ If WScript.Arguments.Count = 0 Then
 ElseIf WScript.Arguments.Count = 2 Then
     Select Case WScript.Arguments(1)
         Case "reference": mode = "check-link-reference"
-        Case "full": mode = "check-link-full"
+        Case "full": mode = "check-link-software"
         Case Else: WScript.Quit 1
     End Select
 End If

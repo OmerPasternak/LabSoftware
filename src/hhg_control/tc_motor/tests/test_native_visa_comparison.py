@@ -29,13 +29,15 @@ $api = @{
         if ($manager -ne 100 -or $resource -ne 'ASRL21::INSTR' -or $wire.open) {
             throw 'Unexpected resource or overlapping sessions'
         }
-        $expectedMode = if ($lockAfterOpen) { 0 } else { 1 }
-        $expectedTimeout = if ($lockAfterOpen) { 0 } else { 300 }
+        $expectedMode = if ($case -like 'full*') { @(1, 1, 0, 0, 0)[$wire.opens] } elseif ($lockAfterOpen) { 0 } else { 1 }
+        $expectedTimeout = if ($expectedMode -eq 0) { 0 } else { 300 }
         if ($accessMode -ne $expectedMode -or $timeoutMs -ne $expectedTimeout) {
             throw 'Unexpected VISA open arguments'
         }
         $wire.open = $true
         $wire.locked = $accessMode -eq 1
+        $wire.async = $false
+        $wire.opens++
         @{ code = 0; handle = 200 }
     }
     Lock = {
@@ -51,10 +53,23 @@ $api = @{
         if ($attr -eq 0x3FFF0018) { $wire.term = $value }
         0
     }
-    Available = { $wire.rx.Count }
+    Get = {
+        param($handle, $attr)
+        switch ($attr) {
+            0x3FFF00AC { $wire.rx.Count }
+            0x3FFF001A { 300 }
+            0x3FFF0018 { $wire.term }
+            default { throw 'Unexpected VISA attribute' }
+        }
+    }
+    EnableAsync = {
+        if (-not $wire.locked -or $wire.opens -ne 5) { throw 'Unexpected async enable' }
+        $wire.async = $true
+        0
+    }
     Write = {
-        param($handle, [byte[]]$bytes)
-        if (-not $wire.open -or -not $wire.locked -or $handle -ne 200 -or $wire.rx.Count) {
+        param($handle, [byte[]]$bytes, $async)
+        if (-not $wire.open -or -not $wire.locked -or $handle -ne 200 -or $wire.rx.Count -or $async -ne $wire.async) {
             throw 'Unexpected write'
         }
         $command = [Text.Encoding]::ASCII.GetString($bytes)
@@ -65,27 +80,29 @@ $api = @{
         }
         $reply = [Text.Encoding]::ASCII.GetBytes($response)
         if (($case -eq 'lf_fault' -and $wire.term -eq 10) -or
-            ($case -eq 'counted_fault' -and $wire.term -eq 13)) {
+            ($case -eq 'counted_fault' -and $wire.term -eq 13) -or
+            ($case -eq 'full_recovery' -and $wire.opens -eq 2)) {
             $reply = [byte[]](0xB1, 0xD5, 0x05, 0x0A)
         }
         $wire.rx.AddRange($reply)
-        @{ code = 0; count = $bytes.Length }
+        @{ code = 0; count = $bytes.Length; submit = 0 }
     }
     Read = {
-        param($handle, $requested)
+        param($handle, $requested, $async)
+        if ($async -ne $wire.async) { throw 'Unexpected read API' }
         $n = [Math]::Min($requested, $wire.rx.Count)
         $end = $wire.rx.IndexOf([byte]$wire.term)
         if ($end -ge 0) { $n = [Math]::Min($n, $end + 1) }
         $result = $wire.rx.GetRange(0, $n).ToArray()
         $wire.rx.RemoveRange(0, $n)
         $code = if ($n -eq $requested) { 0x3FFF0006 } else { 0x3FFF0005 }
-        @{ code = $code; count = $n; bytes = $result }
+        @{ code = $code; count = $n; bytes = $result; submit = 0x3FFF009B }
     }
     Close = {
         param($handle)
         if ($handle -eq 100) {
-            if ($wire.open -and $case -ne 'close_fault') { throw 'COM port leaked' }
-        } elseif ($case -eq 'close_fault') {
+            if ($wire.open -and $case -notlike '*close_fault') { throw 'COM port leaked' }
+        } elseif ($case -like '*close_fault') {
             return -1
         } else {
             $wire.open = $false
@@ -94,10 +111,12 @@ $api = @{
     }
 }
 
-foreach ($case in @('success', 'lf_fault', 'counted_fault', 'close_fault', 'locked_after_open', 'lock_fault')) {
-    $wire = @{ open = $false; rx = [Collections.Generic.List[byte]]::new() }
+foreach ($case in @('success', 'lf_fault', 'counted_fault', 'close_fault', 'locked_after_open', 'lock_fault',
+                    'full_recovery', 'full_close_fault')) {
+    $wire = @{ open = $false; opens = 0; rx = [Collections.Generic.List[byte]]::new() }
     $lockAfterOpen = $case -in @('locked_after_open', 'lock_fault')
-    $null = Invoke-NiMaxComparison $api 21 (Join-Path $Folder "$case.json") 2 1 0 -LockAfterOpen:$lockAfterOpen
+    $full = $case -like 'full*'
+    $null = Invoke-NiMaxComparison $api 21 (Join-Path $Folder "$case.json") 2 1 0 -LockAfterOpen:$lockAfterOpen -FullComparison:$full
 }
 """,
         encoding="utf-8",
@@ -162,3 +181,16 @@ foreach ($case in @('success', 'lf_fault', 'counted_fault', 'close_fault', 'lock
     assert lock_fault["runs"][0]["failure_stage"] == "lock"
     assert lock_fault["runs"][0]["exchanges"] == []
     assert "manager_cleanup_error" not in lock_fault
+
+    comparison = report("full_recovery")
+    assert not comparison["ok"] and comparison["port_released"]
+    runs = comparison["runs"]
+    assert [run["name"] for run in runs] == comparison["planned_runs"]
+    assert [run["valid_replies"] for run in runs] == [2, 0, 10, 10, 10]
+    assert [run["visa_open"]["access_mode"] for run in runs] == [1, 1, 0, 0, 0]
+    assert runs[1]["exchanges"][0]["rx_hex"] == "B1 D5 05 0A"
+    assert [row["command"] for row in runs[3]["exchanges"]] == [row["command"] for row in runs[4]["exchanges"]]
+    assert runs[3]["exchanges"][1]["term_char"] == runs[4]["exchanges"][1]["term_char"] == 13
+    assert runs[4]["exchanges"][0]["reads"][0]["submit_status"] == "0x3FFF009B"
+    blocked = report("full_close_fault")
+    assert not blocked["port_released"] and len(blocked["runs"]) == 1

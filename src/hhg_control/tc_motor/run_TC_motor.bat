@@ -2,6 +2,7 @@
 setlocal
 set "PYTHONIOENCODING=utf-8"
 cd /d "%~dp0..\..\.."
+if /I "%~1"=="check-link-software" goto check_link_software
 if not exist ".venv\Scripts\python.exe" (
     echo The project .venv is missing. Set up the project environment first.
     pause
@@ -26,6 +27,10 @@ goto check_link_done
 
 :check_link_full
 ".venv\Scripts\python.exe" -m hhg_control.tc_motor.check_serial_link --physical --port "%~2" --transport comprehensive
+goto check_link_done
+
+:check_link_software
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File "%~dp0check_ni_max_comparison.ps1" -Physical -Port "%~2" -FullComparison
 
 :check_link_done
 set "check_result=%errorlevel%"
