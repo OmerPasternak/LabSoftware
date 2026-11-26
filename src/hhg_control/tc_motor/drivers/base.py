@@ -106,6 +106,8 @@ class BaseMotor(ABC):
     No automatic homing, zeroing, enabling, or configuration download is allowed.
     """
 
+    query_only = False
+
     def __init__(self, limits: MotorLimits | None = None) -> None:
         """Store a reviewed envelope, or None for inspection-only access."""
         self.limits = limits

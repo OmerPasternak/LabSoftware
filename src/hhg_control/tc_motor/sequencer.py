@@ -87,6 +87,11 @@ class MotorSequencer:
         return self.driver.communication_uncertain
 
     @property
+    def query_only(self) -> bool:
+        """Whether this driver deliberately has no STOP or motion commands."""
+        return self.driver.query_only
+
+    @property
     def stop_requested(self) -> bool:
         """Return whether STOP is latched and requires explicit acknowledgement."""
         return self._stop_event.is_set()
@@ -230,6 +235,10 @@ class MotorSequencer:
         with self._operation():
             if not self.driver.is_connected:
                 return False
+            if self.query_only:
+                uncertain = self.driver.communication_uncertain
+                self.driver.close()
+                return uncertain
             if self.driver.can_release_inspection_session:
                 self.driver.close()
                 return True

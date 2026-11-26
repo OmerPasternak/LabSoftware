@@ -10,7 +10,8 @@ from typing import Callable
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from hhg_control.tc_motor.drivers.base import MotorError, MotorLimits
+from hhg_control.tc_motor.drivers.base import MotorError, MotorLimits, MotorSafetyError
+from hhg_control.tc_motor.drivers.labview_inspection import LABVIEW_INSPECTION, LabviewInspectionMotor
 
 
 @dataclass(frozen=True)
@@ -49,7 +50,11 @@ def create_sequencer(settings: ConnectionSettings):
     if settings.mode != "Physical":
         raise ValueError("Unknown motor mode.")
     if not settings.resource.strip():
-        raise ValueError("Enter the explicit VISA serial resource before connecting.")
+        raise ValueError("Enter the COM port before connecting.")
+    if settings.transport == LABVIEW_INSPECTION:
+        if settings.profile_path.strip():
+            raise MotorSafetyError("Clear the safety profile to use LabVIEW VISA inspection.")
+        return MotorSequencer(LabviewInspectionMotor(settings.resource.strip(), axis=settings.axis))
     from hhg_control.tc_motor.drivers.smc100 import SMC100Motor, SafetyProfile
 
     profile = (
@@ -95,6 +100,7 @@ class MotorWorker(QThread):
         self._busy = False
         self._stop_generation = 0
         self._poll_faulted = False
+        self._logged_inspection_recovery = False
 
     @property
     def is_busy(self) -> bool:
@@ -184,9 +190,10 @@ class MotorWorker(QThread):
                 self.activity.emit("Serial transport: " + args[0].transport)
             seq = self._factory(args[0])
             self._connection_settings = args[0]
+            self._logged_inspection_recovery = False
             with self._condition:
                 self._sequencer = seq
-                if self._cancel.is_set():
+                if self._cancel.is_set() and (not seq.query_only or self._pending_disconnect or self._pending_stop):
                     seq.request_stop()
             self.info_ready.emit(seq.connect())
             self.status_ready.emit(seq.snapshot())
@@ -197,7 +204,10 @@ class MotorWorker(QThread):
                     self.activity.emit("Inspected native controller settings: " + repr(settings))
         elif operation == "disconnect":
             released_unverified = False
+            message = "Stopped and disconnected."
             if self._sequencer is not None:
+                if self._sequencer.query_only:
+                    message = "Inspection port disconnected."
                 released_unverified = self._sequencer.disconnect()
                 self._sequencer = None
                 self._connection_settings = None
@@ -205,7 +215,7 @@ class MotorWorker(QThread):
             self._publish_connection()
             self.cleanup_done.emit(True, (
                 "Inspection port released after serial fault; current standstill was not reconfirmed."
-                if released_unverified else "Stopped and disconnected."
+                if released_unverified else message
             ))
             return self._shutdown_on_disconnect
         elif operation == "release_after_manual_verification":
@@ -267,6 +277,11 @@ class MotorWorker(QThread):
             self.activity.emit("Move complete; motor is stationary.")
         else:
             raise ValueError(f"Unknown operation: {operation}")
+        if self._sequencer is not None and not self._logged_inspection_recovery:
+            recovery = getattr(self._sequencer.driver, "recovered_exchange", None)
+            if recovery is not None:
+                self._logged_inspection_recovery = True
+                self.activity.emit("Inspection recovered on a fresh session: " + recovery["error"])
         self._publish_connection()
         return False
 
@@ -300,7 +315,9 @@ class MotorWorker(QThread):
                 self.error.emit(message)
                 if operation == "disconnect":
                     self._shutdown_on_disconnect = False
-                    self.cleanup_done.emit(False, "Disconnect/stop unconfirmed: " + message)
+                    prefix = ("Inspection port close failed: " if self._sequencer is not None
+                              and self._sequencer.query_only else "Disconnect/stop unconfirmed: ")
+                    self.cleanup_done.emit(False, prefix + message)
                 self._publish_connection()
             finally:
                 with self._condition:

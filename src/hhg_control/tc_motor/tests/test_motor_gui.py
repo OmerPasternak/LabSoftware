@@ -10,7 +10,9 @@ from PyQt6.QtCore import QTimer, Qt
 from hhg_control.tc_motor.gui.motor_panel import MotorPanel
 from hhg_control.tc_motor.gui.workers import ConnectionSettings, MotorWorker
 from hhg_control.tc_motor.drivers.base import MotorError, MotorLimits
+from hhg_control.tc_motor.drivers.labview_inspection import LABVIEW_INSPECTION, LabviewInspectionMotor
 from hhg_control.tc_motor.drivers.mock import MockMotor
+from hhg_control.tc_motor.drivers.serial_framing import InvalidSerialBytes
 from hhg_control.tc_motor.drivers.smc100 import SafetyProfile, SMC100Motor
 from hhg_control.tc_motor.sequencer import MotorSequencer
 
@@ -335,6 +337,123 @@ def test_inspection_serial_fault_pauses_polling_and_closes_without_stop(qtbot, m
     assert not any(command.startswith(("1ST", "1PA")) for command in serial.commands)
     panel.close()
     qtbot.waitUntil(lambda: not panel.worker.isRunning())
+
+
+def test_labview_inspection_recovers_once_and_then_pauses(qtbot, motor_window, monkeypatch):
+    from hhg_control.tc_motor.drivers import labview_inspection
+
+    frame = "b1 d5 05 82 82 82 9a 9a 6a 0a"
+
+    class InspectionPeer(SyntheticSerial):
+        opens = 0
+        last_exchange = {}
+
+        def open(self):
+            self.opens += 1
+            super().open()
+
+        def query(self, text):
+            if text == "1TS" and self.corrupt_position:
+                self.commands.append(text)
+                self.corrupt_position = False
+                self.last_exchange = {"command": text, "rx_hex": frame}
+                raise InvalidSerialBytes(f"RX hex={frame}")
+            return super().query(text)
+
+        def write(self, text):
+            pytest.fail(f"Query-only inspection must not dispatch {text}")
+
+    peer = InspectionPeer()
+    monkeypatch.setattr(labview_inspection, "LabviewInspectionTransport", lambda _: peer)
+    monkeypatch.setattr(LabviewInspectionMotor, "FAULT_QUIET_S", 0)
+    monkeypatch.setattr(LabviewInspectionMotor, "SNAPSHOTS_PER_WINDOW", 2)
+    panel = motor_window()
+    panel.poll_timer.setInterval(60_000)
+    panel.mode_combo.setCurrentText("Physical")
+    panel.transport_combo.setCurrentIndex(panel.transport_combo.findData(LABVIEW_INSPECTION))
+    qtbot.mouseClick(panel.connect_button, Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: panel._connection.connected and not panel.worker.is_busy)
+    assert peer.opens == 1 and not panel.move_button.isEnabled() and not panel.stop_button.isEnabled()
+
+    for _ in range(2):
+        assert panel.worker.submit("snapshot")
+        qtbot.waitUntil(lambda: not panel.worker.is_busy)
+    assert peer.opens == 2
+    assert peer.commands[-4:] == ["1VE", "1ZX?", "1TS", "1TP"]
+
+    peer.corrupt_position = True
+    peer.responses["TP"] = "2.125"
+    assert panel.worker.submit("snapshot")
+    qtbot.waitUntil(lambda: "Inspection recovered on a fresh session:" in panel.log.toPlainText())
+    assert peer.opens == 3 and "2.125000 controller units" in panel.position_label.text()
+    assert frame in panel.log.toPlainText()
+    qtbot.waitUntil(lambda: not panel.worker.is_busy)
+
+    peer.corrupt_position = True
+    assert panel.worker.submit("snapshot")
+    qtbot.waitUntil(lambda: panel._connection.communication_uncertain and not panel.worker.is_busy)
+    assert peer.opens == 3 and not panel.poll_timer.isActive()
+    assert "Position unknown" in panel.position_label.text()
+    assert not panel.worker.submit("snapshot")
+    qtbot.mouseClick(panel.disconnect_button, Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: not panel._connection.has_session and not panel.worker.is_busy)
+    assert peer.closed
+    qtbot.mouseClick(panel.connect_button, Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: panel._connection.connected and not panel.worker.is_busy)
+    assert peer.opens == 4 and panel.poll_timer.isActive()
+    panel.close()
+    qtbot.waitUntil(lambda: not panel.worker.isRunning())
+    assert peer.closed and not panel.isVisible()
+
+
+def test_disconnect_interrupts_labview_inspection_recovery(qtbot, motor_window, monkeypatch):
+    peer = SyntheticSerial()
+    driver = LabviewInspectionMotor("COM21", transport_factory=lambda: peer)
+    entered_recovery = threading.Event()
+    wait = driver._wait_for_clean_window
+    original_query = peer.query
+
+    def query(command):
+        if command == "1TP" and peer.corrupt_position:
+            raise InvalidSerialBytes("synthetic corrupt frame")
+        return original_query(command)
+
+    def wait_for_cancel():
+        entered_recovery.set()
+        wait()
+
+    monkeypatch.setattr(peer, "query", query)
+    monkeypatch.setattr(driver, "_wait_for_clean_window", wait_for_cancel)
+    monkeypatch.setattr(driver, "FAULT_QUIET_S", 10)
+    panel = motor_window(lambda _: MotorSequencer(driver))
+    panel.poll_timer.setInterval(60_000)
+    panel.mode_combo.setCurrentText("Physical")
+    panel.transport_combo.setCurrentIndex(panel.transport_combo.findData(LABVIEW_INSPECTION))
+    qtbot.mouseClick(panel.connect_button, Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: panel._connection.connected and not panel.worker.is_busy)
+    peer.corrupt_position = True
+    assert panel.worker.submit("snapshot")
+    qtbot.waitUntil(entered_recovery.is_set)
+    commands = list(peer.commands)
+    panel.close()
+    qtbot.waitUntil(lambda: not panel.worker.isRunning(), timeout=2000)
+    assert peer.closed and peer.commands == commands
+
+
+def test_labview_inspection_renewal_refuses_changed_identity(monkeypatch):
+    peer = SyntheticSerial()
+    driver = LabviewInspectionMotor("COM21", transport_factory=lambda: peer)
+    seq = MotorSequencer(driver)
+    monkeypatch.setattr(driver, "SNAPSHOTS_PER_WINDOW", 1)
+    seq.connect()
+    seq.snapshot()
+    peer.responses["ZX?"] = "OTHER"
+    begin = len(peer.commands)
+    with pytest.raises(MotorError, match="identity changed"):
+        seq.snapshot()
+    assert driver.communication_uncertain and not driver.motion_enabled
+    assert seq.disconnect() and peer.closed
+    assert peer.commands[begin:] == ["1VE", "1ZX?"]
 
 
 def test_rejected_connect_cleans_session_and_allows_new_attempt(qtbot, motor_window):

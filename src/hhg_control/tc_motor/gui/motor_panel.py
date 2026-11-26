@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
     QSpinBox, QVBoxLayout, QWidget,
 )
 
-from .workers import ConnectionSettings, ConnectionState, MotorWorker, create_sequencer
+from .workers import LABVIEW_INSPECTION, ConnectionSettings, ConnectionState, MotorWorker, create_sequencer
 
 
 class MotorPanel(QWidget):
@@ -76,6 +76,8 @@ class MotorPanel(QWidget):
         self.transport_combo = QComboBox()
         self.transport_combo.addItem("VISA", "visa")
         self.transport_combo.addItem("Direct serial (pySerial)", "serial")
+        self.transport_combo.addItem("VISA (LabVIEW inspection)", LABVIEW_INSPECTION)
+        self.transport_combo.currentIndexChanged.connect(self._mode_changed)
         form.addRow("Physical connection", self.transport_combo)
         self.com_port_spin = QSpinBox()
         self.com_port_spin.setRange(1, 65535)
@@ -168,11 +170,19 @@ class MotorPanel(QWidget):
         self.log.setMinimumHeight(100)
         layout.addWidget(self.log)
 
+    def _uses_labview_inspection(self) -> bool:
+        """Identify the query-only physical connection selected in this window."""
+        return (self.mode_combo.currentText() == "Physical"
+                and self.transport_combo.currentData() == LABVIEW_INSPECTION)
+
     def _mode_changed(self, *_args) -> None:
         """Show explicit mode and prohibit substituting mock limits for physical ones."""
         physical = self.mode_combo.currentText() == "Physical"
         if physical:
             self.banner.setText(
+                "PHYSICAL — LABVIEW VISA INSPECTION. Clear the safety profile to connect. "
+                "This connection can only read the controller."
+                if self._uses_labview_inspection() else
                 "PHYSICAL — connect only to the specified controller. Motion requires a reviewed "
                 "apparatus safety profile and verified mm calibration. No homing or zeroing."
                 if self.profile_edit.text().strip() else
@@ -284,8 +294,12 @@ class MotorPanel(QWidget):
             self.position_label.setText("Position unknown — status read failed")
             self.state_label.setText("Controller state unverified")
             if state.communication_uncertain:
-                self.banner.setText("PHYSICAL — SERIAL FAULT. Motion is locked; use Disconnect or the "
-                                    "physical standstill recovery control.")
+                self.banner.setText(
+                    "PHYSICAL — SERIAL FAULT. Disconnect to release the inspection port."
+                    if self._uses_labview_inspection() else
+                    "PHYSICAL — SERIAL FAULT. Motion is locked; use Disconnect or the "
+                    "physical standstill recovery control."
+                )
         elif state.connected and not self._closing and not self.poll_timer.isActive():
             self.poll_timer.start()
         if state.limits is not None:
@@ -319,7 +333,8 @@ class MotorPanel(QWidget):
         """Display worker progress without filling the log with periodic polling."""
         if message != "Snapshot":
             self.activity_label.setText(message)
-            if message.startswith(("Inspected native controller settings:", "Serial transport:")):
+            if message.startswith(("Inspected native controller settings:", "Serial transport:",
+                                   "Inspection recovered on a fresh session:")):
                 self._append_log(message)
             elif message.startswith("Setup report saved:"):
                 self._append_log(message)
@@ -338,15 +353,17 @@ class MotorPanel(QWidget):
         state = self._connection
         editable = not self._busy and not state.has_session and not self._closing
         physical = self.mode_combo.currentText() == "Physical"
+        inspection = self._uses_labview_inspection()
         for widget in (self.mode_combo, self.transport_combo, self.com_port_spin, self.axis_spin,
                        self.profile_edit, self.profile_button):
             widget.setEnabled(editable and (widget is self.mode_combo or physical))
         self.connect_button.setEnabled(editable)
+        self.disconnect_button.setText("Disconnect" if inspection else "Stop && disconnect")
         self.disconnect_button.setEnabled(state.has_session and not self._closing)
         self.report_button.setEnabled(state.connected and not state.communication_uncertain
                                       and not self._busy and not self._closing)
         self.recovery_button.setVisible(state.connected and state.communication_uncertain
-                                        and self._cleanup_uncertain)
+                                        and self._cleanup_uncertain and not inspection)
         self.recovery_button.setEnabled(not self._busy and not self._closing)
         ready = self._status is not None and self._status.is_ready
         permitted = (state.connected and state.motion_enabled and self._units_verified
@@ -357,9 +374,10 @@ class MotorPanel(QWidget):
             widget.setEnabled(permitted)
         for widget in (self.move_button, self.plus_button, self.minus_button):
             widget.setEnabled(permitted and ready and not self._busy)
-        self.stop_button.setEnabled(state.has_session or self._busy)
+        self.stop_button.setText("STOP unavailable in inspection mode" if inspection else "STOP — keep servo holding")
+        self.stop_button.setEnabled(not inspection and (state.has_session or self._busy))
         self.resume_button.setEnabled(state.connected and self._stop_latched and not self._busy
-                                      and not self._closing and not self._cleanup_uncertain)
+                                      and not inspection and not self._closing and not self._cleanup_uncertain)
 
     def _cleanup_finished(self, success, message) -> None:
         """Only successful safe cleanup allows a requested window close to finish."""
@@ -384,7 +402,8 @@ class MotorPanel(QWidget):
             event.accept()
             return
         event.ignore()
-        if self._cleanup_uncertain and self._connection.communication_uncertain:
+        if (self._cleanup_uncertain and self._connection.communication_uncertain
+                and not self._uses_labview_inspection()):
             self.activity_label.setText(
                 "STOP could not be verified. Check the stage physically, then use the COM release control."
             )
@@ -392,7 +411,8 @@ class MotorPanel(QWidget):
         if not self._closing:
             self._closing = True
             self.poll_timer.stop()
-            self.activity_label.setText("Stopping and disconnecting before closing…")
+            self.activity_label.setText("Disconnecting before closing…" if self._uses_labview_inspection()
+                                        else "Stopping and disconnecting before closing…")
             self._refresh_controls()
             self.worker.request_disconnect(close_window=True)
 

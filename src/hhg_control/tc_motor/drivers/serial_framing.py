@@ -6,6 +6,10 @@ import time
 from .base import MotorError, MotorSafetyError
 
 
+class InvalidSerialBytes(MotorError):
+    """The backend returned bytes outside the SMC100 ASCII frame alphabet."""
+
+
 class FramedSerialTransport:
     """Common request/reply contract for explicit VISA and direct COM sessions."""
 
@@ -49,10 +53,9 @@ class FramedSerialTransport:
     def query(self, command: str) -> str:
         """Validate one ASCII CRLF reply within a receive deadline after bounded pacing.
 
-        Queries are spaced at least 60 ms apart in send time, including after a
-        preceding write. This is a conservative project compatibility guard,
-        not a manufacturer timing specification. STOP writes bypass it. Never
-        retry, mask bytes, discard bad input or accept a short/late read.
+        Queries honor the transport's minimum send spacing, including after a
+        preceding write. This is a project compatibility guard. STOP writes
+        bypass it. Corrupt frames and late replies are rejected without retries.
         """
         if self._session is None:
             raise MotorError("Serial port is not open.")
@@ -98,8 +101,8 @@ class FramedSerialTransport:
                     raise TimeoutError(f"Reply arrived after the {self.timeout_ms} ms deadline.")
                 if not self._valid_read_count(chunk, count):
                     raise MotorError("Serial backend returned an incomplete counted read.")
-                if any(byte > 127 or (byte < 32 and byte not in (10, 13)) for byte in chunk):
-                    raise MotorError("Reply contains non-ASCII or unexpected control bytes.")
+                if any(byte >= 127 or (byte < 32 and byte not in (10, 13)) for byte in chunk):
+                    raise InvalidSerialBytes("Reply contains non-ASCII or unexpected control bytes.")
                 end = received.find(b"\r\n")
                 if end < 0:
                     continue
@@ -110,7 +113,8 @@ class FramedSerialTransport:
                 return bytes(received[:-2]).decode("ascii")
         except Exception as exc:
             failure = str(exc)
-            raise MotorError(f"Serial exchange {command!r} failed: {exc} "
+            error_type = InvalidSerialBytes if isinstance(exc, InvalidSerialBytes) else MotorError
+            raise error_type(f"Serial exchange {command!r} failed: {exc} "
                              f"[resource={self.resource}; RX hex={received.hex(' ') or '<none>'}]") from exc
         finally:
             after = {}

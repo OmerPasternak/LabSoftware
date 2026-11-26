@@ -12,6 +12,7 @@ class LabviewReferenceTransport(VisaSerialTransport):
     FIRST_POLL_DELAY_S = 0.100
     QUERY_GAP_S = 0.130
     FLUSH_ON_OPEN = False
+    ALLOWED_QUERIES = frozenset({"TS", "TP"})
 
     def _configure_receive(self, constants) -> str:
         """Reproduce the observed CR split without purging the receive buffer."""
@@ -33,7 +34,8 @@ class LabviewReferenceTransport(VisaSerialTransport):
         )
 
     def write(self, command: str) -> None:
-        """Allow only addressed status and position queries on this transport."""
-        if not re.fullmatch(r"(?:[1-9]|[12][0-9]|3[01])(?:TS|TP)", command):
-            raise MotorSafetyError("The LabVIEW reference accepts only addressed TS and TP queries.")
+        """Enforce the transport's addressed query allowlist on every write."""
+        match = re.fullmatch(r"(?:[1-9]|[12][0-9]|3[01])([A-Z]{2}\??)", command)
+        if match is None or match[1] not in self.ALLOWED_QUERIES:
+            raise MotorSafetyError("This VISA mode accepts only its documented read queries.")
         super().write(command)

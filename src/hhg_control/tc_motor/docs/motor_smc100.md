@@ -46,7 +46,54 @@ termination-enable attributes, so the explicit VISA end mode is an
 inference from the observed read split. The other VISA and Direct serial
 modes read raw chunks without CR termination and start checking after
 10 ms, with a 60 ms minimum send gap and an input flush at open. The
-reference check compares those behaviors without changing GUI defaults.
+reference check compares those behaviors.
+
+### Recovery through the motor GUI
+
+The two-minute reference run on COM21 stopped after 20.203 seconds. Its 77
+complete snapshots had status `000033` and position `-0.00000` in controller
+units. Its valid replies showed the same CR/LF split as the LabVIEW capture.
+The failed TS reply was `b1 d5 05 82 82 82 9a 9a 6a 0a`, identical to the
+failed reply from the longer direct serial test. Starting at the last three
+zero digits, each damaged byte through CR equals the corresponding clean byte
+shifted left three bits, truncated to eight bits, with the low bits set to
+`010`. The GUI's damaged position reply shows the same pattern. This is
+consistent with a serial receiver sampling across character boundaries. It
+does not identify which component caused the slip. The original bytes are
+rejected and retained. The program never tries to reverse that shift.
+
+The successful replies make a fixed baud, parity, or terminator mismatch
+unlikely. Reproducing the fault with direct COM and with the reference VISA
+read takes the GUI, VISA alone, and the Python text decoder out of the
+required failure path. The raw data still allow a fault in the Windows
+serial driver, the adapter, electrical signaling, or the controller's
+transmit path. The two captured LabVIEW sessions only contained 20 query
+replies in total. They prove the instrument worked in those sessions, and
+give us a short-session pattern to test on the same hardware.
+
+Use **Physical → VISA (LabVIEW inspection)** with COM **21**, axis **1**, and
+a blank profile. This mode uses the reference read timing and opens a new
+exclusive VISA session after eight successful status/position reads while
+stationary. Each new window checks controller identity before publishing
+another position. The first corrupt-byte failure may be followed by one
+fresh connection or one fresh snapshot on the same backend, after a 300 ms
+quiet period. It logs the original error and raw bytes if it recovers.
+A second corrupt reply pauses polling. Timeouts, serial configuration drift,
+and unverified device changes also fail closed. A failed close blocks renewal.
+Disconnecting releases the inspection port without sending
+STOP, since this mode cannot command motion. Leave the controller powered
+and use its existing coordinates.
+
+For lab validation, watch the position for at least two minutes and record
+any “Inspection recovered on a fresh session” or serial fault message.
+Save the setup report while connected to include the number of session
+renewals and details of any recovered exchange. If polling pauses, retain
+the log and disconnect. Success would establish reliable readback for that
+observation, but still requires separate motion validation. If the same
+error recurs after a fresh reopen, compare a longer known-good LabVIEW
+trace for the same port and workload, or compare a different USB port or
+known-good RS-232 adapter if accessible. Keep the controller powered during
+the comparison.
 The second check is cancelled if the first port cannot be released.
 The console stays visible and names
 the JSON file saved under `tc_motor/reports/`, including when communication fails.
