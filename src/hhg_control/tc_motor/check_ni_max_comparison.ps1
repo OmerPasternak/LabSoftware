@@ -1,6 +1,7 @@
 param(
     [ValidateRange(1, 65535)][int]$Port = 21,
-    [switch]$Physical
+    [switch]$Physical,
+    [switch]$LockAfterOpen
 )
 
 $ErrorActionPreference = 'Stop'
@@ -18,6 +19,9 @@ public static class TcMotorNativeVisa {
     [DllImport("visa32.dll", ExactSpelling = true, CharSet = CharSet.Ansi)]
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     public static extern int viOpen(uint manager, string resource, uint access, uint timeout, out uint session);
+    [DllImport("visa32.dll", ExactSpelling = true)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    public static extern int viLock(uint session, uint lockType, uint timeout, IntPtr requestedKey, IntPtr accessKey);
     [DllImport("visa32.dll", ExactSpelling = true)]
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     public static extern int viSetAttribute(uint session, uint attribute, UIntPtr value);
@@ -42,10 +46,14 @@ public static class TcMotorNativeVisa {
             @{ code = $code; handle = $handle }
         }
         Open = {
-            param($manager, $resource)
+            param($manager, $resource, [uint32]$accessMode, [uint32]$timeoutMs)
             [uint32]$handle = 0
-            $code = [TcMotorNativeVisa]::viOpen($manager, $resource, 1, 300, [ref]$handle)
+            $code = [TcMotorNativeVisa]::viOpen($manager, $resource, $accessMode, $timeoutMs, [ref]$handle)
             @{ code = $code; handle = $handle }
+        }
+        Lock = {
+            param($handle)
+            [TcMotorNativeVisa]::viLock($handle, 1, 300, [IntPtr]::Zero, [IntPtr]::Zero)
         }
         Set = {
             param($handle, $attribute, $value)
@@ -167,9 +175,12 @@ function Save-NiMaxReport($Report, [string]$OutputPath) {
 }
 
 function Invoke-NiMaxComparison($Api, [int]$PortNumber, [string]$OutputPath,
-                                [int]$StatusReads = 20, [int]$Windows = 20, [int]$GapMs = 1000) {
+                                [int]$StatusReads = 20, [int]$Windows = 20, [int]$GapMs = 1000,
+                                [switch]$LockAfterOpen) {
     # The only instrument writes are the fixed TS and TP queries below.
     $resource = "ASRL${PortNumber}::INSTR"
+    $accessMode = if ($LockAfterOpen) { 0 } else { 1 }
+    $openTimeoutMs = if ($LockAfterOpen) { 0 } else { 300 }
     $report = [ordered]@{
         report_type = 'tc_motor_native_visa_comparison'
         schema_version = 1
@@ -178,6 +189,8 @@ function Invoke-NiMaxComparison($Api, [int]$PortNumber, [string]$OutputPath,
         axis = 1
         process_bits = [IntPtr]::Size * 8
         query_gap_ms = $GapMs
+        visa_open = @{ access_mode = $accessMode; timeout_ms = $openTimeoutMs
+                       lock_after_open = [bool]$LockAfterOpen; exclusive_during_io = $true }
         settings = @{ baud = 57600; data_bits = 8; parity = 'none'; stop_bits = 1
                       flow_control = 'XON/XOFF'; timeout_ms = 300 }
         runs = [Collections.Generic.List[object]]::new()
@@ -220,9 +233,14 @@ function Invoke-NiMaxComparison($Api, [int]$PortNumber, [string]$OutputPath,
                 $row = $null
                 $stage = 'open'
                 try {
-                    $opened = & $Api.Open $manager $resource
-                    Assert-VisaSuccess $opened.code 'Open exclusive COM session'
+                    $opened = & $Api.Open $manager $resource $accessMode $openTimeoutMs
+                    Assert-VisaSuccess $opened.code 'Open COM session'
                     $handle = $opened.handle
+                    if ($LockAfterOpen) {
+                        # Keep all configuration and I/O behind the same exclusive lock as the baseline.
+                        $stage = 'lock'
+                        Assert-VisaSuccess (& $Api.Lock $handle) 'Acquire exclusive VISA lock'
+                    }
                     $stage = 'configure'
                     Set-SessionAttributes $Api $handle $phase.counted
                     $stage = 'query'
@@ -295,7 +313,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     $output = Join-Path $folder "TC_motor_native_visa_${stamp}.json"
     Write-Host "Query-only comparison on COM$Port, axis 1. Allow up to about seven minutes."
     try {
-        $result = Invoke-NiMaxComparison $null $Port $output
+        $result = Invoke-NiMaxComparison $null $Port $output -LockAfterOpen:$LockAfterOpen
         if ($result.error) { Write-Host $result.error }
         if ($result.manager_cleanup_error) { Write-Host $result.manager_cleanup_error }
         Write-Host "Report saved: $output"

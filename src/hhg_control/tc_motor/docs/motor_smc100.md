@@ -61,6 +61,94 @@ contains raw bytes, timestamps, read sizes, VISA return codes, and cleanup
 results. The test stops at the first failure and records any session-close
 error. This check does not qualify the link for motion.
 
+### COM21 corruption and VISA session comparison
+
+The 2026-11-26 native report `TC_motor_native_visa_20261126T1328517291186Z.json`
+ran on `ASRL21::INSTR`, address 1, with a nominal 1 s send gap. It used 64-bit
+Windows PowerShell and the system VISA Shared Components DLL (`7.2.7619.0`,
+the shared DLL file version). The diagnostic ran independently of the Python
+driver, GUI, and text decoder.
+
+| Test on the original COM21 path | Result |
+| --- | --- |
+| NI MAX Basic I/O, manually paced | 20 clean `1TS` replies |
+| Python comprehensive test, standard VISA and direct Windows COM | Corrupt `1TP` after 30 and 134 valid replies respectively |
+| Python comprehensive test, counted VISA reads at 130 ms and 1 s | Corrupt `1TS` after 101 and 5 valid replies respectively |
+| Native VISA, status-only LF | 20 clean `1TS` replies |
+| Native VISA, mixed LF | 128 valid replies across 12 complete sessions and part of session 13, then corrupt `1TS` at 149.220 s |
+
+The native failure returned `99 D5 05 82 82 82 9A 9A 6A 0A`, byte for byte
+the same as the slow counted Python failure. Direct Windows COM recorded the
+same TS corruption pattern with a different first byte in a separate run.
+The clean native TS frame was `31 54 53 30 30 30 30 33 33 0D 0A`
+(`1TS000033` plus CRLF). The native mixed run generally completed each
+exchange in 8–9 ms. The bad exchange took 38 ms. Both native calls reported
+`0x00000000`, with five bytes written and ten bytes read out of 64 requested.
+VISA reported completion of byte I/O. The raw reply failed the SMC100 frame
+check. The native test closed the port and skipped the counted follow-up.
+
+The native capture rules out a Python decoder as the source of those RX
+bytes. The current priority is to compare the software call paths on the
+existing lab setup. The following differences remain after matching the
+command bytes and baud settings.
+
+- **Session open.** Both COM21 `VISA Open` records in `Capture.nitrace`
+  (file offsets `0x5861` and `0xC178`) have duplicate session `1`, access
+  mode `0` and open timeout `0`. The native diagnostic and Python VISA
+  driver instead request access mode `1` and a 300 ms open timeout. Mode
+  `1` acquires the VISA exclusive lock during open. This is a confirmed
+  difference in host initialization, with a possible effect on the order
+  Windows opens and configures the resource. The VISA lock's documented
+  purpose is access control. A causal effect on readback is unverified.
+  [NI VISA Open reference](https://www.ni.com/docs/en-US/bundle/labview-api-ref/page/functions/visa-open.html)
+  and [NI viOpen reference](https://www.ni.com/docs/en-US/bundle/ni-visa-api-ref/page/ni-visa-api-ref/viopen.html).
+- **I/O mode.** All current native and PyVISA `viRead`/`viWrite` calls are
+  synchronous. NI documents that LabVIEW VISA nodes default to asynchronous
+  I/O. The capture labels the LabVIEW nodes `VISA Read` and `VISA Write`
+  and does not identify their underlying native call. Direct pySerial
+  already uses overlapped Windows I/O, so any async hypothesis is specific
+  to the VISA implementation path. [NI note on the defaults](https://knowledge.ni.com/KnowledgeArticleDetails?id=kA03q0000019jYeCAI).
+- **Receive loop and controller state.** Each of the 20 legacy replies
+  used the same sequence after writing the query: get timeout, get term
+  character, get available count, read through CR, get available count,
+  read LF, and get available count again. The reference diagnostic imitates
+  the split and polling delay but differs in the order of these calls and
+  writes extra termination attributes. Each captured legacy session also
+  started with a move. All 16 captured legacy `TS` replies were `000028`
+  (MOVING); the valid native `TS` replies were all `000033` (READY from
+  MOVING). That can affect reply content and firmware timing. The diagnostic
+  stays stationary and never replays the moves.
+
+**Test the open sequence.** Use the same lab PC, port, and adapter with the
+stage stationary and the controller powered. Close other applications using
+COM21. From the `src\hhg_control\tc_motor` folder run this in PowerShell.
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\check_ni_max_comparison.ps1 -Physical -Port 21 -LockAfterOpen
+```
+
+`-LockAfterOpen` uses `viOpen` with mode `0` and timeout `0`, then calls
+`viLock` for exclusive access before setting attributes or sending any
+query. A failed lock closes the session and stops. This tests the change
+in initialization order while retaining an exclusive lock for all I/O.
+The legacy trace contains no explicit VISA lock call, so this experiment
+covers the open path without reproducing its lock policy.
+
+The existing VBS launcher still runs the lock-at-open baseline. Each run
+logs its `visa_open` parameters in the same timestamped JSON format. Compare
+the mixed LF phase across both reports using the same workload and nominal
+1 s spacing. If only the lock-at-open runs reproduce the fault, repeat the
+pair before attributing it to the open path. If both fail with the same
+signature, deprioritize this open-sequence difference. An open or lock
+error establishes no communication result. The next one-variable VISA
+comparison would hold the open mode and framing fixed while switching
+synchronous versus asynchronous calls.
+
+The diagnostic sends only `1TS` and `1TP`, with no motion, STOP, homing, zero,
+or controller configuration commands. `TS` reads and clears the controller
+error buffer. A passing run qualifies readback only for this workload.
+[Newport SMC100 manual, TS command](https://www.newport.com/medias/sys_master/resources/hb8/he4/9966292729886/SMC100CC%20and%20SMC100PP%20-%20User%20Manual/SMC100CC-and-SMC100PP-User-Manual.pdf).
+
 ### What the LabVIEW trace showed
 
 The two captured COM21 sessions opened and closed separately. The VISA
@@ -136,10 +224,9 @@ Save the setup report while connected to include the number of session
 renewals and details of any recovered exchange. If polling pauses, retain
 the log and disconnect. Success would establish reliable readback for that
 observation, but still requires separate motion validation. If the same
-error recurs after a fresh reopen, compare a longer known-good LabVIEW
-trace for the same port and workload, or compare a different USB port or
-known-good RS-232 adapter if accessible. Keep the controller powered during
-the comparison.
+error recurs after a fresh reopen, use the
+[VISA session comparison](#com21-corruption-and-visa-session-comparison)
+on the existing COM21 setup.
 The second check is cancelled if the first port cannot be released.
 The console stays visible and names
 the JSON file saved under `tc_motor/reports/`, including when communication fails.

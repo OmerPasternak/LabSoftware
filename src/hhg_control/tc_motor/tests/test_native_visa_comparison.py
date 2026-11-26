@@ -25,22 +25,36 @@ $null = New-NiVisaApi  # Compile the real binding without opening any session.
 $api = @{
     Manager = { @{ code = 0; handle = 100 } }
     Open = {
-        param($manager, $resource)
+        param($manager, $resource, $accessMode, $timeoutMs)
         if ($manager -ne 100 -or $resource -ne 'ASRL21::INSTR' -or $wire.open) {
             throw 'Unexpected resource or overlapping sessions'
         }
+        $expectedMode = if ($lockAfterOpen) { 0 } else { 1 }
+        $expectedTimeout = if ($lockAfterOpen) { 0 } else { 300 }
+        if ($accessMode -ne $expectedMode -or $timeoutMs -ne $expectedTimeout) {
+            throw 'Unexpected VISA open arguments'
+        }
         $wire.open = $true
+        $wire.locked = $accessMode -eq 1
         @{ code = 0; handle = 200 }
+    }
+    Lock = {
+        param($handle)
+        if (-not $wire.open -or $wire.locked -or $handle -ne 200) { throw 'Unexpected lock request' }
+        if ($case -eq 'lock_fault') { return -1 }
+        $wire.locked = $true
+        0
     }
     Set = {
         param($handle, $attr, $value)
+        if (-not $wire.locked) { throw 'Configuration before exclusive lock' }
         if ($attr -eq 0x3FFF0018) { $wire.term = $value }
         0
     }
     Available = { $wire.rx.Count }
     Write = {
         param($handle, [byte[]]$bytes)
-        if (-not $wire.open -or $handle -ne 200 -or $wire.rx.Count) {
+        if (-not $wire.open -or -not $wire.locked -or $handle -ne 200 -or $wire.rx.Count) {
             throw 'Unexpected write'
         }
         $command = [Text.Encoding]::ASCII.GetString($bytes)
@@ -80,9 +94,10 @@ $api = @{
     }
 }
 
-foreach ($case in @('success', 'lf_fault', 'counted_fault', 'close_fault')) {
+foreach ($case in @('success', 'lf_fault', 'counted_fault', 'close_fault', 'locked_after_open', 'lock_fault')) {
     $wire = @{ open = $false; rx = [Collections.Generic.List[byte]]::new() }
-    $null = Invoke-NiMaxComparison $api 21 (Join-Path $Folder "$case.json") 2 1 0
+    $lockAfterOpen = $case -in @('locked_after_open', 'lock_fault')
+    $null = Invoke-NiMaxComparison $api 21 (Join-Path $Folder "$case.json") 2 1 0 -LockAfterOpen:$lockAfterOpen
 }
 """,
         encoding="utf-8",
@@ -103,6 +118,7 @@ foreach ($case in @('success', 'lf_fault', 'counted_fault', 'close_fault')) {
 
     clean = report("success")
     assert clean["ok"] and clean["port_released"]
+    assert clean["visa_open"]["access_mode"] == 1
     baseline, mixed, counted = clean["runs"]
     assert [run["name"] for run in clean["runs"]] == [
         "status_only_lf", "mixed_lf", "mixed_counted_cr",
@@ -134,3 +150,15 @@ foreach ($case in @('success', 'lf_fault', 'counted_fault', 'close_fault')) {
     assert not close_fault["port_released"] and not close_fault["ok"]
     assert close_fault["follow_up"].startswith("skipped")
     assert "Close COM session" in close_fault["runs"][0]["cleanup_error"]
+
+    deferred = report("locked_after_open")
+    assert deferred["ok"] and deferred["port_released"]
+    assert deferred["visa_open"]["access_mode"] == deferred["visa_open"]["timeout_ms"] == 0
+    assert deferred["visa_open"]["lock_after_open"]
+    assert [run["valid_replies"] for run in deferred["runs"]] == [2, 10, 10]
+
+    lock_fault = report("lock_fault")
+    assert lock_fault["port_released"] and not lock_fault["ok"]
+    assert lock_fault["runs"][0]["failure_stage"] == "lock"
+    assert lock_fault["runs"][0]["exchanges"] == []
+    assert "manager_cleanup_error" not in lock_fault
