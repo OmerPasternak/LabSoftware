@@ -36,6 +36,31 @@ omit flags, and pySerial's read also clears flags. This report cannot measure
 the signal on the cable, establish safe motion, or identify every electrical
 cause. All checks preserve the existing coordinate reference.
 
+### Automated NI MAX comparison
+
+Close NI MAX, TC motor, and any other program using the port. Double-click
+`check_ni_max_comparison.vbs`, enter **21**, and wait for the PowerShell window
+to print the report path. The test uses the installed VISA library directly
+and takes up to about seven minutes. It sends only `1TS` (status) and `1TP`
+(position). It preserves the coordinate reference and controller settings.
+
+1. The launcher begins with 20 status queries using the same synchronous
+   Write/Read sequence as NI MAX Basic I/O, with LF termination and a 64-byte
+   read. If that passes, it uses the same read procedure for 20 sessions of
+   10 mixed status and position queries each.
+2. If both LF runs pass, it repeats the mixed workload using the same VISA
+   library, port, and one-second query spacing. This run waits 100 ms, asks
+   how many bytes are available, and reads through CR then LF. This matches
+   the receive procedure in the Python reference diagnostic.
+
+Send the `reports/TC_motor_native_visa_*.json` file. A malformed LF reply
+reproduces the issue without Python. A failure only in the counted run
+implicates the receive procedure or its timing under these conditions.
+Clean runs establish read-only communication for this workload. The report
+contains raw bytes, timestamps, read sizes, VISA return codes, and cleanup
+results. The test stops at the first failure and records any session-close
+error. This check does not qualify the link for motion.
+
 ### What the LabVIEW trace showed
 
 The two captured COM21 sessions opened and closed separately. The VISA

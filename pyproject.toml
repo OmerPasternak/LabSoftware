@@ -41,7 +41,7 @@ where = ["src"]
 include = ["hhg_control*"]
 
 [tool.setuptools.package-data]
-"hhg_control.tc_motor" = ["docs/*.md", "docs/*.json", "run_TC_motor.bat", "*.vbs"]
+"hhg_control.tc_motor" = ["docs/*.md", "docs/*.json", "run_TC_motor.bat", "*.vbs", "*.ps1"]
 "hhg_control.hhg_analysis" = ["*.bat", "*.vbs", "*.txt", "docs/*.md", "matlab/*.m", "matlab/*.json", "matlab/active/*", "matlab/reference/*", "matlab/colourmaps/*"]
 
 [tool.pytest.ini_options]
