@@ -20,6 +20,9 @@ from .drivers.direct_serial import DirectSerialTransport
 from .reporting import save_setup_report
 
 
+MAX_DURATION_S = 600
+
+
 def inspect_serial_link(transport, *, axis: int = 1, duration_s: float = 30.0,
                         interval_s: float = 0.5) -> dict:
     """Inspect one explicit axis for up to duration_s seconds, with no retries.
@@ -31,8 +34,8 @@ def inspect_serial_link(transport, *, axis: int = 1, duration_s: float = 30.0,
     """
     if type(axis) is not int or not 1 <= axis <= 31:
         raise ValueError("Controller address must be 1–31.")
-    if not 1 <= duration_s <= 120 or not 0.05 <= interval_s <= 5:
-        raise ValueError("Use 1–120 seconds and a 0.05–5 second polling interval.")
+    if not 1 <= duration_s <= MAX_DURATION_S or not 0.05 <= interval_s <= 5:
+        raise ValueError(f"Use 1–{MAX_DURATION_S} seconds and a 0.05–5 second polling interval.")
     report = {
         "schema_version": 1,
         "report_type": "tc_motor_serial_link_check",
@@ -122,8 +125,8 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if not args.physical:
         parser.error("No port opened. Add --physical to authorize this query-only check.")
-    if args.port <= 0 or not 1 <= args.axis <= 31 or not 1 <= args.duration <= 120:
-        parser.error("Use a positive COM number, axis 1–31, and duration 1–120 seconds.")
+    if args.port <= 0 or not 1 <= args.axis <= 31 or not 1 <= args.duration <= MAX_DURATION_S:
+        parser.error(f"Use a positive COM number, axis 1–31, and duration 1–{MAX_DURATION_S} seconds.")
     output = args.output or (Path(__file__).resolve().parent / "reports" /
                             ("TC_motor_serial_check_" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + ".json"))
     output.parent.mkdir(parents=True, exist_ok=True)

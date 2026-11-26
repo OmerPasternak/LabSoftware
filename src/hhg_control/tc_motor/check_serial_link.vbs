@@ -1,6 +1,6 @@
 Option Explicit
 
-Dim shell, files, folder, launcher, port, pattern, command, comspec
+Dim shell, files, folder, launcher, port, pattern, command, comspec, mode, choice
 Set shell = CreateObject("WScript.Shell")
 Set files = CreateObject("Scripting.FileSystemObject")
 folder = files.GetParentFolderName(WScript.ScriptFullName)
@@ -11,7 +11,7 @@ If Not files.FileExists(launcher) Then
 End If
 
 If WScript.Arguments.Count = 0 Then
-    port = InputBox("Close LabVIEW and TC motor first. Enter the COM number. VISA and Direct serial are checked separately for up to 30 seconds each (no motion).", "TC motor link check", "21")
+    port = InputBox("Close LabVIEW and TC motor first. Enter the COM number, then choose the diagnostic to run.", "TC motor link check", "21")
 Else
     port = WScript.Arguments(0)
 End If
@@ -23,7 +23,19 @@ If Not pattern.Test(port) Then
     WScript.Quit 1
 End If
 
+mode = "check-link"
+If WScript.Arguments.Count = 0 Then
+    choice = MsgBox("Yes: 10-minute Direct serial check." & vbCrLf & _
+        "No: short VISA versus Direct serial comparison." & vbCrLf & _
+        "Both checks only read controller information.", vbYesNoCancel + vbQuestion, "Choose TC motor link check")
+    If choice = vbCancel Then WScript.Quit 0
+    If choice = vbYes Then mode = "check-link-extended"
+ElseIf WScript.Arguments.Count = 2 Then
+    If WScript.Arguments(1) <> "extended" Then WScript.Quit 1
+    mode = "check-link-extended"
+End If
+
 comspec = shell.ExpandEnvironmentStrings("%ComSpec%")
-command = Chr(34) & comspec & Chr(34) & " /d /c " & Chr(34) & Chr(34) & launcher & Chr(34) & " check-link " & port & Chr(34)
+command = Chr(34) & comspec & Chr(34) & " /d /c " & Chr(34) & Chr(34) & launcher & Chr(34) & " " & mode & " " & port & Chr(34)
 ' Keep the bounded diagnostic and its report path visible; do not start the GUI.
 shell.Run command, 1, False

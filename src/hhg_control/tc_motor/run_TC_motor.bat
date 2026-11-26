@@ -10,12 +10,19 @@ if not exist ".venv\Scripts\python.exe" (
 set "PYTHONPATH=%CD%\src"
 if /I "%~1"=="setup" goto setup
 if /I "%~1"=="check-link" goto check_link
+if /I "%~1"=="check-link-extended" goto check_link_extended
 ".venv\Scripts\python.exe" -m hhg_control.tc_motor.gui
 if errorlevel 1 pause
 exit /b
 
 :check_link
 ".venv\Scripts\python.exe" -m hhg_control.tc_motor.check_serial_link --physical --port "%~2" --transport compare
+goto check_link_done
+
+:check_link_extended
+".venv\Scripts\python.exe" -m hhg_control.tc_motor.check_serial_link --physical --port "%~2" --transport serial --duration 600
+
+:check_link_done
 set "check_result=%errorlevel%"
 pause
 exit /b %check_result%

@@ -11,8 +11,12 @@ location; it does not depend on the directory from which it was double-clicked.
 If replacing LabVIEW currently produces a serial decoding error, first close
 LabVIEW and TC motor. Run `setup_physical_mode.vbs` once after pulling the update
 to install pySerial alongside PyVISA. Then double-click `check_serial_link.vbs`
-beside the motor launcher and enter **21**. It uses address 1 and explicitly
-checks VISA, closes its port, then checks Direct serial for up to 30 seconds each.
+beside the motor launcher and enter **21**. It uses address 1. Choose **No**
+for the short comparison, which checks VISA, closes its port, then checks
+Direct serial for up to 30 seconds each. Choose **Yes** to check Direct serial
+only for ten minutes. The console stays open while it collects replies and
+stops the run on the first communication error. If setup already passed in the
+same environment, run the check directly.
 The second check is cancelled if the first port cannot be released.
 The console stays visible and names
 the JSON file saved under `tc_motor/reports/`, including when communication fails.

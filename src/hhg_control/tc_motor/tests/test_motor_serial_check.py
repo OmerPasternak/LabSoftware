@@ -64,6 +64,20 @@ def test_check_is_bounded_and_never_commands_motion_or_configuration(status):
     assert report["transport"]["visa_library"] == "synthetic backend"
 
 
+def test_extended_cli_uses_only_direct_serial_and_saves_full_run(monkeypatch, tmp_path):
+    peer = LinkPeer()
+    monkeypatch.setattr(check, "DirectSerialTransport", lambda resource: peer)
+    monkeypatch.setattr(check, "VisaSerialTransport", lambda resource: pytest.fail("VISA must stay closed"))
+    output = tmp_path / "extended.json"
+    result = check.main(["--physical", "--port", "21", "--transport", "serial",
+                         "--duration", "600", "--output", str(output)])
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert result == 0 and peer.closed and report["port_released"]
+    assert report["requested_transport"] == "serial"
+    assert report["completed_duration_s"] == 600
+    assert report["successful_snapshots"] == 1200
+
+
 @pytest.mark.parametrize('failure', [1])
 def test_failed_link_always_returns_report_closes_and_does_not_retry(failure):
     peer = LinkPeer(fail_at=failure)
