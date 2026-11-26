@@ -119,6 +119,7 @@ def test_vbs_setup_passes_setup_to_own_bat_with_spaces(tmp_path):
 @pytest.mark.parametrize(("options", "mode"), [
     ([], "check-link"), (["extended"], "check-link-extended"),
     (["reference"], "check-link-reference"),
+    (["slow"], "check-link-slow"),
 ])
 def test_vbs_link_check_passes_numeric_com_to_own_bat(tmp_path, options, mode):
     """Run only harmless launcher stubs; a numeric argument avoids InputBox UI."""
@@ -141,6 +142,7 @@ def test_vbs_link_check_passes_numeric_com_to_own_bat(tmp_path, options, mode):
     ("check-link", ["--transport", "compare"]),
     ("check-link-extended", ["--transport", "serial", "--duration", "600", "--gui-inspection"]),
     ("check-link-reference", ["--transport", "labview-reference", "--duration", "120"]),
+    ("check-link-slow", ["--transport", "labview-reference", "--duration", "300", "--query-gap-ms", "1000"]),
 ])
 def test_bat_link_check_uses_project_python_with_spaces(tmp_path, mode, transport_args):
     """No hardware: a stub captures module arguments and interpreter identity."""

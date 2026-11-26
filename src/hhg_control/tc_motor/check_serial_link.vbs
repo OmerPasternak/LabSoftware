@@ -27,21 +27,24 @@ mode = "check-link"
 If WScript.Arguments.Count = 0 Then
     choice = InputBox("1 - Short VISA versus Direct serial comparison" & vbCrLf & _
         "2 - 10-minute Direct serial check using GUI inspection startup" & vbCrLf & _
-        "3 - 2-minute LabVIEW reference check over VISA" & vbCrLf & _
+        "3 - 2-minute reference check over VISA" & vbCrLf & _
+        "4 - 5-minute slower reference check over VISA" & vbCrLf & _
         "All checks only read controller information.", "Choose TC motor link check", "3")
     Select Case choice
         Case "": WScript.Quit 0
         Case "1": mode = "check-link"
         Case "2": mode = "check-link-extended"
         Case "3": mode = "check-link-reference"
+        Case "4": mode = "check-link-slow"
         Case Else
-            MsgBox "Enter 1, 2, or 3.", vbExclamation, "TC motor link check"
+            MsgBox "Enter 1, 2, 3, or 4.", vbExclamation, "TC motor link check"
             WScript.Quit 1
     End Select
 ElseIf WScript.Arguments.Count = 2 Then
     Select Case WScript.Arguments(1)
         Case "extended": mode = "check-link-extended"
         Case "reference": mode = "check-link-reference"
+        Case "slow": mode = "check-link-slow"
         Case Else: WScript.Quit 1
     End Select
 End If

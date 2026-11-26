@@ -22,6 +22,12 @@ same environment, run the check directly. Choose **3** for the two-minute
 LabVIEW reference test over VISA. It sends only TS and TP, and reports each
 received chunk separately.
 
+Choose **4** for a five-minute run of the same reference test with a one-second
+minimum gap between sends. Compare the number of valid exchanges, not just
+elapsed time. If the slower run passes beyond the earlier failure count, that
+supports a timing-dependent effect, but does not prove the link is reliable
+or identify the failing component.
+
 ### What the LabVIEW trace showed
 
 The two captured COM21 sessions opened and closed separately. The VISA

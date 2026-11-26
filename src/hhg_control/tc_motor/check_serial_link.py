@@ -174,6 +174,8 @@ def main(argv=None) -> int:
     parser.add_argument("--axis", type=int, default=1)
     parser.add_argument("--duration", type=float, default=30.0)
     parser.add_argument("--transport", choices=("visa", "serial", "compare", "labview-reference"), default="visa")
+    parser.add_argument("--query-gap-ms", type=int,
+                        help="Set the LabVIEW reference minimum time between sends (130–2000 ms).")
     parser.add_argument("--gui-inspection", action="store_true", help="Use the GUI's inspection driver over direct serial.")
     parser.add_argument("--output", type=Path, help="JSON destination; default: reports/ beside this module.")
     args = parser.parse_args(argv)
@@ -183,6 +185,9 @@ def main(argv=None) -> int:
         parser.error(f"Use a positive COM number, axis 1–31, and duration 1–{MAX_DURATION_S} seconds.")
     if args.gui_inspection and args.transport != "serial":
         parser.error("--gui-inspection requires --transport serial.")
+    if args.query_gap_ms is not None and (
+            args.transport != "labview-reference" or not 130 <= args.query_gap_ms <= 2000):
+        parser.error("--query-gap-ms requires --transport labview-reference and a value from 130 to 2000.")
     output = args.output or (Path(__file__).resolve().parent / "reports" /
                             ("TC_motor_serial_check_" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + ".json"))
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -195,10 +200,16 @@ def main(argv=None) -> int:
         factory = {"visa": VisaSerialTransport, "serial": DirectSerialTransport,
                    "labview-reference": LabviewReferenceTransport}[mode]
         resource = f"COM{args.port}"
-        result = inspect_serial_link(factory(resource), axis=args.axis, duration_s=args.duration,
+        transport = factory(resource)
+        if args.query_gap_ms is not None:
+            transport.QUERY_GAP_S = args.query_gap_ms / 1000
+            print(f"Minimum time between query sends: {args.query_gap_ms} ms.", flush=True)
+        result = inspect_serial_link(transport, axis=args.axis, duration_s=args.duration,
                                      gui_resource=resource if args.gui_inspection else None,
                                      labview_reference=mode == "labview-reference")
         result["requested_transport"] = mode
+        if args.query_gap_ms is not None:
+            result["requested_min_query_gap_ms"] = args.query_gap_ms
         runs.append(result)
         print(f"{mode}: {'PASS' if result['ok'] else 'FAILED'}; port released: {result['port_released']}", flush=True)
         if not result["port_released"]:

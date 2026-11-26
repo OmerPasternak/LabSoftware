@@ -117,9 +117,10 @@ def test_labview_reference_cli_runs_only_status_and_position_queries(monkeypatch
     monkeypatch.setattr(check, "LabviewReferenceTransport", lambda resource: peer)
     output = tmp_path / "labview-reference.json"
     assert check.main(["--physical", "--port", "21", "--transport", "labview-reference",
-                       "--duration", "1", "--output", str(output)]) == 0
+                       "--duration", "1", "--query-gap-ms", "1000", "--output", str(output)]) == 0
     report = json.loads(output.read_text(encoding="utf-8"))
     assert report["query_sequence"] == "labview_reference" and report["port_released"]
+    assert peer.QUERY_GAP_S == 1.0 and report["requested_min_query_gap_ms"] == 1000
     assert peer.closed and report["completed_duration_s"] == 1
     assert report["successful_snapshots"] > 0
     assert report["completed_visa_windows"] == report["successful_snapshots"]
